@@ -1,0 +1,5 @@
+/dist/
+/telrad-relay
+/telrad-relay.exe
+*.test
+relay.env

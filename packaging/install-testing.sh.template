@@ -1,0 +1,47 @@
+#!/bin/sh
+set -eu
+
+REPOSITORY="@@REPOSITORY@@"
+TAG="@@TAG@@"
+AMD64_ARCHIVE_SHA256="@@AMD64_ARCHIVE_SHA256@@"
+ARM64_ARCHIVE_SHA256="@@ARM64_ARCHIVE_SHA256@@"
+
+for command in awk curl sha256sum tar sudo; do
+    command -v "$command" >/dev/null 2>&1 || {
+        echo "Missing required command: $command" >&2
+        exit 1
+    }
+done
+
+case "$(uname -m)" in
+    x86_64|amd64) artifact_arch="amd64"; expected_archive_sha256="$AMD64_ARCHIVE_SHA256" ;;
+    aarch64|arm64) artifact_arch="arm64"; expected_archive_sha256="$ARM64_ARCHIVE_SHA256" ;;
+    *) echo "This testing release supports Linux x86-64 and arm64 only." >&2; exit 1 ;;
+esac
+
+work_dir="$(mktemp -d)"
+cleanup() {
+    rm -rf "$work_dir"
+}
+trap cleanup EXIT HUP INT TERM
+
+archive="telrad-relay-linux-$artifact_arch.tar.gz"
+download_url="https://github.com/$REPOSITORY/releases/download/$TAG/$archive"
+if ! curl --fail --location --show-error --silent --retry 3 \
+    --output "$work_dir/$archive" \
+    "$download_url"; then
+    echo "Could not download the public testing bundle from $download_url" >&2
+    exit 1
+fi
+actual_archive_sha256="$(sha256sum "$work_dir/$archive" | awk '{print tolower($1)}')"
+if [ "$actual_archive_sha256" != "$expected_archive_sha256" ]; then
+    echo "The public testing bundle does not match this exact installer." >&2
+    exit 1
+fi
+
+mkdir "$work_dir/bundle"
+tar -xzf "$work_dir/$archive" -C "$work_dir/bundle"
+(
+    cd "$work_dir/bundle"
+    sudo ./install.sh
+)

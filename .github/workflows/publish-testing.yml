@@ -1,0 +1,196 @@
+name: Publish testing assets
+
+on:
+    workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+    group: publish-testing-main
+    cancel-in-progress: false
+
+env:
+    GO_VERSION: 1.27.0
+
+jobs:
+    build:
+        name: Build signed testing bundles
+        runs-on: ubuntu-24.04
+        timeout-minutes: 15
+        environment: testing-release
+        permissions:
+            contents: read
+        outputs:
+            tag: ${{ steps.testing.outputs.tag }}
+            version: ${{ steps.testing.outputs.version }}
+        steps:
+            - name: Check out main without persisted credentials
+              uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+              with:
+                  persist-credentials: false
+
+            - name: Set up Go
+              uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+              with:
+                  go-version: ${{ env.GO_VERSION }}
+                  cache-dependency-path: go.sum
+
+            - name: Test source
+              run: |
+                  set -euo pipefail
+                  scripts/check-publication.sh
+                  scripts/check-licenses.sh
+                  test -z "$(gofmt -l .)"
+                  go test ./...
+                  go vet ./...
+
+            - name: Prepare testing identity
+              id: testing
+              run: |
+                  set -euo pipefail
+                  version="0.0.0-testing.${GITHUB_RUN_ID}.${GITHUB_RUN_ATTEMPT}"
+                  tag="testing-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+                  echo "version=$version" >> "$GITHUB_OUTPUT"
+                  echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+            - name: Build local-install testing bundles
+              env:
+                  SIGNING_KEY_BASE64: ${{ secrets.RELAY_TESTING_UPDATE_SIGNING_KEY_BASE64 }}
+                  TAG: ${{ steps.testing.outputs.tag }}
+                  TRUSTED_PUBLIC_KEY_BASE64: ${{ vars.RELAY_TESTING_UPDATE_PUBLIC_KEY_BASE64 }}
+                  VERSION: ${{ steps.testing.outputs.version }}
+              run: |
+                  set -euo pipefail
+                  : "${SIGNING_KEY_BASE64:?testing-release must define RELAY_TESTING_UPDATE_SIGNING_KEY_BASE64}"
+                  : "${TRUSTED_PUBLIC_KEY_BASE64:?testing-release must define the RELAY_TESTING_UPDATE_PUBLIC_KEY_BASE64 variable}"
+                  release_dir="dist/$VERSION"
+                  bundle_root="dist/testing-bundles"
+                  asset_dir="dist/testing-assets"
+                  signing_dir="$(mktemp -d "$RUNNER_TEMP/relay-testing-signing.XXXXXX")"
+                  signing_key="$signing_dir/update-private.pem"
+                  trusted_public_key_der="$signing_dir/update-public.der"
+                  trusted_public_key="$signing_dir/update-public.pem"
+                  cleanup() {
+                      rm -f "$signing_key" "$trusted_public_key_der" "$trusted_public_key"
+                      rmdir "$signing_dir"
+                  }
+                  trap cleanup EXIT
+                  printf '%s' "$SIGNING_KEY_BASE64" | base64 --decode > "$signing_key"
+                  printf '%s' "$TRUSTED_PUBLIC_KEY_BASE64" | base64 --decode > "$trusted_public_key_der"
+                  openssl pkey -pubin -inform DER -in "$trusted_public_key_der" -out "$trusted_public_key"
+                  chmod 0600 "$signing_key" "$trusted_public_key"
+
+                  scripts/build-release.sh "$VERSION"
+                  mkdir -p "$bundle_root" "$asset_dir"
+                  RELAY_RELEASE_DIR="$release_dir" \
+                  RELAY_TESTING_ASSET_DIR="$asset_dir" \
+                  RELAY_TESTING_UPDATE_SIGNING_KEY="$signing_key" \
+                  RELAY_TESTING_UPDATE_PUBLIC_KEY="$trusted_public_key" \
+                      scripts/build-testing-release.sh \
+                      "$VERSION" "$TAG" "$GITHUB_REPOSITORY" "$GITHUB_SHA"
+
+                  jq \
+                      '.controlUrl = "" | .dicomUrl = "" | .hl7Url = "" | .relayId = "" | .updateManifestUrl = "" | .updatePublicKey = ""' \
+                      packaging/relay.example.json > "$bundle_root/relay.example.json"
+
+                  for architecture in amd64 arm64; do
+                      bundle="$bundle_root/linux-$architecture"
+                      mkdir -p "$bundle"
+                      install -m 0755 "$release_dir/telrad-relay-linux-$architecture" "$bundle/telrad-relay"
+                      install -m 0755 packaging/install.sh "$bundle/install.sh"
+                      install -m 0644 "$bundle_root/relay.example.json" "$bundle/relay.example.json"
+                      install -m 0644 "$release_dir/telrad-relay.service" "$bundle/telrad-relay.service"
+                      install -m 0644 "$release_dir/installation-manifest.json" "$bundle/installation-manifest.json"
+                      install -m 0644 "$asset_dir/update-trust.json" "$bundle/update-trust.json"
+                      install -m 0644 LICENSE NOTICE THIRD_PARTY_NOTICES.md "$bundle/"
+                      tar -C "$bundle" -czf "$asset_dir/telrad-relay-linux-$architecture.tar.gz" .
+                  done
+
+                  windows_bundle="$bundle_root/windows-amd64"
+                  mkdir -p "$windows_bundle"
+                  install -m 0644 "$release_dir/telrad-relay-windows-amd64.exe" "$windows_bundle/telrad-relay.exe"
+                  install -m 0644 packaging/install.ps1 "$windows_bundle/install.ps1"
+                  install -m 0644 "$bundle_root/relay.example.json" "$windows_bundle/relay.example.json"
+                  install -m 0644 "$release_dir/installation-manifest.json" "$windows_bundle/installation-manifest.json"
+                  install -m 0644 "$asset_dir/update-trust.json" "$windows_bundle/update-trust.json"
+                  install -m 0644 LICENSE NOTICE THIRD_PARTY_NOTICES.md "$windows_bundle/"
+                  (
+                      cd "$windows_bundle"
+                      zip -qr "../../testing-assets/telrad-relay-windows-amd64.zip" .
+                  )
+
+                  amd64_archive_sha256="$(sha256sum "$asset_dir/telrad-relay-linux-amd64.tar.gz" | awk '{print tolower($1)}')"
+                  arm64_archive_sha256="$(sha256sum "$asset_dir/telrad-relay-linux-arm64.tar.gz" | awk '{print tolower($1)}')"
+                  windows_archive_sha256="$(sha256sum "$asset_dir/telrad-relay-windows-amd64.zip" | awk '{print tolower($1)}')"
+                  sed \
+                      -e "s|@@REPOSITORY@@|$GITHUB_REPOSITORY|g" \
+                      -e "s|@@TAG@@|$TAG|g" \
+                      -e "s|@@AMD64_ARCHIVE_SHA256@@|$amd64_archive_sha256|g" \
+                      -e "s|@@ARM64_ARCHIVE_SHA256@@|$arm64_archive_sha256|g" \
+                      packaging/install-testing.sh.template > "$asset_dir/install.sh"
+                  sed \
+                      -e "s|@@REPOSITORY@@|$GITHUB_REPOSITORY|g" \
+                      -e "s|@@TAG@@|$TAG|g" \
+                      -e "s|@@WINDOWS_ARCHIVE_SHA256@@|$windows_archive_sha256|g" \
+                      packaging/install-testing.ps1.template > "$asset_dir/install.ps1"
+                  chmod 0755 "$asset_dir/install.sh"
+                  test -z "$(grep -l '@@' "$asset_dir/install.sh" "$asset_dir/install.ps1" || true)"
+                  sh -n "$asset_dir/install.sh"
+
+                  (
+                      cd "$asset_dir"
+                      sha256sum * > SHA256SUMS
+                  )
+
+            - name: Upload signed testing assets
+              uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+              with:
+                  name: testing-assets-${{ steps.testing.outputs.tag }}
+                  path: dist/testing-assets/
+                  if-no-files-found: error
+                  retention-days: 7
+
+    publish:
+        name: Publish public testing release
+        needs: build
+        runs-on: ubuntu-24.04
+        timeout-minutes: 5
+        permissions:
+            actions: read
+            contents: write
+        steps:
+            - name: Download signed testing assets
+              uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+              with:
+                  name: testing-assets-${{ needs.build.outputs.tag }}
+                  path: dist/testing-assets
+
+            - name: Publish testing release
+              env:
+                  GH_REPO: ${{ github.repository }}
+                  GH_TOKEN: ${{ github.token }}
+                  TAG: ${{ needs.build.outputs.tag }}
+                  VERSION: ${{ needs.build.outputs.version }}
+              run: |
+                  set -euo pipefail
+                  (
+                      cd dist/testing-assets
+                      sha256sum --check SHA256SUMS
+                  )
+                  gh release create "$TAG" dist/testing-assets/* \
+                      --target "$GITHUB_SHA" \
+                      --prerelease \
+                      --title "Telrad Relay testing build $GITHUB_RUN_ID" \
+                      --notes "Public testing build from main at $GITHUB_SHA. Embedded version: $VERSION. Artifacts and testing.json use the isolated testing update key and are not signed production releases or eligible for production promotion. Updates remain check-only until an administrator approves the exact version."
+
+                  release_url="$(gh release view "$TAG" --json url --jq .url)"
+                  {
+                      echo "## Testing release"
+                      echo
+                      echo "- Release: [$TAG]($release_url)"
+                      echo "- Source: \`$GITHUB_SHA\`"
+                      echo "- Embedded version: \`$VERSION\`"
+                      echo "- Update channel: signed isolated \`testing\`"
+                      echo
+                      echo "Download and run \`install.sh\` on Linux or \`install.ps1\` on Windows. After a later testing release is published, run \`telrad update\` to inspect it and \`telrad update VERSION\` to approve it."
+                  } >> "$GITHUB_STEP_SUMMARY"

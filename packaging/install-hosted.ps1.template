@@ -1,0 +1,254 @@
+param(
+    [string]$VerifyArtifactPath = "",
+    [string]$VerifyDigestPath = "",
+    [string]$ClinicRemoteAddress = "LocalSubnet"
+)
+
+$ErrorActionPreference = "Stop"
+$ArtifactBaseUrl = "@@ARTIFACT_BASE_URL@@"
+$UpdateManifestUrl = "@@UPDATE_MANIFEST_URL@@"
+$PairingUrl = "@@ENROLLMENT_URL@@"
+$TrustedUpdatePublicKey = "@@UPDATE_PUBLIC_KEY@@"
+$TrustedWindowsSignerCertificateSha256 = "@@WINDOWS_SIGNER_CERTIFICATE_SHA256@@"
+$InstallationManifestBase64 = "@@INSTALLATION_MANIFEST_BASE64@@"
+$ServiceName = "TelradRelay"
+$ServiceIdentity = "NT SERVICE\$ServiceName"
+
+function Add-TelradCurrentProcessPath {
+    param([Parameter(Mandatory = $true)][string]$Path)
+
+    $processPath = [Environment]::GetEnvironmentVariable("Path", "Process")
+    if (($processPath -split ";") -contains $Path) {
+        return
+    }
+    $updatedProcessPath = if ([string]::IsNullOrWhiteSpace($processPath)) {
+        $Path
+    } else {
+        "$Path;$processPath"
+    }
+    [Environment]::SetEnvironmentVariable("Path", $updatedProcessPath, "Process")
+}
+
+function Set-TelradDirectoryAcl {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][string]$ServiceAccess
+    )
+
+    & icacls.exe $Path /inheritance:r | Out-Null
+    & icacls.exe $Path /grant:r "SYSTEM:(OI)(CI)F" "BUILTIN\Administrators:(OI)(CI)F" "${ServiceIdentity}:(OI)(CI)$ServiceAccess" | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "Could not secure $Path for the relay service account."
+    }
+}
+
+function Set-TelradFirewallRule {
+    param(
+        [Parameter(Mandatory = $true)][string]$Name,
+        [Parameter(Mandatory = $true)][int]$Port
+    )
+
+    Remove-NetFirewallRule -DisplayName $Name -ErrorAction SilentlyContinue
+    New-NetFirewallRule -DisplayName $Name -Direction Inbound -Action Allow -Protocol TCP -LocalPort $Port -RemoteAddress $ClinicRemoteAddress -Profile Domain,Private | Out-Null
+}
+
+function Assert-TelradReleaseAuthenticity {
+    param(
+        [Parameter(Mandatory = $true)][string]$ArtifactPath,
+        [Parameter(Mandatory = $true)][string]$ExpectedDigest
+    )
+
+    if ($ExpectedDigest -cnotmatch '\A[0-9a-f]{64}\z') {
+        throw "Relay checksum metadata is malformed."
+    }
+    $actualDigest = (Get-FileHash -Algorithm SHA256 -LiteralPath $ArtifactPath).Hash.ToLowerInvariant()
+    if ($actualDigest -cne $ExpectedDigest) {
+        throw "Relay checksum verification failed."
+    }
+
+    if ($TrustedWindowsSignerCertificateSha256 -cnotmatch '\A[0-9a-f]{64}\z') {
+        throw "Trusted Windows signer pin is malformed."
+    }
+    $signature = Get-AuthenticodeSignature -LiteralPath $ArtifactPath
+    if ($signature.Status -ne [System.Management.Automation.SignatureStatus]::Valid -or $null -eq $signature.SignerCertificate) {
+        throw "Relay Authenticode signature verification failed: $($signature.Status)."
+    }
+
+    $sha256 = [Security.Cryptography.SHA256]::Create()
+    try {
+        $certificateDigest = $sha256.ComputeHash($signature.SignerCertificate.RawData)
+    } finally {
+        $sha256.Dispose()
+    }
+    $actualSignerCertificateSha256 = ([BitConverter]::ToString($certificateDigest)).Replace("-", "").ToLowerInvariant()
+    if ($actualSignerCertificateSha256 -cne $TrustedWindowsSignerCertificateSha256) {
+        throw "Relay was signed by an untrusted publisher certificate."
+    }
+}
+
+if (($VerifyArtifactPath -eq "") -xor ($VerifyDigestPath -eq "")) {
+    throw "VerifyArtifactPath and VerifyDigestPath must be provided together."
+}
+if ($VerifyArtifactPath -ne "") {
+    $verificationDigest = [IO.File]::ReadAllText($VerifyDigestPath)
+    Assert-TelradReleaseAuthenticity -ArtifactPath $VerifyArtifactPath -ExpectedDigest $verificationDigest
+    Write-Host "Relay release authenticity verified."
+    return
+}
+
+$identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+$principal = New-Object Security.Principal.WindowsPrincipal($identity)
+if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    throw "Run PowerShell as Administrator."
+}
+if ([Runtime.InteropServices.RuntimeInformation]::OSArchitecture -ne [Runtime.InteropServices.Architecture]::X64) {
+    throw "This release supports Windows x64 only."
+}
+
+$target = Join-Path $env:ProgramFiles "Telrad Relay"
+$configDir = Join-Path $env:ProgramData "Telrad\Relay"
+$binary = Join-Path $target "telrad.exe"
+$hadConfig = Test-Path (Join-Path $configDir "relay.json")
+$hadEnrollment = $false
+$migrationRequired = $false
+if ($hadConfig) {
+    $existingSchema = (Get-Content -Raw (Join-Path $configDir "relay.json") | ConvertFrom-Json).schemaVersion
+    if ($existingSchema -eq 3) {
+        $hadEnrollment = Test-Path (Join-Path $configDir "relay-credential.json")
+    } elseif ($existingSchema -eq 2) {
+        $migrationRequired = $true
+    } else {
+        throw "The installed Relay configuration schema is unsupported."
+    }
+}
+
+$temporary = Join-Path $env:TEMP ("telrad-relay-" + [Guid]::NewGuid().ToString("N"))
+New-Item -ItemType Directory -Path $temporary | Out-Null
+$committed = $false
+$backups = @{}
+try {
+    $download = Join-Path $temporary "telrad-relay.exe"
+    Invoke-WebRequest "$ArtifactBaseUrl/telrad-relay-windows-amd64.exe" -OutFile $download
+    $expected = [string](Invoke-RestMethod "$ArtifactBaseUrl/telrad-relay-windows-amd64.exe.sha256")
+    Assert-TelradReleaseAuthenticity -ArtifactPath $download -ExpectedDigest $expected
+
+    New-Item -ItemType Directory -Force -Path $target, $configDir | Out-Null
+    $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
+    if (($machinePath -split ";") -notcontains $target) {
+        [Environment]::SetEnvironmentVariable("Path", ($machinePath.TrimEnd(";") + ";" + $target), "Machine")
+    }
+
+    $existing = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+    if ($existing) { Stop-Service $ServiceName -Force -ErrorAction SilentlyContinue }
+    foreach ($path in @(
+        $binary,
+        (Join-Path $target "update-trust.json"),
+        (Join-Path $configDir "relay.json"),
+        (Join-Path $configDir "relay.crt"),
+        (Join-Path $configDir "relay.key"),
+        (Join-Path $configDir "ca.crt"),
+        (Join-Path $configDir "update-public-key.pem"),
+        (Join-Path $configDir "installation.json")
+    )) {
+        if (Test-Path -LiteralPath $path) {
+            $backup = Join-Path $temporary ([Guid]::NewGuid().ToString("N"))
+            Copy-Item -LiteralPath $path -Destination $backup
+            $backups[$path] = $backup
+        } else {
+            $backups[$path] = $null
+        }
+    }
+    Copy-Item $download $binary -Force
+
+    if (-not $hadConfig) {
+        $config = @{
+            schemaVersion = 3
+            pairingUrl = $PairingUrl
+            controlUrl = ""
+            dicomUrl = ""
+            hl7Url = ""
+            relayId = ""
+            credentialPath = (Join-Path $configDir "relay-credential.json")
+            listenAddress = "0.0.0.0"
+            dicomPort = 11112
+            hl7Port = 2575
+            reportHost = "127.0.0.1"
+            reportPort = 2576
+            maxConnections = 256
+            maxDicomConnections = 128
+            maxHl7Connections = 128
+            connectTimeoutSeconds = 10
+            tlsHandshakeTimeoutSeconds = 15
+            responseHeaderTimeoutSeconds = 30
+            dicomIdleTimeoutSeconds = 300
+            dicomLifetimeSeconds = 7200
+            hl7IdleTimeoutSeconds = 0
+            hl7LifetimeSeconds = 0
+            hl7MaxBytes = 1048576
+        }
+        $config | ConvertTo-Json | Set-Content -Encoding UTF8 (Join-Path $configDir "relay.json")
+    }
+    if ($migrationRequired) {
+        & $binary `
+            --config (Join-Path $configDir "relay.json") `
+            --migration-pairing-url $PairingUrl `
+            --migration-update-manifest-url $UpdateManifestUrl `
+            --migration-update-public-key $TrustedUpdatePublicKey `
+            migrate-config
+        if ($LASTEXITCODE -ne 0) { throw "Relay configuration migration failed." }
+    }
+    $updateTrust = [ordered]@{
+        schemaVersion = 1
+        channel = "stable"
+        manifestUrl = $UpdateManifestUrl
+        publicKey = $TrustedUpdatePublicKey
+    } | ConvertTo-Json
+    [IO.File]::WriteAllText(
+        (Join-Path $target "update-trust.json"),
+        $updateTrust,
+        [Text.UTF8Encoding]::new($false)
+    )
+    $serviceCommand = '"' + $binary + '" run'
+    $startMode = if ($hadEnrollment) { "auto" } else { "demand" }
+    if ($existing) {
+        sc.exe config $ServiceName binPath= $serviceCommand start= $startMode obj= $ServiceIdentity password= "" | Out-Null
+    } else {
+        sc.exe create $ServiceName binPath= $serviceCommand start= $startMode obj= $ServiceIdentity password= "" DisplayName= "Telrad Relay" | Out-Null
+        sc.exe failure $ServiceName reset= 86400 actions= restart/5000/restart/5000/restart/5000 | Out-Null
+    }
+    sc.exe sidtype $ServiceName unrestricted | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "Could not enable the relay service SID." }
+
+    Set-TelradDirectoryAcl -Path $target -ServiceAccess "RX"
+    Set-TelradDirectoryAcl -Path $configDir -ServiceAccess "M"
+    Set-TelradFirewallRule -Name "Telrad Relay DICOM" -Port 11112
+    Set-TelradFirewallRule -Name "Telrad Relay HL7" -Port 2575
+    if (-not [Diagnostics.EventLog]::SourceExists($ServiceName)) {
+        New-EventLog -LogName Application -Source $ServiceName
+    }
+    [IO.File]::WriteAllBytes((Join-Path $configDir "installation.json"), [Convert]::FromBase64String($InstallationManifestBase64))
+    if ($hadEnrollment) {
+        Start-Service $ServiceName
+        Write-Host "Telrad Relay updated and restarted."
+    } else {
+        Write-Host "Telrad Relay installed. Run 'telrad' to authenticate and start it."
+    }
+    Add-TelradCurrentProcessPath -Path $target
+    $committed = $true
+} catch {
+    if (-not $committed) {
+        foreach ($path in $backups.Keys) {
+            if ($null -eq $backups[$path]) {
+                Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+            } else {
+                Copy-Item -LiteralPath $backups[$path] -Destination $path -Force
+            }
+        }
+        if ($hadEnrollment -and (Test-Path -LiteralPath $binary)) {
+            Start-Service $ServiceName -ErrorAction SilentlyContinue
+        }
+    }
+    throw
+} finally {
+    Remove-Item -Recurse -Force $temporary -ErrorAction SilentlyContinue
+}

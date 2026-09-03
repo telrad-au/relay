@@ -1,0 +1,34 @@
+$ErrorActionPreference = "Stop"
+
+$repository = "@@REPOSITORY@@"
+$tag = "@@TAG@@"
+$expectedArchiveSha256 = "@@WINDOWS_ARCHIVE_SHA256@@"
+
+$workDirectory = Join-Path ([IO.Path]::GetTempPath()) ("telrad-relay-testing-" + [guid]::NewGuid())
+New-Item -ItemType Directory -Path $workDirectory | Out-Null
+
+try {
+    $archive = "telrad-relay-windows-amd64.zip"
+    $downloadUrl = "https://github.com/$repository/releases/download/$tag/$archive"
+    try {
+        Invoke-WebRequest -Uri $downloadUrl -OutFile (Join-Path $workDirectory $archive) -UseBasicParsing
+    }
+    catch {
+        throw "Could not download the public testing bundle from ${downloadUrl}: $($_.Exception.Message)"
+    }
+    $actualArchiveSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $workDirectory $archive)).Hash.ToLowerInvariant()
+    if ($actualArchiveSha256 -cne $expectedArchiveSha256) {
+        throw "The public testing bundle does not match this exact installer."
+    }
+
+    $bundleDirectory = Join-Path $workDirectory "bundle"
+    Expand-Archive -Path (Join-Path $workDirectory $archive) -DestinationPath $bundleDirectory
+    & (Join-Path $bundleDirectory "install.ps1")
+    if ($LASTEXITCODE -ne 0) {
+        throw "The testing bundle installer failed."
+    }
+
+}
+finally {
+    Remove-Item -Recurse -Force $workDirectory -ErrorAction SilentlyContinue
+}

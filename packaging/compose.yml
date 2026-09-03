@@ -1,0 +1,30 @@
+services:
+  relay:
+    image: ${TELRAD_RELAY_IMAGE:?Set TELRAD_RELAY_IMAGE to an immutable version and digest}
+    restart: unless-stopped
+    # Prevent writes outside the persistent relay-data volume.
+    read_only: true
+    # Relay does not require any additional Linux capabilities.
+    cap_drop:
+      - ALL
+    # Prevent the process from gaining additional privileges.
+    security_opt:
+      - no-new-privileges:true
+    # Allow active DICOM and HL7 exchanges to finish during shutdown.
+    stop_grace_period: 2m
+    environment:
+      # Optional override for development or a self-hosted Telrad control plane.
+      TELRAD_RELAY_PAIRING_URL: ${TELRAD_RELAY_PAIRING_URL:-}
+      # Hostname or IP address that receives returned reports.
+      TELRAD_RELAY_REPORT_DESTINATION_HOST: ${TELRAD_RELAY_REPORT_DESTINATION_HOST:?Set the report destination hostname or address}
+      # TCP port used by the report destination.
+      TELRAD_RELAY_REPORT_DESTINATION_PORT: ${TELRAD_RELAY_REPORT_DESTINATION_PORT:-2576}
+    ports:
+      - ${TELRAD_RELAY_BIND_ADDRESS:?Set the clinic-facing host address}:11112:11112/tcp
+      - ${TELRAD_RELAY_BIND_ADDRESS:?Set the clinic-facing host address}:2575:2575/tcp
+    volumes:
+      - relay-data:/var/lib/telrad-relay
+
+volumes:
+  relay-data:
+    name: telrad-relay-data

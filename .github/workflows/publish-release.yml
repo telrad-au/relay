@@ -1,0 +1,649 @@
+name: Publish stable release
+
+on:
+    push:
+        tags:
+            - "v*.*.*"
+            - "!v*.*.*-*"
+
+permissions: {}
+
+concurrency:
+    group: publish-stable
+    cancel-in-progress: false
+
+env:
+    GO_VERSION: 1.27.0
+    GOVULNCHECK_VERSION: v1.7.0
+    IMAGE: ghcr.io/telrad-au/relay
+    PACKAGE_API_PATH: orgs/telrad-au/packages/container/relay
+
+jobs:
+    plan:
+        name: Plan stable release
+        runs-on: ubuntu-24.04
+        timeout-minutes: 15
+        permissions:
+            actions: read
+            contents: read
+            packages: read
+        outputs:
+            digest: ${{ steps.promotion.outputs.digest }}
+            platforms: ${{ steps.promotion.outputs.platforms }}
+            prerelease: ${{ steps.promotion.outputs.prerelease }}
+            revision: ${{ steps.promotion.outputs.revision }}
+        steps:
+            - name: Check out tagged source without persisted credentials
+              uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+              with:
+                  fetch-depth: 0
+                  persist-credentials: false
+
+            - name: Set up Go
+              uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+              with:
+                  go-version: ${{ env.GO_VERSION }}
+                  cache-dependency-path: go.sum
+
+            - name: Set up Docker Buildx
+              uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4
+
+            - name: Validate immutable stable release inputs
+              env:
+                  GH_TOKEN: ${{ github.token }}
+                  REPOSITORY_PRIVATE: ${{ github.event.repository.private }}
+                  TAG: ${{ github.ref_name }}
+              run: |
+                  set -euo pipefail
+                  [[ "$REPOSITORY_PRIVATE" == "false" ]] || {
+                      echo "Stable publishing is disabled while the repository is private." >&2
+                      exit 1
+                  }
+                  [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+                      echo "Tag must be stable SemVer (for example v2.1.0)." >&2
+                      exit 1
+                  }
+                  [[ "$(git cat-file -t "$TAG")" == "tag" ]] || {
+                      echo "Stable releases require an annotated tag." >&2
+                      exit 1
+                  }
+                  revision="$(git rev-parse "$TAG^{commit}")"
+                  git merge-base --is-ancestor "$revision" origin/main || {
+                      echo "Stable release commit $revision is not on main." >&2
+                      exit 1
+                  }
+                  mapfile -t stable_tags < <(git tag --list | grep -E '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' || true)
+                  go run ./tools/container-promotion guard-stable \
+                      --candidate "$TAG" \
+                      "${stable_tags[@]}" >/dev/null
+                  gh api \
+                      --header 'X-GitHub-Api-Version: 2026-03-10' \
+                      "repos/$GITHUB_REPOSITORY/immutable-releases" \
+                      --jq 'select(.enabled == true)' >/dev/null || {
+                      echo "GitHub immutable releases must be enabled before stable publishing." >&2
+                      exit 1
+                  }
+                  package_visibility="$(gh api "$PACKAGE_API_PATH" --jq .visibility)"
+                  [[ "$package_visibility" == "public" ]] || {
+                      echo "The GHCR package must be public before stable publishing." >&2
+                      exit 1
+                  }
+                  if gh release view "$TAG" >/dev/null 2>&1; then
+                      echo "Refusing to replace existing release $TAG." >&2
+                      exit 1
+                  fi
+                  scripts/promote-container.sh check "$IMAGE" "$TAG"
+
+            - name: Select tested prerelease container
+              id: promotion
+              env:
+                  GH_TOKEN: ${{ github.token }}
+                  TAG: ${{ github.ref_name }}
+              run: |
+                  set -euo pipefail
+                  selected="$(scripts/select-container-promotion.sh "$TAG" "$IMAGE")"
+                  prerelease="$(jq --raw-output .prerelease <<< "$selected")"
+                  digest="$(jq --raw-output .digest <<< "$selected")"
+                  revision="$(jq --raw-output .revision <<< "$selected")"
+                  platforms="$(jq --raw-output '.platforms | join(", ")' <<< "$selected")"
+                  echo "prerelease=$prerelease" >> "$GITHUB_OUTPUT"
+                  echo "digest=$digest" >> "$GITHUB_OUTPUT"
+                  echo "revision=$revision" >> "$GITHUB_OUTPUT"
+                  echo "platforms=$platforms" >> "$GITHUB_OUTPUT"
+                  {
+                      echo "## Stable release awaiting approval"
+                      echo
+                      echo "No production signing or publication has occurred. Review this immutable plan before approving the production environment:"
+                      echo
+                      echo "- Stable tag: \`$TAG\`"
+                      echo "- Source revision: \`$revision\`"
+                      echo "- Selected prerelease: \`$prerelease\`"
+                      echo "- Container digest: \`$digest\`"
+                      echo "- Platforms: \`$platforms\`"
+                      echo "- Signing environment: \`production-release\`"
+                  } >> "$GITHUB_STEP_SUMMARY"
+
+    build-native:
+        name: Build unsigned native release
+        needs: plan
+        runs-on: ubuntu-24.04
+        timeout-minutes: 60
+        permissions:
+            contents: read
+        steps:
+            - name: Check out tagged source without persisted credentials
+              uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+              with:
+                  fetch-depth: 0
+                  persist-credentials: false
+
+            - name: Set up Go
+              uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+              with:
+                  go-version: ${{ env.GO_VERSION }}
+                  cache-dependency-path: go.sum
+
+            - name: Test relay
+              run: |
+                  set -euo pipefail
+                  scripts/check-publication.sh
+                  scripts/check-licenses.sh
+                  test -z "$(gofmt -l .)"
+                  go test -race ./...
+                  go vet ./...
+                  go install "golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION}"
+                  govulncheck ./...
+
+            - name: Build unsigned native bundle
+              env:
+                  TAG: ${{ github.ref_name }}
+              run: |
+                  set -euo pipefail
+                  version="${TAG#v}"
+                  RELAY_RELEASE_DIR="dist/$TAG" \
+                      scripts/build-release.sh "$version"
+
+            - name: Upload unsigned native release
+              uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+              with:
+                  name: unsigned-release-${{ github.ref_name }}
+                  path: dist/${{ github.ref_name }}/
+                  if-no-files-found: error
+                  retention-days: 14
+
+    sign-native:
+        name: Sign and finalize native release
+        needs:
+            - plan
+            - build-native
+        runs-on: windows-2025
+        timeout-minutes: 45
+        environment: production-release
+        permissions:
+            contents: read
+            id-token: write
+        steps:
+            - name: Check out tagged source without persisted credentials
+              uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+              with:
+                  fetch-depth: 0
+                  persist-credentials: false
+
+            - name: Set up Go
+              uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+              with:
+                  go-version: ${{ env.GO_VERSION }}
+                  cache-dependency-path: go.sum
+
+            - name: Download unsigned native release
+              uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+              with:
+                  name: unsigned-release-${{ github.ref_name }}
+                  path: dist/${{ github.ref_name }}
+
+            - name: Validate protected signing configuration
+              shell: bash
+              env:
+                  AZURE_ARTIFACT_SIGNING_ACCOUNT_NAME: ${{ secrets.AZURE_ARTIFACT_SIGNING_ACCOUNT_NAME }}
+                  AZURE_ARTIFACT_SIGNING_CERTIFICATE_PROFILE_NAME: ${{ secrets.AZURE_ARTIFACT_SIGNING_CERTIFICATE_PROFILE_NAME }}
+                  AZURE_ARTIFACT_SIGNING_CLIENT_ID: ${{ secrets.AZURE_ARTIFACT_SIGNING_CLIENT_ID }}
+                  AZURE_ARTIFACT_SIGNING_ENDPOINT: ${{ secrets.AZURE_ARTIFACT_SIGNING_ENDPOINT }}
+                  AZURE_ARTIFACT_SIGNING_SUBSCRIPTION_ID: ${{ secrets.AZURE_ARTIFACT_SIGNING_SUBSCRIPTION_ID }}
+                  AZURE_ARTIFACT_SIGNING_TENANT_ID: ${{ secrets.AZURE_ARTIFACT_SIGNING_TENANT_ID }}
+                  ENROLLMENT_URL: ${{ vars.RELAY_ENROLLMENT_URL }}
+                  UPDATE_SIGNING_KEY_BASE64: ${{ secrets.RELAY_UPDATE_SIGNING_KEY_BASE64 }}
+                  UPDATE_TRUSTED_PUBLIC_KEY_BASE64: ${{ secrets.RELAY_UPDATE_TRUSTED_PUBLIC_KEY_BASE64 }}
+              run: |
+                  set -euo pipefail
+                  for required in \
+                      AZURE_ARTIFACT_SIGNING_ACCOUNT_NAME \
+                      AZURE_ARTIFACT_SIGNING_CERTIFICATE_PROFILE_NAME \
+                      AZURE_ARTIFACT_SIGNING_CLIENT_ID \
+                      AZURE_ARTIFACT_SIGNING_ENDPOINT \
+                      AZURE_ARTIFACT_SIGNING_SUBSCRIPTION_ID \
+                      AZURE_ARTIFACT_SIGNING_TENANT_ID \
+                      ENROLLMENT_URL \
+                      UPDATE_SIGNING_KEY_BASE64 \
+                      UPDATE_TRUSTED_PUBLIC_KEY_BASE64; do
+                      [[ -n "${!required:-}" ]] || {
+                          echo "production-release must define $required." >&2
+                          exit 1
+                      }
+                  done
+                  [[ "$AZURE_ARTIFACT_SIGNING_ENDPOINT" =~ ^https://[a-z0-9-]+\.codesigning\.azure\.net/?$ ]] || {
+                      echo "Azure Artifact Signing endpoint is not a regional codesigning.azure.net HTTPS endpoint." >&2
+                      exit 1
+                  }
+                  container_pairing_url="$(jq --raw-output .pairingUrl packaging/docker-relay.json)"
+                  [[ "$ENROLLMENT_URL" == "$container_pairing_url" ]] || {
+                      echo "Production native and container pairing endpoints do not match." >&2
+                      exit 1
+                  }
+
+            - name: Sign in to Azure with GitHub OIDC
+              uses: azure/login@7ddb5af1ef8758cf1353cf3b42f940aee27ba21c # v3
+              with:
+                  client-id: ${{ secrets.AZURE_ARTIFACT_SIGNING_CLIENT_ID }}
+                  tenant-id: ${{ secrets.AZURE_ARTIFACT_SIGNING_TENANT_ID }}
+                  subscription-id: ${{ secrets.AZURE_ARTIFACT_SIGNING_SUBSCRIPTION_ID }}
+
+            - name: Sign Windows binary with Azure Artifact Signing
+              uses: azure/artifact-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2
+              with:
+                  endpoint: ${{ secrets.AZURE_ARTIFACT_SIGNING_ENDPOINT }}
+                  signing-account-name: ${{ secrets.AZURE_ARTIFACT_SIGNING_ACCOUNT_NAME }}
+                  certificate-profile-name: ${{ secrets.AZURE_ARTIFACT_SIGNING_CERTIFICATE_PROFILE_NAME }}
+                  files: ${{ github.workspace }}\dist\${{ github.ref_name }}\telrad-relay-windows-amd64.exe
+                  file-digest: SHA256
+                  timestamp-rfc3161: http://timestamp.acs.microsoft.com
+                  timestamp-digest: SHA256
+                  description: Telrad Relay
+                  description-url: https://github.com/${{ github.repository }}
+                  exclude-environment-credential: true
+                  cache-dependencies: false
+
+            - name: Verify timestamped Authenticode signature
+              shell: pwsh
+              run: |
+                  ./scripts/verify-windows-signature.ps1 `
+                      -Path '${{ github.workspace }}\dist\${{ github.ref_name }}\telrad-relay-windows-amd64.exe' `
+                      -SignerPinOutputPath '${{ github.workspace }}\dist\${{ github.ref_name }}\windows-signer-certificate-sha256.txt'
+
+            - name: Finalize and verify signed native bundle
+              shell: bash
+              env:
+                  ENROLLMENT_URL: ${{ vars.RELAY_ENROLLMENT_URL }}
+                  TAG: ${{ github.ref_name }}
+                  UPDATE_SIGNING_KEY_BASE64: ${{ secrets.RELAY_UPDATE_SIGNING_KEY_BASE64 }}
+                  UPDATE_TRUSTED_PUBLIC_KEY_BASE64: ${{ secrets.RELAY_UPDATE_TRUSTED_PUBLIC_KEY_BASE64 }}
+              run: |
+                  set -euo pipefail
+                  signing_dir="$(mktemp -d)"
+                  cleanup() {
+                      rm -rf "$signing_dir"
+                  }
+                  trap cleanup EXIT
+                  chmod 0700 "$signing_dir"
+                  printf '%s' "$UPDATE_SIGNING_KEY_BASE64" | base64 --decode > "$signing_dir/update-private.pem"
+                  printf '%s' "$UPDATE_TRUSTED_PUBLIC_KEY_BASE64" | base64 --decode > "$signing_dir/update-public.pem"
+                  chmod 0600 "$signing_dir"/*
+
+                  version="${TAG#v}"
+                  release_base_url="https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG"
+                  update_manifest_url="https://github.com/$GITHUB_REPOSITORY/releases/latest/download/stable.json"
+                  RELAY_UPDATE_SIGNING_KEY="$signing_dir/update-private.pem" \
+                  RELAY_UPDATE_TRUSTED_PUBLIC_KEY="$signing_dir/update-public.pem" \
+                  RELAY_WINDOWS_SIGNER_CERTIFICATE_SHA256_FILE="dist/$TAG/windows-signer-certificate-sha256.txt" \
+                  RELAY_WINDOWS_SIGNATURE_VERIFIED=true \
+                  RELAY_RELEASE_DIR="dist/$TAG" \
+                      scripts/finalize-signed-release.sh \
+                      "$version" \
+                      "$release_base_url" \
+                      "$update_manifest_url" \
+                      "$ENROLLMENT_URL"
+
+            - name: Upload signed native release
+              uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+              with:
+                  name: signed-release-base-${{ github.ref_name }}
+                  path: dist/${{ github.ref_name }}/
+                  if-no-files-found: error
+                  retention-days: 14
+
+    attest-native:
+        name: Attest signed native release
+        needs: sign-native
+        runs-on: ubuntu-24.04
+        timeout-minutes: 20
+        permissions:
+            attestations: write
+            artifact-metadata: write
+            contents: read
+            id-token: write
+        steps:
+            - name: Download signed native release
+              uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+              with:
+                  name: signed-release-base-${{ github.ref_name }}
+                  path: dist/${{ github.ref_name }}
+
+            - name: Generate Linux amd64 SBOM
+              uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+              with:
+                  path: dist/${{ github.ref_name }}/telrad-relay-linux-amd64
+                  format: spdx-json
+                  output-file: dist/${{ github.ref_name }}/telrad-relay-linux-amd64.spdx.json
+                  upload-artifact: false
+                  upload-release-assets: false
+
+            - name: Generate Linux arm64 SBOM
+              uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+              with:
+                  path: dist/${{ github.ref_name }}/telrad-relay-linux-arm64
+                  format: spdx-json
+                  output-file: dist/${{ github.ref_name }}/telrad-relay-linux-arm64.spdx.json
+                  upload-artifact: false
+                  upload-release-assets: false
+
+            - name: Generate Windows amd64 SBOM
+              uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+              with:
+                  path: dist/${{ github.ref_name }}/telrad-relay-windows-amd64.exe
+                  format: spdx-json
+                  output-file: dist/${{ github.ref_name }}/telrad-relay-windows-amd64.exe.spdx.json
+                  upload-artifact: false
+                  upload-release-assets: false
+
+            - name: Generate release checksums
+              env:
+                  TAG: ${{ github.ref_name }}
+              run: |
+                  set -euo pipefail
+                  release_dir="dist/$TAG"
+                  (
+                      cd "$release_dir"
+                      for artifact in *; do
+                          [[ -f "$artifact" ]] || continue
+                          sha256sum "$artifact"
+                      done | LC_ALL=C sort --key=2 > SHA256SUMS
+                  )
+
+            - name: Attest native build provenance
+              id: native-provenance
+              uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.1
+              with:
+                  subject-checksums: dist/${{ github.ref_name }}/SHA256SUMS
+
+            - name: Attest Linux amd64 SBOM
+              id: linux-amd64-sbom
+              uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.1
+              with:
+                  subject-path: dist/${{ github.ref_name }}/telrad-relay-linux-amd64
+                  sbom-path: dist/${{ github.ref_name }}/telrad-relay-linux-amd64.spdx.json
+
+            - name: Attest Linux arm64 SBOM
+              id: linux-arm64-sbom
+              uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.1
+              with:
+                  subject-path: dist/${{ github.ref_name }}/telrad-relay-linux-arm64
+                  sbom-path: dist/${{ github.ref_name }}/telrad-relay-linux-arm64.spdx.json
+
+            - name: Attest Windows amd64 SBOM
+              id: windows-amd64-sbom
+              uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.1
+              with:
+                  subject-path: dist/${{ github.ref_name }}/telrad-relay-windows-amd64.exe
+                  sbom-path: dist/${{ github.ref_name }}/telrad-relay-windows-amd64.exe.spdx.json
+
+            - name: Preserve attestation bundles
+              env:
+                  LINUX_AMD64_SBOM_BUNDLE: ${{ steps.linux-amd64-sbom.outputs.bundle-path }}
+                  LINUX_ARM64_SBOM_BUNDLE: ${{ steps.linux-arm64-sbom.outputs.bundle-path }}
+                  NATIVE_PROVENANCE_BUNDLE: ${{ steps.native-provenance.outputs.bundle-path }}
+                  TAG: ${{ github.ref_name }}
+                  WINDOWS_AMD64_SBOM_BUNDLE: ${{ steps.windows-amd64-sbom.outputs.bundle-path }}
+              run: |
+                  set -euo pipefail
+                  release_dir="dist/$TAG"
+                  cp "$NATIVE_PROVENANCE_BUNDLE" "$release_dir/native-provenance.sigstore.json"
+                  cp "$LINUX_AMD64_SBOM_BUNDLE" "$release_dir/telrad-relay-linux-amd64-sbom.sigstore.json"
+                  cp "$LINUX_ARM64_SBOM_BUNDLE" "$release_dir/telrad-relay-linux-arm64-sbom.sigstore.json"
+                  cp "$WINDOWS_AMD64_SBOM_BUNDLE" "$release_dir/telrad-relay-windows-amd64.exe-sbom.sigstore.json"
+
+            - name: Upload attested native release
+              uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+              with:
+                  name: signed-release-${{ github.ref_name }}
+                  path: dist/${{ github.ref_name }}/
+                  if-no-files-found: error
+                  retention-days: 14
+
+    publish:
+        name: Publish immutable release and finalize channels
+        needs:
+            - plan
+            - attest-native
+        runs-on: ubuntu-24.04
+        timeout-minutes: 30
+        permissions:
+            actions: read
+            attestations: write
+            artifact-metadata: write
+            contents: write
+            id-token: write
+            packages: write
+        steps:
+            - name: Check out tagged source without persisted credentials
+              uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+              with:
+                  fetch-depth: 0
+                  persist-credentials: false
+
+            - name: Set up Go
+              uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+              with:
+                  go-version: ${{ env.GO_VERSION }}
+                  cache-dependency-path: go.sum
+
+            - name: Set up Docker Buildx
+              uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4
+
+            - name: Sign in to GHCR
+              uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4
+              with:
+                  registry: ghcr.io
+                  username: ${{ github.actor }}
+                  password: ${{ github.token }}
+
+            - name: Download signed native release
+              uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+              with:
+                  name: signed-release-${{ github.ref_name }}
+                  path: dist/${{ github.ref_name }}
+
+            - name: Revalidate approved release plan and signed artifacts
+              env:
+                  APPROVED_DIGEST: ${{ needs.plan.outputs.digest }}
+                  APPROVED_PRERELEASE: ${{ needs.plan.outputs.prerelease }}
+                  APPROVED_REVISION: ${{ needs.plan.outputs.revision }}
+                  GH_TOKEN: ${{ github.token }}
+                  TAG: ${{ github.ref_name }}
+              run: |
+                  set -euo pipefail
+                  revision="$(git rev-parse "$TAG^{commit}")"
+                  [[ "$revision" == "$APPROVED_REVISION" ]] || {
+                      echo "Stable tag revision changed after approval planning." >&2
+                      exit 1
+                  }
+                  if gh release view "$TAG" >/dev/null 2>&1; then
+                      echo "Refusing to replace existing release $TAG." >&2
+                      exit 1
+                  fi
+                  scripts/promote-container.sh check "$IMAGE" "$TAG"
+                  selected="$(scripts/select-container-promotion.sh "$TAG" "$IMAGE")"
+                  [[ "$(jq --raw-output .prerelease <<< "$selected")" == "$APPROVED_PRERELEASE" && \
+                      "$(jq --raw-output .digest <<< "$selected")" == "$APPROVED_DIGEST" && \
+                      "$(jq --raw-output .revision <<< "$selected")" == "$APPROVED_REVISION" ]] || {
+                      echo "The selected prerelease plan changed after approval; start a new workflow run and review the new plan." >&2
+                      exit 1
+                  }
+                  (
+                      cd "dist/$TAG"
+                      sha256sum --check SHA256SUMS
+                  )
+
+            - name: Promote immutable stable container tag
+              env:
+                  DIGEST: ${{ needs.plan.outputs.digest }}
+                  PRERELEASE: ${{ needs.plan.outputs.prerelease }}
+                  TAG: ${{ github.ref_name }}
+              run: scripts/promote-container.sh promote-stable "$IMAGE" "$PRERELEASE" "$TAG" "$DIGEST"
+
+            - name: Prepare container release attestation
+              env:
+                  DIGEST: ${{ needs.plan.outputs.digest }}
+                  TAG: ${{ github.ref_name }}
+              run: |
+                  set -euo pipefail
+                  version="${TAG#v}"
+                  digest_value="${DIGEST#sha256:}"
+                  purl="pkg:oci/relay@sha256%3A$digest_value?repository_url=$IMAGE&tag=$version"
+                  jq --null-input \
+                      --arg package_id "$IMAGE" \
+                      --arg purl "$purl" \
+                      '{purl: $purl, packageId: $package_id}' \
+                      > container-release-predicate.json
+
+            - name: Attest promoted container digest
+              uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.1
+              with:
+                  subject-name: ${{ env.IMAGE }}
+                  subject-digest: ${{ needs.plan.outputs.digest }}
+                  predicate-type: https://in-toto.io/attestation/release/v0.1
+                  predicate-path: container-release-predicate.json
+                  push-to-registry: true
+
+            - name: Verify immutable outputs and attestations
+              env:
+                  DIGEST: ${{ needs.plan.outputs.digest }}
+                  GH_TOKEN: ${{ github.token }}
+                  PRERELEASE: ${{ needs.plan.outputs.prerelease }}
+                  TAG: ${{ github.ref_name }}
+              run: |
+                  set -euo pipefail
+                  version="${TAG#v}"
+                  docker buildx imagetools inspect "$IMAGE@$DIGEST" --format '{{json .Manifest}}' > manifest.json
+                  jq --exit-status 'any(.manifests[]; .platform.os == "linux" and .platform.architecture == "amd64")' manifest.json >/dev/null
+                  jq --exit-status 'any(.manifests[]; .platform.os == "linux" and .platform.architecture == "arm64")' manifest.json >/dev/null
+                  source_digest="$(docker buildx imagetools inspect "$IMAGE@$DIGEST" | awk '/^Digest:/ {print $2; exit}')"
+                  prerelease_digest="$(docker buildx imagetools inspect "$IMAGE:${PRERELEASE#v}" | awk '/^Digest:/ {print $2; exit}')"
+                  version_digest="$(docker buildx imagetools inspect "$IMAGE:$version" | awk '/^Digest:/ {print $2; exit}')"
+                  [[ "$source_digest" == "$DIGEST" && \
+                      "$prerelease_digest" == "$DIGEST" && \
+                      "$version_digest" == "$DIGEST" ]] || {
+                      echo "Prerelease and stable image references do not both resolve to $DIGEST." >&2
+                      exit 1
+                  }
+                  package_visibility="$(gh api "$PACKAGE_API_PATH" --jq .visibility)"
+                  [[ "$package_visibility" == "public" ]] || {
+                      echo "Published GHCR package is not public." >&2
+                      exit 1
+                  }
+                  gh attestation verify "oci://$IMAGE@$DIGEST" \
+                      --repo "$GITHUB_REPOSITORY" \
+                      --predicate-type https://in-toto.io/attestation/release/v0.1
+                  for artifact in \
+                      "dist/$TAG/telrad-relay-linux-amd64" \
+                      "dist/$TAG/telrad-relay-linux-arm64" \
+                      "dist/$TAG/telrad-relay-windows-amd64.exe"; do
+                      gh attestation verify "$artifact" --repo "$GITHUB_REPOSITORY"
+                      gh attestation verify "$artifact" \
+                          --repo "$GITHUB_REPOSITORY" \
+                          --predicate-type https://spdx.dev/Document/v2.3
+                  done
+
+            - name: Create immutable GitHub release
+              env:
+                  DIGEST: ${{ needs.plan.outputs.digest }}
+                  GH_TOKEN: ${{ github.token }}
+                  PRERELEASE: ${{ needs.plan.outputs.prerelease }}
+                  REVISION: ${{ needs.plan.outputs.revision }}
+                  TAG: ${{ github.ref_name }}
+              run: |
+                  set -euo pipefail
+                  version="${TAG#v}"
+                  notes_file="$RUNNER_TEMP/release-notes.md"
+                  {
+                      echo "Signed production release."
+                      echo
+                      echo "Container: \`$IMAGE:$version\`"
+                      echo "Container promoted from: \`$PRERELEASE\`"
+                      echo "Container digest: \`$DIGEST\`"
+                      echo "Source revision: \`$REVISION\`"
+                      echo
+                      echo "Linux installer: https://github.com/$GITHUB_REPOSITORY/releases/latest/download/install.sh"
+                      echo "Windows installer: https://github.com/$GITHUB_REPOSITORY/releases/latest/download/install.ps1"
+                      echo
+                      echo "Verify a downloaded native artifact with \`sha256sum --check SHA256SUMS\` and \`gh attestation verify FILE --repo $GITHUB_REPOSITORY\`. The relay also verifies the Ed25519 signatures before applying native updates."
+                  } > "$notes_file"
+                  gh release create "$TAG" "dist/$TAG/"* \
+                      --draft \
+                      --generate-notes \
+                      --notes-file "$notes_file" \
+                      --title "Telrad Relay $version" \
+                      --verify-tag
+                  gh release edit "$TAG" --draft=false --latest
+                  release_state="$(gh release view "$TAG" --json isDraft,isPrerelease,tagName --jq '[.tagName, .isDraft, .isPrerelease] | @tsv')"
+                  [[ "$release_state" == "$TAG"$'\tfalse\tfalse' ]] || {
+                      echo "GitHub did not report $TAG as a published stable release." >&2
+                      exit 1
+                  }
+
+            - name: Advance latest container tag last
+              env:
+                  DIGEST: ${{ needs.plan.outputs.digest }}
+                  TAG: ${{ github.ref_name }}
+              run: scripts/promote-container.sh promote-latest "$IMAGE" "$TAG" "$DIGEST"
+
+            - name: Verify finalized release channels
+              env:
+                  DIGEST: ${{ needs.plan.outputs.digest }}
+                  GH_TOKEN: ${{ github.token }}
+                  TAG: ${{ github.ref_name }}
+              run: |
+                  set -euo pipefail
+                  latest_digest="$(docker buildx imagetools inspect "$IMAGE:latest" | awk '/^Digest:/ {print $2; exit}')"
+                  [[ "$latest_digest" == "$DIGEST" ]] || {
+                      echo "Latest image tag does not resolve to $DIGEST." >&2
+                      exit 1
+                  }
+                  latest_release="$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq .tag_name)"
+                  [[ "$latest_release" == "$TAG" ]] || {
+                      echo "GitHub latest release is $latest_release, expected $TAG." >&2
+                      exit 1
+                  }
+
+            - name: Summarize stable release
+              env:
+                  DIGEST: ${{ needs.plan.outputs.digest }}
+                  PLATFORMS: ${{ needs.plan.outputs.platforms }}
+                  PRERELEASE: ${{ needs.plan.outputs.prerelease }}
+                  REVISION: ${{ needs.plan.outputs.revision }}
+                  TAG: ${{ github.ref_name }}
+              run: |
+                  version="${TAG#v}"
+                  {
+                      echo "## Relay stable release"
+                      echo
+                      echo "- GitHub release: \`$TAG\` (immutable stable release)"
+                      echo "- Prerelease promoted: \`$PRERELEASE\`"
+                      echo "- Source revision: \`$REVISION\`"
+                      echo "- Container: \`$IMAGE:$version\`"
+                      echo "- Latest tag: \`$IMAGE:latest\`"
+                      echo "- Digest: \`$DIGEST\`"
+                      echo "- Platforms: \`$PLATFORMS\`"
+                      echo "- Linux installer: \`https://github.com/$GITHUB_REPOSITORY/releases/latest/download/install.sh\`"
+                      echo "- Windows installer: \`https://github.com/$GITHUB_REPOSITORY/releases/latest/download/install.ps1\`"
+                      echo "- Update manifest: \`https://github.com/$GITHUB_REPOSITORY/releases/latest/download/stable.json\`"
+                      echo "- Visibility: public"
+                  } >> "$GITHUB_STEP_SUMMARY"

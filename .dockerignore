@@ -1,0 +1,6 @@
+.git
+.github
+dist
+telrad-relay
+telrad-relay.exe
+*.test

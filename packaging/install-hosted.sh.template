@@ -1,0 +1,186 @@
+#!/bin/sh
+set -eu
+
+ARTIFACT_BASE_URL="@@ARTIFACT_BASE_URL@@"
+UPDATE_MANIFEST_URL="@@UPDATE_MANIFEST_URL@@"
+PAIRING_URL="@@ENROLLMENT_URL@@"
+UPDATE_PUBLIC_KEY="@@UPDATE_PUBLIC_KEY@@"
+UPDATE_PUBLIC_KEY_PEM_BASE64="@@UPDATE_PUBLIC_KEY_PEM_BASE64@@"
+SERVICE_FILE_BASE64="@@SERVICE_FILE_BASE64@@"
+INSTALLATION_MANIFEST_BASE64="@@INSTALLATION_MANIFEST_BASE64@@"
+
+if [ "$(id -u)" -ne 0 ]; then
+    echo "Run this installer as root (for example, curl ... | sudo sh)." >&2
+    exit 1
+fi
+case "$(uname -m)" in
+    x86_64|amd64) artifact_arch="amd64" ;;
+    aarch64|arm64) artifact_arch="arm64" ;;
+    *) echo "This release supports Linux x86-64 and arm64 only." >&2; exit 1 ;;
+esac
+for command in base64 curl openssl readlink sha256sum systemctl; do
+    command -v "$command" >/dev/null 2>&1 || { echo "Missing required command: $command" >&2; exit 1; }
+done
+
+umask 077
+work_dir="$(mktemp -d)"
+mutation_started=false
+committed=false
+cli_link_existed=false
+previous_cli_target=""
+if [ -L /usr/local/bin/telrad ]; then
+    cli_link_existed=true
+    previous_cli_target="$(readlink /usr/local/bin/telrad)"
+elif [ -e /usr/local/bin/telrad ]; then
+    echo "/usr/local/bin/telrad exists and is not an installer-managed symbolic link." >&2
+    exit 1
+fi
+
+backup_component() {
+    source_path="$1"
+    backup_name="$2"
+    if [ -f "$source_path" ]; then
+        cp -p "$source_path" "$work_dir/$backup_name"
+    else
+        : > "$work_dir/$backup_name.missing"
+    fi
+}
+
+restore_component() {
+    target_path="$1"
+    backup_name="$2"
+    if [ -f "$work_dir/$backup_name" ]; then
+        cp -p "$work_dir/$backup_name" "$target_path" || true
+    elif [ -f "$work_dir/$backup_name.missing" ]; then
+        rm -f "$target_path"
+    fi
+}
+
+cleanup() {
+    status=$?
+    if [ "$mutation_started" = true ] && [ "$committed" != true ]; then
+        restore_component /usr/local/lib/telrad-relay/telrad binary
+        restore_component /etc/systemd/system/telrad-relay.service service
+        restore_component /usr/local/lib/telrad-relay/update-public-key.pem trust-pem
+        restore_component /usr/local/lib/telrad-relay/update-trust.json trust-policy
+        restore_component /etc/telrad-relay/installation.json installation
+        restore_component /etc/telrad-relay/relay.json config
+        restore_component /etc/telrad-relay/relay.crt relay-certificate
+        restore_component /etc/telrad-relay/relay.key relay-private-key
+        restore_component /etc/telrad-relay/ca.crt relay-ca
+        if [ "$cli_link_existed" = true ]; then
+            ln -sfn "$previous_cli_target" /usr/local/bin/telrad
+        else
+            rm -f /usr/local/bin/telrad
+        fi
+        systemctl daemon-reload >/dev/null 2>&1 || true
+        if [ "$had_enrollment" = true ]; then
+            systemctl restart telrad-relay.service >/dev/null 2>&1 || true
+        fi
+    fi
+    rm -rf "$work_dir"
+    exit "$status"
+}
+trap cleanup EXIT HUP INT TERM
+curl -fsSL "$ARTIFACT_BASE_URL/telrad-relay-linux-$artifact_arch" -o "$work_dir/telrad-relay"
+curl -fsSL "$ARTIFACT_BASE_URL/telrad-relay-linux-$artifact_arch.sha256" -o "$work_dir/digest"
+curl -fsSL "$ARTIFACT_BASE_URL/telrad-relay-linux-$artifact_arch.sig" -o "$work_dir/signature"
+printf '%s' "$UPDATE_PUBLIC_KEY_PEM_BASE64" | base64 -d > "$work_dir/update-public-key.pem"
+
+expected_digest="$(tr -d '\r\n ' < "$work_dir/digest")"
+actual_digest="$(sha256sum "$work_dir/telrad-relay" | awk '{print $1}')"
+[ "$actual_digest" = "$expected_digest" ] || { echo "Relay checksum verification failed." >&2; exit 1; }
+openssl pkeyutl -verify -pubin -inkey "$work_dir/update-public-key.pem" -rawin \
+    -in "$work_dir/digest" -sigfile "$work_dir/signature" >/dev/null \
+    || { echo "Relay signature verification failed." >&2; exit 1; }
+
+if ! id telrad-relay >/dev/null 2>&1; then
+    useradd --system --home-dir /var/lib/telrad-relay --shell /usr/sbin/nologin telrad-relay
+fi
+install -d -m 0700 -o telrad-relay -g telrad-relay /etc/telrad-relay
+install -d -m 0755 -o root -g root /usr/local/lib/telrad-relay
+
+backup_component /usr/local/lib/telrad-relay/telrad binary
+backup_component /etc/systemd/system/telrad-relay.service service
+backup_component /usr/local/lib/telrad-relay/update-public-key.pem trust-pem
+backup_component /usr/local/lib/telrad-relay/update-trust.json trust-policy
+backup_component /etc/telrad-relay/installation.json installation
+backup_component /etc/telrad-relay/relay.json config
+backup_component /etc/telrad-relay/relay.crt relay-certificate
+backup_component /etc/telrad-relay/relay.key relay-private-key
+backup_component /etc/telrad-relay/ca.crt relay-ca
+had_enrollment=false
+migration_required=false
+if [ -f /etc/telrad-relay/relay.json ]; then
+    if grep -Eq '"schemaVersion"[[:space:]]*:[[:space:]]*3' /etc/telrad-relay/relay.json; then
+        if [ -f /etc/telrad-relay/relay-credential.json ]; then
+            had_enrollment=true
+        fi
+    else
+        migration_required=true
+    fi
+else
+    cat > /etc/telrad-relay/relay.json <<EOF
+{
+  "schemaVersion": 3,
+  "pairingUrl": "$PAIRING_URL",
+  "controlUrl": "",
+  "dicomUrl": "",
+  "hl7Url": "",
+  "relayId": "",
+  "credentialPath": "relay-credential.json",
+  "listenAddress": "0.0.0.0",
+  "dicomPort": 11112,
+  "hl7Port": 2575,
+  "reportHost": "127.0.0.1",
+  "reportPort": 2576,
+  "maxConnections": 256,
+  "maxDicomConnections": 128,
+  "maxHl7Connections": 128,
+  "connectTimeoutSeconds": 10,
+  "tlsHandshakeTimeoutSeconds": 15,
+  "responseHeaderTimeoutSeconds": 30,
+  "dicomIdleTimeoutSeconds": 300,
+  "dicomLifetimeSeconds": 7200,
+  "hl7IdleTimeoutSeconds": 0,
+  "hl7LifetimeSeconds": 0,
+  "hl7MaxBytes": 1048576
+}
+EOF
+fi
+mutation_started=true
+install -m 0755 -o root -g root "$work_dir/telrad-relay" /usr/local/lib/telrad-relay/telrad
+ln -sfn /usr/local/lib/telrad-relay/telrad /usr/local/bin/telrad
+install -m 0644 -o root -g root "$work_dir/update-public-key.pem" /usr/local/lib/telrad-relay/update-public-key.pem
+cat > /usr/local/lib/telrad-relay/update-trust.json <<EOF
+{
+  "schemaVersion": 1,
+  "channel": "stable",
+  "manifestUrl": "$UPDATE_MANIFEST_URL",
+  "publicKey": "$UPDATE_PUBLIC_KEY"
+}
+EOF
+chmod 0644 /usr/local/lib/telrad-relay/update-trust.json
+chown root:root /usr/local/lib/telrad-relay/update-trust.json
+printf '%s' "$SERVICE_FILE_BASE64" | base64 -d > /etc/systemd/system/telrad-relay.service
+if [ "$migration_required" = true ]; then
+    /usr/local/lib/telrad-relay/telrad \
+        --config /etc/telrad-relay/relay.json \
+        --migration-pairing-url "$PAIRING_URL" \
+        --migration-update-manifest-url "$UPDATE_MANIFEST_URL" \
+        --migration-update-public-key "$UPDATE_PUBLIC_KEY" \
+        migrate-config
+fi
+printf '%s' "$INSTALLATION_MANIFEST_BASE64" | base64 -d > /etc/telrad-relay/installation.json
+chown -R telrad-relay:telrad-relay /etc/telrad-relay /var/lib/telrad-relay
+systemctl daemon-reload
+if [ "$had_enrollment" = true ]; then
+    systemctl enable telrad-relay.service >/dev/null
+    systemctl restart telrad-relay.service
+    echo "Telrad Relay updated and restarted."
+else
+    systemctl disable --now telrad-relay.service >/dev/null 2>&1 || true
+    echo "Telrad Relay installed. Run 'telrad' to authenticate and start it."
+fi
+committed=true
+rm -f /var/lib/telrad-relay/bin/telrad >/dev/null 2>&1 || true

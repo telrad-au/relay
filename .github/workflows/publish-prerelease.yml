@@ -1,0 +1,383 @@
+name: Publish prerelease
+
+on:
+    push:
+        tags:
+            - "v*.*.*-*"
+
+permissions: {}
+
+concurrency:
+    group: publish-prerelease
+    cancel-in-progress: false
+
+env:
+    GO_VERSION: 1.27.0
+    GOVULNCHECK_VERSION: v1.7.0
+    IMAGE: ghcr.io/telrad-au/relay
+    PACKAGE_API_URL: https://api.github.com/orgs/telrad-au/packages/container/relay
+
+jobs:
+    build_native:
+        name: Build signed development native artifacts
+        runs-on: ubuntu-24.04
+        timeout-minutes: 45
+        environment: development-release
+        permissions:
+            contents: read
+        outputs:
+            enrollment_url: ${{ steps.native.outputs.enrollment_url }}
+            revision: ${{ steps.tag.outputs.revision }}
+            version: ${{ steps.tag.outputs.version }}
+        steps:
+            - name: Check out tagged source without persisted credentials
+              uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+              with:
+                  fetch-depth: 0
+                  persist-credentials: false
+
+            - name: Set up Go
+              uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+              with:
+                  go-version: ${{ env.GO_VERSION }}
+                  cache-dependency-path: go.sum
+
+            - name: Validate tag
+              id: tag
+              env:
+                  TAG: ${{ github.ref_name }}
+              run: |
+                  set -euo pipefail
+                  go run ./tools/container-promotion validate --prerelease "$TAG"
+                  [[ "$(git cat-file -t "$TAG")" == "tag" ]] || {
+                      echo "Prereleases require an annotated tag." >&2
+                      exit 1
+                  }
+                  revision="$(git rev-parse "$TAG^{commit}")"
+                  git merge-base --is-ancestor "$revision" origin/main || {
+                      echo "Prerelease commit $revision is not on main." >&2
+                      exit 1
+                  }
+                  echo "revision=$revision" >> "$GITHUB_OUTPUT"
+                  echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+            - name: Test relay
+              run: |
+                  scripts/check-publication.sh
+                  scripts/check-licenses.sh
+                  test -z "$(gofmt -l .)"
+                  go test -race ./...
+                  go vet ./...
+                  go install "golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION}"
+                  govulncheck ./...
+
+            - name: Refuse an existing GitHub release
+              env:
+                  GH_TOKEN: ${{ github.token }}
+                  TAG: ${{ github.ref_name }}
+              run: |
+                  set -euo pipefail
+                  if gh release view "$TAG" >/dev/null 2>&1; then
+                      echo "Refusing to replace existing release $TAG." >&2
+                      exit 1
+                  fi
+
+            - name: Build signed development native artifacts
+              id: native
+              env:
+                  ENROLLMENT_URL: ${{ vars.RELAY_DEV_ENROLLMENT_URL }}
+                  SIGNING_KEY_BASE64: ${{ secrets.RELAY_DEV_UPDATE_SIGNING_KEY_BASE64 }}
+                  TRUSTED_PUBLIC_KEY_BASE64: ${{ secrets.RELAY_DEV_UPDATE_PUBLIC_KEY_BASE64 }}
+                  TAG: ${{ github.ref_name }}
+              run: |
+                  set -euo pipefail
+                  : "${ENROLLMENT_URL:?development-release must define RELAY_DEV_ENROLLMENT_URL}"
+                  : "${SIGNING_KEY_BASE64:?development-release must define RELAY_DEV_UPDATE_SIGNING_KEY_BASE64}"
+                  : "${TRUSTED_PUBLIC_KEY_BASE64:?development-release must define RELAY_DEV_UPDATE_PUBLIC_KEY_BASE64}"
+
+                  signing_dir="$(mktemp -d "$RUNNER_TEMP/relay-development-signing.XXXXXX")"
+                  signing_key="$signing_dir/update-private.pem"
+                  trusted_public_key="$signing_dir/update-public.pem"
+                  cleanup() {
+                      rm -f "$signing_key" "$trusted_public_key"
+                      rmdir "$signing_dir"
+                  }
+                  trap cleanup EXIT
+
+                  printf '%s' "$SIGNING_KEY_BASE64" | base64 --decode > "$signing_key"
+                  printf '%s' "$TRUSTED_PUBLIC_KEY_BASE64" | base64 --decode > "$trusted_public_key"
+                  chmod 0600 "$signing_key" "$trusted_public_key"
+
+                  version="${TAG#v}"
+                  release_base_url="https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG"
+                  RELAY_RELEASE_DIR="dist/$version" \
+                  RELAY_UPDATE_SIGNING_KEY="$signing_key" \
+                  RELAY_UPDATE_TRUSTED_PUBLIC_KEY="$trusted_public_key" \
+                      scripts/build-development-release.sh \
+                      "$version" \
+                      "$release_base_url" \
+                      "$release_base_url/stable.json" \
+                      "$ENROLLMENT_URL"
+                  echo "enrollment_url=$ENROLLMENT_URL" >> "$GITHUB_OUTPUT"
+
+            - name: Generate development release checksums
+              env:
+                  VERSION: ${{ steps.tag.outputs.version }}
+              run: |
+                  set -euo pipefail
+                  (
+                      cd "dist/$VERSION"
+                      for artifact in *; do
+                          [[ -f "$artifact" ]] || continue
+                          sha256sum "$artifact"
+                      done | LC_ALL=C sort --key=2 > SHA256SUMS
+                  )
+
+            - name: Upload signed development native artifacts
+              uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
+              with:
+                  name: development-native-${{ github.ref_name }}
+                  path: dist/${{ steps.tag.outputs.version }}/
+                  if-no-files-found: error
+                  retention-days: 14
+
+    publish:
+        name: Publish GitHub and container prerelease
+        needs: build_native
+        runs-on: ubuntu-24.04
+        timeout-minutes: 45
+        permissions:
+            actions: read
+            contents: write
+            packages: write
+        steps:
+            - name: Check out tagged source without persisted credentials
+              uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+              with:
+                  fetch-depth: 0
+                  persist-credentials: false
+
+            - name: Set up Go
+              uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+              with:
+                  go-version: ${{ env.GO_VERSION }}
+                  cache-dependency-path: go.sum
+
+            - name: Revalidate unused prerelease outputs
+              env:
+                  GH_TOKEN: ${{ github.token }}
+                  REVISION: ${{ needs.build_native.outputs.revision }}
+                  TAG: ${{ github.ref_name }}
+                  VERSION: ${{ needs.build_native.outputs.version }}
+              run: |
+                  set -euo pipefail
+                  go run ./tools/container-promotion validate --prerelease "$TAG" >/dev/null
+                  [[ "${TAG#v}" == "$VERSION" ]] || {
+                      echo "Prerelease identity changed after native signing." >&2
+                      exit 1
+                  }
+                  [[ "$(git rev-parse "$TAG^{commit}")" == "$REVISION" ]] || {
+                      echo "Prerelease revision changed after native signing." >&2
+                      exit 1
+                  }
+                  if gh release view "$TAG" >/dev/null 2>&1; then
+                      echo "Refusing to replace existing release $TAG." >&2
+                      exit 1
+                  fi
+
+            - name: Download signed development native artifacts
+              uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+              with:
+                  name: development-native-${{ github.ref_name }}
+                  path: dist/${{ needs.build_native.outputs.version }}
+
+            - name: Verify transferred development artifacts
+              env:
+                  VERSION: ${{ needs.build_native.outputs.version }}
+              run: |
+                  set -euo pipefail
+                  (
+                      cd "dist/$VERSION"
+                      sha256sum --check SHA256SUMS
+                  )
+
+            - name: Set up Docker Buildx
+              uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f
+
+            - name: Sign in to GHCR
+              uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9
+              with:
+                  registry: ghcr.io
+                  username: ${{ github.actor }}
+                  password: ${{ github.token }}
+
+            - name: Refuse an existing image version
+              env:
+                  VERSION: ${{ github.ref_name }}
+              run: |
+                  set -euo pipefail
+                  VERSION="${VERSION#v}"
+                  if docker buildx imagetools inspect "$IMAGE:$VERSION" >/dev/null 2>&1; then
+                      echo "Refusing to replace immutable image tag $IMAGE:$VERSION." >&2
+                      exit 1
+                  fi
+
+            - name: Prepare image metadata
+              id: release
+              env:
+                  VERSION: ${{ github.ref_name }}
+              run: |
+                  set -euo pipefail
+                  pairing_url="$(jq --raw-output .pairingUrl packaging/docker-relay.json)"
+                  [[ "$pairing_url" == https://*/v1/relay/pairing-enrollments ]] || {
+                      echo "Container pairing URL is not a complete HTTPS Relay pairing endpoint." >&2
+                      exit 1
+                  }
+                  echo "created=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+                  echo "pairing_url=$pairing_url" >> "$GITHUB_OUTPUT"
+                  echo "version=${VERSION#v}" >> "$GITHUB_OUTPUT"
+
+            - name: Generate image tags and labels
+              id: metadata
+              uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051
+              with:
+                  images: ${{ env.IMAGE }}
+                  tags: |
+                      type=raw,value=${{ steps.release.outputs.version }}
+                      type=raw,value=testing
+                  labels: |
+                      org.opencontainers.image.source=https://github.com/telrad-au/relay
+                      org.opencontainers.image.version=${{ steps.release.outputs.version }}
+                      org.opencontainers.image.revision=${{ github.sha }}
+                      org.opencontainers.image.created=${{ steps.release.outputs.created }}
+
+            - name: Build and push multi-architecture image
+              id: build
+              uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8
+              with:
+                  context: .
+                  platforms: linux/amd64,linux/arm64
+                  push: true
+                  tags: ${{ steps.metadata.outputs.tags }}
+                  labels: ${{ steps.metadata.outputs.labels }}
+                  build-args: |
+                      VERSION=${{ steps.release.outputs.version }}
+                      REVISION=${{ github.sha }}
+                      CREATED=${{ steps.release.outputs.created }}
+                  cache-from: type=gha,scope=telrad-relay
+                  cache-to: type=gha,mode=max,scope=telrad-relay
+                  provenance: mode=max
+                  sbom: true
+
+            - name: Verify image and package visibility
+              env:
+                  DIGEST: ${{ steps.build.outputs.digest }}
+                  GH_TOKEN: ${{ github.token }}
+                  REPOSITORY_PRIVATE: ${{ github.event.repository.private }}
+              run: |
+                  set -euo pipefail
+                  docker buildx imagetools inspect "$IMAGE@$DIGEST" --format '{{json .Manifest}}' > manifest.json
+                  jq --exit-status 'any(.manifests[]; .platform.os == "linux" and .platform.architecture == "amd64")' manifest.json >/dev/null
+                  jq --exit-status 'any(.manifests[]; .platform.os == "linux" and .platform.architecture == "arm64")' manifest.json >/dev/null
+
+                  status=""
+                  for _ in {1..10}; do
+                      status="$(curl --silent --show-error --output package.json --write-out '%{http_code}' \
+                          --header 'Accept: application/vnd.github+json' \
+                          --header "Authorization: Bearer $GH_TOKEN" \
+                          --header 'X-GitHub-Api-Version: 2022-11-28' \
+                          "$PACKAGE_API_URL")"
+                      [[ "$status" == "200" ]] && break
+                      sleep 3
+                  done
+                  [[ "$status" == "200" ]] || {
+                      cat package.json >&2
+                      echo "Could not verify the published package (HTTP $status)." >&2
+                      exit 1
+                  }
+                  expected_visibility="public"
+                  [[ "$REPOSITORY_PRIVATE" == "true" ]] && expected_visibility="private"
+                  jq --exit-status --arg visibility "$expected_visibility" '.visibility == $visibility' package.json >/dev/null || {
+                      echo "Published GHCR package visibility is not $expected_visibility." >&2
+                      exit 1
+                  }
+
+            - name: Record container promotion metadata
+              id: promotion
+              env:
+                  DIGEST: ${{ steps.build.outputs.digest }}
+                  TAG: ${{ github.ref_name }}
+                  VERSION: ${{ steps.release.outputs.version }}
+              run: |
+                  set -euo pipefail
+                  revision="$(git rev-parse "$TAG^{commit}")"
+                  metadata="dist/$VERSION/container-promotion.json"
+                  go run ./tools/container-promotion create \
+                      --prerelease "$TAG" \
+                      --revision "$revision" \
+                      --image "$IMAGE" \
+                      --digest "$DIGEST" \
+                      --platform linux/amd64 \
+                      --platform linux/arm64 \
+                      --workflow-run-id "$GITHUB_RUN_ID" \
+                      --workflow-run-attempt "$GITHUB_RUN_ATTEMPT" \
+                      > "$metadata"
+                  jq --exit-status . "$metadata" >/dev/null
+                  echo "revision=$revision" >> "$GITHUB_OUTPUT"
+                  echo "stable=$(jq --raw-output .stableVersion "$metadata")" >> "$GITHUB_OUTPUT"
+
+            - name: Create GitHub prerelease
+              env:
+                  CONTAINER_PAIRING_URL: ${{ steps.release.outputs.pairing_url }}
+                  DIGEST: ${{ steps.build.outputs.digest }}
+                  GH_TOKEN: ${{ github.token }}
+                  REPOSITORY_PRIVATE: ${{ github.event.repository.private }}
+                  TAG: ${{ github.ref_name }}
+                  VERSION: ${{ steps.release.outputs.version }}
+              run: |
+                  set -euo pipefail
+                  visibility="public"
+                  [[ "$REPOSITORY_PRIVATE" == "true" ]] && visibility="private"
+                  release_base_url="https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG"
+                  gh release create "$TAG" "dist/$VERSION/"* \
+                      --prerelease \
+                      --verify-tag \
+                      --title "Telrad Relay $VERSION (prerelease)" \
+                      --notes "${visibility^} prerelease for integration testing. Linux native artifacts and the trust-pinned install.sh are published directly at $release_base_url. This prerelease remains pinned to its exact-tag update manifest and does not automatically advance to a newer prerelease. The Windows prerelease artifact remains checksum-only and is not a production installer. Container: $IMAGE:$VERSION@$DIGEST. Its default pairing endpoint is $CONTAINER_PAIRING_URL and can be overridden at runtime. Promotion metadata: container-promotion.json."
+                  release_state="$(gh release view "$TAG" --json isPrerelease,tagName --jq '[.tagName, .isPrerelease] | @tsv')"
+                  [[ "$release_state" == "$TAG"$'\ttrue' ]] || {
+                      echo "GitHub did not report $TAG as a prerelease." >&2
+                      exit 1
+                  }
+
+            - name: Summarize prerelease
+              env:
+                  CONTAINER_PAIRING_URL: ${{ steps.release.outputs.pairing_url }}
+                  DIGEST: ${{ steps.build.outputs.digest }}
+                  REPOSITORY_PRIVATE: ${{ github.event.repository.private }}
+                  REVISION: ${{ steps.promotion.outputs.revision }}
+                  STABLE: ${{ steps.promotion.outputs.stable }}
+                  ENROLLMENT_URL: ${{ needs.build_native.outputs.enrollment_url }}
+                  TAG: ${{ github.ref_name }}
+                  VERSION: ${{ steps.release.outputs.version }}
+              run: |
+                  visibility="public"
+                  [[ "$REPOSITORY_PRIVATE" == "true" ]] && visibility="private"
+                  release_base_url="https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG"
+                  {
+                      echo "## Relay prerelease"
+                      echo
+                      echo "- GitHub release: \`v$VERSION\` (prerelease)"
+                      echo "- Container: \`$IMAGE:$VERSION\`"
+                      echo "- Testing tag: \`$IMAGE:testing\`"
+                      echo "- Digest: \`$DIGEST\`"
+                      echo "- Source revision: \`$REVISION\`"
+                      echo "- Eligible stable version: \`$STABLE\`"
+                      echo "- Platforms: \`linux/amd64\`, \`linux/arm64\`"
+                      echo "- Development installer: \`$release_base_url/install.sh\`"
+                      echo "- Pinned update manifest: \`$release_base_url/stable.json\`"
+                      echo "- Development pairing endpoint: \`$ENROLLMENT_URL\`"
+                      echo "- Default container pairing endpoint: \`$CONTAINER_PAIRING_URL\`"
+                      echo "- Promotion metadata: \`container-promotion.json\`"
+                      echo "- Visibility: $visibility"
+                  } >> "$GITHUB_STEP_SUMMARY"
