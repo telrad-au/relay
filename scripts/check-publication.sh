@@ -23,6 +23,11 @@ required_lines=(
     '.github/workflows/publish-release.yml:                  [[ "$ENROLLMENT_URL" == "$container_pairing_url" ]] || {'
     '.github/workflows/publish-release.yml:                      scripts/finalize-signed-release.sh \'
     '.github/workflows/publish-release.yml:                  update_manifest_url="https://github.com/$GITHUB_REPOSITORY/releases/latest/download/stable.json"'
+    '.github/workflows/test-azure-signing.yml:    workflow_dispatch:'
+    '.github/workflows/test-azure-signing.yml:        environment: artifact-signing-test'
+    '.github/workflows/test-azure-signing.yml:              uses: azure/login@7ddb5af1ef8758cf1353cf3b42f940aee27ba21c # v3'
+    '.github/workflows/test-azure-signing.yml:              uses: azure/artifact-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2'
+    '.github/workflows/test-azure-signing.yml:                  ./scripts/verify-windows-signature.ps1 `'
 )
 
 for requirement in "${required_lines[@]}"; do
@@ -46,8 +51,10 @@ if git grep -n -I -E 'RELAY_DEV_RELEASE_BASE_URL|RELAY_UPDATE_MANIFEST_URL|RELAY
     exit 1
 fi
 
-if grep -n -E 'RELAY_WINDOWS_SIGNING_PFX_BASE64|RELAY_WINDOWS_SIGNING_PASSWORD|RELAY_WINDOWS_TIMESTAMP_URL|azure-client-secret|osslsigncode' .github/workflows/publish-release.yml; then
-    echo "Stable publishing still references exportable Windows signing material or the legacy signer." >&2
+if grep -n -E 'RELAY_WINDOWS_SIGNING_PFX_BASE64|RELAY_WINDOWS_SIGNING_PASSWORD|RELAY_WINDOWS_TIMESTAMP_URL|azure-client-secret|osslsigncode' \
+    .github/workflows/publish-release.yml \
+    .github/workflows/test-azure-signing.yml; then
+    echo "Production signing workflow references exportable Windows signing material or the legacy signer." >&2
     exit 1
 fi
 

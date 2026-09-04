@@ -71,3 +71,26 @@ only to test the Authenticode, installer-pin, and bundle-finalization contracts.
 The production workflow never uses that PFX path: Azure Artifact Signing signs
 the Windows executable before `scripts/finalize-signed-release.sh` applies the
 Relay update signatures.
+
+## Azure Artifact Signing integration
+
+After configuring the `artifact-signing-test` GitHub Environment described in
+`docs/releases.md`, explicitly dispatch the non-publishing smoke test from
+`main`:
+
+```bash
+gh workflow run test-azure-signing.yml --ref main
+```
+
+The workflow builds a disposable Windows relay, exchanges GitHub's OIDC token
+for Azure access, signs with the configured Artifact Signing certificate
+profile, requires an RFC 3161 timestamp, verifies the Authenticode signature and
+signer pin, and runs the signed executable. It has no repository or package
+write permission and does not upload the executable, create a tag or release,
+or promote a container. The successful run URL and signer-certificate SHA-256
+in its summary are the integration evidence.
+
+This smoke test exercises the Azure account and certificate profile through a
+separate environment identity. The stable workflow's exact
+`production-release` federated credential and protected values remain validated
+only when an approved stable release runs.

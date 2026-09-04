@@ -1,0 +1,125 @@
+name: Test Azure Artifact Signing
+
+on:
+    workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+    group: test-azure-artifact-signing
+    cancel-in-progress: false
+
+env:
+    GO_VERSION: 1.27.0
+
+jobs:
+    sign:
+        name: Sign disposable Windows binary
+        runs-on: windows-2025
+        timeout-minutes: 15
+        environment: artifact-signing-test
+        permissions:
+            contents: read
+            id-token: write
+        steps:
+            - name: Check out source without persisted credentials
+              uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+              with:
+                  persist-credentials: false
+
+            - name: Set up Go
+              uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+              with:
+                  go-version: ${{ env.GO_VERSION }}
+                  cache-dependency-path: go.sum
+
+            - name: Validate Azure signing configuration
+              shell: pwsh
+              env:
+                  AZURE_ARTIFACT_SIGNING_ACCOUNT_NAME: ${{ secrets.AZURE_ARTIFACT_SIGNING_ACCOUNT_NAME }}
+                  AZURE_ARTIFACT_SIGNING_CERTIFICATE_PROFILE_NAME: ${{ secrets.AZURE_ARTIFACT_SIGNING_CERTIFICATE_PROFILE_NAME }}
+                  AZURE_ARTIFACT_SIGNING_CLIENT_ID: ${{ secrets.AZURE_ARTIFACT_SIGNING_CLIENT_ID }}
+                  AZURE_ARTIFACT_SIGNING_ENDPOINT: ${{ secrets.AZURE_ARTIFACT_SIGNING_ENDPOINT }}
+                  AZURE_ARTIFACT_SIGNING_SUBSCRIPTION_ID: ${{ secrets.AZURE_ARTIFACT_SIGNING_SUBSCRIPTION_ID }}
+                  AZURE_ARTIFACT_SIGNING_TENANT_ID: ${{ secrets.AZURE_ARTIFACT_SIGNING_TENANT_ID }}
+              run: |
+                  $required = @(
+                      "AZURE_ARTIFACT_SIGNING_ACCOUNT_NAME",
+                      "AZURE_ARTIFACT_SIGNING_CERTIFICATE_PROFILE_NAME",
+                      "AZURE_ARTIFACT_SIGNING_CLIENT_ID",
+                      "AZURE_ARTIFACT_SIGNING_ENDPOINT",
+                      "AZURE_ARTIFACT_SIGNING_SUBSCRIPTION_ID",
+                      "AZURE_ARTIFACT_SIGNING_TENANT_ID"
+                  )
+                  foreach ($name in $required) {
+                      $value = [Environment]::GetEnvironmentVariable($name)
+                      if ([string]::IsNullOrWhiteSpace($value)) {
+                          throw "artifact-signing-test must define $name."
+                      }
+                  }
+                  if ($env:AZURE_ARTIFACT_SIGNING_ENDPOINT -notmatch '^https://[a-z0-9-]+\.codesigning\.azure\.net/?$') {
+                      throw "Azure Artifact Signing endpoint is not a regional codesigning.azure.net HTTPS endpoint."
+                  }
+
+            - name: Build disposable Windows executable
+              shell: pwsh
+              run: |
+                  $smokeExecutable = Join-Path $env:RUNNER_TEMP "relay-azure-signing-smoke\telrad-relay.exe"
+                  New-Item -ItemType Directory -Force -Path (Split-Path -Parent $smokeExecutable) | Out-Null
+                  $version = "0.0.0-azure-signing-smoke.$env:GITHUB_RUN_ID.$env:GITHUB_RUN_ATTEMPT"
+                  go build -trimpath -ldflags "-s -w -X main.version=$version" -o $smokeExecutable ./cmd/telrad-relay
+                  if ($LASTEXITCODE -ne 0) {
+                      throw "Disposable Windows build failed."
+                  }
+                  "SMOKE_VERSION=$version" >> $env:GITHUB_ENV
+
+            - name: Sign in to Azure with GitHub OIDC
+              uses: azure/login@7ddb5af1ef8758cf1353cf3b42f940aee27ba21c # v3
+              with:
+                  client-id: ${{ secrets.AZURE_ARTIFACT_SIGNING_CLIENT_ID }}
+                  tenant-id: ${{ secrets.AZURE_ARTIFACT_SIGNING_TENANT_ID }}
+                  subscription-id: ${{ secrets.AZURE_ARTIFACT_SIGNING_SUBSCRIPTION_ID }}
+
+            - name: Sign disposable executable with Azure Artifact Signing
+              uses: azure/artifact-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2
+              with:
+                  endpoint: ${{ secrets.AZURE_ARTIFACT_SIGNING_ENDPOINT }}
+                  signing-account-name: ${{ secrets.AZURE_ARTIFACT_SIGNING_ACCOUNT_NAME }}
+                  certificate-profile-name: ${{ secrets.AZURE_ARTIFACT_SIGNING_CERTIFICATE_PROFILE_NAME }}
+                  files: ${{ runner.temp }}\relay-azure-signing-smoke\telrad-relay.exe
+                  file-digest: SHA256
+                  timestamp-rfc3161: http://timestamp.acs.microsoft.com
+                  timestamp-digest: SHA256
+                  description: Telrad Relay Azure signing integration test
+                  description-url: https://github.com/${{ github.repository }}
+                  exclude-environment-credential: true
+                  cache-dependencies: false
+
+            - name: Verify timestamped Authenticode signature
+              shell: pwsh
+              run: |
+                  $smokeExecutable = Join-Path $env:RUNNER_TEMP "relay-azure-signing-smoke\telrad-relay.exe"
+                  $signerPinPath = Join-Path $env:RUNNER_TEMP "relay-azure-signing-smoke\windows-signer-certificate-sha256.txt"
+                  ./scripts/verify-windows-signature.ps1 `
+                      -Path $smokeExecutable `
+                      -SignerPinOutputPath $signerPinPath
+
+                  $actualVersion = (& $smokeExecutable version | Out-String).Trim()
+                  if ($LASTEXITCODE -ne 0 -or $actualVersion -ne $env:SMOKE_VERSION) {
+                      throw "Signed disposable executable did not report the expected version."
+                  }
+
+            - name: Summarize smoke test
+              shell: pwsh
+              run: |
+                  $signerPinPath = Join-Path $env:RUNNER_TEMP "relay-azure-signing-smoke\windows-signer-certificate-sha256.txt"
+                  $signerPin = (Get-Content -LiteralPath $signerPinPath -Raw).Trim()
+                  @(
+                      "## Azure Artifact Signing smoke test",
+                      "",
+                      "- Source revision: ``$env:GITHUB_SHA``",
+                      "- Signed version: ``$env:SMOKE_VERSION``",
+                      "- Signer certificate SHA-256: ``$signerPin``",
+                      "- Result: OIDC login, signing, timestamp, signature verification, and executable verification passed.",
+                      "- Publication: none; the disposable executable remains only on the ephemeral runner."
+                  ) | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append

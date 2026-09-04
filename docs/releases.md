@@ -248,13 +248,34 @@ Before creating the first stable tag:
    - `AZURE_ARTIFACT_SIGNING_CERTIFICATE_PROFILE_NAME`: the `PublicTrust`
      certificate profile name.
    The Azure identifiers are not private keys, but they remain environment
-   secrets to match the isolated signing pattern used by the upstream Codex
+   secrets to match the isolated signing pattern used by the production
    workflow.
 8. Configure this environment variable:
    - `RELAY_ENROLLMENT_URL`: the production Relay pairing endpoint (the
      protected variable name is retained for release-workflow compatibility).
 9. Enable GitHub private vulnerability reporting.
 10. Enable GitHub immutable releases. This must happen before the first stable release because it applies prospectively.
+
+To test Azure Artifact Signing without creating a release, also create a
+protected GitHub Environment named `artifact-signing-test`, restrict it to
+`main`, and require a reviewer. Add another federated credential to the same
+Microsoft Entra application with subject
+`repo:telrad-au/relay:environment:artifact-signing-test` and audience
+`api://AzureADTokenExchange`. Configure only the six
+`AZURE_ARTIFACT_SIGNING_*` secrets listed above; do not copy the Relay Ed25519
+signing keys or `RELAY_ENROLLMENT_URL` into this test environment. Then run:
+
+```bash
+gh workflow run test-azure-signing.yml --ref main
+```
+
+The manual workflow signs and verifies one disposable Windows executable on an
+ephemeral GitHub runner. It cannot upload artifacts, publish repository or
+package content, create tags or releases, or promote container channels. This
+validates GitHub OIDC, the Azure account, certificate profile, signing role,
+timestamp service, and Authenticode verification without authorizing a stable
+release. It does not validate the separate `production-release` environment's
+federated credential or protected values.
 
 The read-only `plan` job runs before the environment gate and records the stable
 tag, source revision, selected prerelease, digest, and platforms in the workflow

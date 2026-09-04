@@ -241,6 +241,46 @@ func TestStableWorkflowUsesOIDCBackedArtifactSigning(t *testing.T) {
 	}
 }
 
+func TestAzureSigningSmokeWorkflowCannotPublish(t *testing.T) {
+	content, err := os.ReadFile("../../.github/workflows/test-azure-signing.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	workflow := string(content)
+	for _, required := range []string{
+		"workflow_dispatch:",
+		"permissions: {}",
+		"runs-on: windows-2025",
+		"environment: artifact-signing-test",
+		"contents: read",
+		"id-token: write",
+		"persist-credentials: false",
+		"azure/login@7ddb5af1ef8758cf1353cf3b42f940aee27ba21c",
+		"azure/artifact-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82",
+		"timestamp-rfc3161: http://timestamp.acs.microsoft.com",
+		"scripts/verify-windows-signature.ps1",
+	} {
+		if !strings.Contains(workflow, required) {
+			t.Fatalf("Azure signing smoke workflow does not contain %q", required)
+		}
+	}
+	for _, forbidden := range []string{
+		"\n    push:",
+		"\n    pull_request:",
+		"\n    schedule:",
+		"contents: write",
+		"packages: write",
+		"actions/upload-artifact",
+		"gh release",
+		"promote-container.sh",
+		"secrets.RELAY_",
+	} {
+		if strings.Contains(workflow, forbidden) {
+			t.Fatalf("Azure signing smoke workflow contains publication capability %q", forbidden)
+		}
+	}
+}
+
 func TestWorkflowsDoNotPersistCheckoutCredentials(t *testing.T) {
 	for _, relativePath := range []string{
 		"../../.github/workflows/ci.yml",
@@ -248,6 +288,7 @@ func TestWorkflowsDoNotPersistCheckoutCredentials(t *testing.T) {
 		"../../.github/workflows/publish-prerelease.yml",
 		"../../.github/workflows/publish-release.yml",
 		"../../.github/workflows/publish-testing.yml",
+		"../../.github/workflows/test-azure-signing.yml",
 	} {
 		content, err := os.ReadFile(relativePath)
 		if err != nil {
