@@ -699,6 +699,45 @@ func TestDICOMReceiptStatusMappings(t *testing.T) {
 	}
 }
 
+type failingCompletionReportLedger struct{}
+
+func (failingCompletionReportLedger) Begin(_, _, _, _ string, now time.Time) (reportDeliveryRecord, bool, error) {
+	return reportDeliveryRecord{State: "pending", UpdatedAt: now}, true, nil
+}
+
+func (failingCompletionReportLedger) Complete(_, _, _, _ string, _ time.Time) error {
+	return errors.New("injected completion failure")
+}
+
+func TestReportReturnRequiresRejectedStateToBeDurable(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	go func() {
+		connection, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer connection.Close()
+		if _, readErr := readMLLPFrame(connection, 1024*1024); readErr != nil {
+			return
+		}
+		_, _ = connection.Write([]byte("\x0bMSA|AE|report-control-rejected\r\x1c\x0d"))
+	}()
+	address := listener.Addr().(*net.TCPAddr)
+	cfg := defaultConfig()
+	cfg.ReportHost = "127.0.0.1"
+	cfg.ReportPort = address.Port
+	payload := "MSH|^~\\&|TELRAD|A|CLINIC|B|20260101000000||ORU^R01|report-control-rejected|P|2.5\r"
+	digest := sha256.Sum256([]byte(payload))
+	response := deliverReport(context.Background(), cfg, failingCompletionReportLedger{}, "delivery-rejected", "token-rejected", payload, hex.EncodeToString(digest[:]))
+	if response["type"] != "reportFail" || response["error"] != "ledger_error" || response["ackCode"] != "AE" {
+		t.Fatalf("report response=%#v", response)
+	}
+}
+
 func TestReportReturnDeliveryAndDurableDeduplication(t *testing.T) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -727,6 +766,7 @@ func TestReportReturnDeliveryAndDurableDeduplication(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { closeReportLedgerForTest(t, ledger) })
 	payload := "MSH|^~\\&|TELRAD|A|CLINIC|B|20260101000000||ORU^R01|report-control-1|P|2.5\r"
 	digest := sha256.Sum256([]byte(payload))
 	hash := hex.EncodeToString(digest[:])

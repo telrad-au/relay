@@ -134,6 +134,7 @@ func controlLoop(ctx context.Context, cfg *config, configPath string, connection
 	if err != nil {
 		return err
 	}
+	defer ledger.Close()
 	for {
 		var message map[string]any
 		if err := readJSON(ctx, connection, &message); err != nil {
@@ -162,7 +163,7 @@ func controlLoop(ctx context.Context, cfg *config, configPath string, connection
 	}
 }
 
-func deliverReport(ctx context.Context, cfg *config, ledger *reportDeliveryLedger, deliveryID, token, payload, expectedHash string) map[string]string {
+func deliverReport(ctx context.Context, cfg *config, ledger reportDeliveryStore, deliveryID, token, payload, expectedHash string) map[string]string {
 	failure := func(code, ackCode string) map[string]string {
 		return map[string]string{"type": "reportFail", "deliveryId": deliveryID, "token": token, "ackCode": ackCode, "error": code}
 	}
@@ -189,7 +190,9 @@ func deliverReport(ctx context.Context, cfg *config, ledger *reportDeliveryLedge
 		return map[string]string{"type": "reportAck", "deliveryId": deliveryID, "token": token, "ackCode": ackCode}
 	}
 	if ackCode != "" {
-		_ = ledger.Complete(deliveryID, token, "rejected", ackCode, time.Now())
+		if ledger.Complete(deliveryID, token, "rejected", ackCode, time.Now()) != nil {
+			return failure("ledger_error", "AE")
+		}
 	}
 	return failure("clinic_rejected", ackCode)
 }
