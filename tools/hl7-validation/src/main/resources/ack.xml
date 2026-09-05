@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Test-only implementation profile derived from the HL7 v2.5 ACK structure
+  and MSH/MSA field definitions. It validates the acknowledgements returned by
+  the payload-integrity fixture and is not a clinic profile.
+-->
+<HL7v2xConformanceProfile HL7Version="2.5" ProfileType="HL7" Identifier="1.2.3.4.5.6.7.8.2">
+    <MetaData Name="Synthetic ACK" OrgName="Telrad test fixture" Version="1" Status="Draft" Topics="HL7 2.5 ACK"/>
+    <UseCase>
+        <Purpose>Validate acknowledgements used by Relay payload-integrity tests.</Purpose>
+    </UseCase>
+    <Encodings>
+        <Encoding>ER7</Encoding>
+    </Encodings>
+    <DynamicDef AccAck="NE" AppAck="AL" MsgAckMode="Immediate"/>
+    <HL7v2xStaticDef MsgType="ACK" EventType="R01" MsgStructID="ACK" EventDesc="Synthetic application acknowledgment" Identifier="1.2.3.4.5.6.7.8.2.1" Role="Receiver">
+        <Segment Name="MSH" LongName="Message Header" Usage="R" Min="1" Max="1">
+            <Field Name="Field Separator" Usage="R" Min="1" Max="1" Datatype="ST" Length="1" ConstantValue="|"/>
+            <Field Name="Encoding Characters" Usage="R" Min="1" Max="1" Datatype="ST" Length="4" ConstantValue="^~\&amp;"/>
+            <Field Name="Sending Application" Usage="R" Min="1" Max="1" Datatype="HD" Length="227"/>
+            <Field Name="Sending Facility" Usage="R" Min="1" Max="1" Datatype="HD" Length="227"/>
+            <Field Name="Receiving Application" Usage="R" Min="1" Max="1" Datatype="HD" Length="227"/>
+            <Field Name="Receiving Facility" Usage="R" Min="1" Max="1" Datatype="HD" Length="227"/>
+            <Field Name="Date Time Of Message" Usage="R" Min="1" Max="1" Datatype="TS" Length="26"/>
+            <Field Name="Security" Usage="O" Min="0" Max="1" Datatype="ST" Length="40"/>
+            <Field Name="Message Type" Usage="R" Min="1" Max="1" Datatype="MSG" Length="15" ConstantValue="ACK^R01^ACK"/>
+            <Field Name="Message Control ID" Usage="R" Min="1" Max="1" Datatype="ST" Length="20"/>
+            <Field Name="Processing ID" Usage="R" Min="1" Max="1" Datatype="PT" Length="3" ConstantValue="P"/>
+            <Field Name="Version ID" Usage="R" Min="1" Max="1" Datatype="VID" Length="60" ConstantValue="2.5"/>
+        </Segment>
+        <Segment Name="MSA" LongName="Message Acknowledgment" Usage="R" Min="1" Max="1">
+            <Field Name="Acknowledgment Code" Usage="R" Min="1" Max="1" Datatype="ID" Length="2"/>
+            <Field Name="Message Control ID" Usage="R" Min="1" Max="1" Datatype="ST" Length="20"/>
+        </Segment>
+    </HL7v2xStaticDef>
+</HL7v2xConformanceProfile>

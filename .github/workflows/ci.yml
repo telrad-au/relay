@@ -60,6 +60,9 @@ jobs:
                   TELRAD_ORTHANC_INTEROP_TEST: "1"
               run: go test -race ./cmd/telrad-relay -run '^TestOrthancDICOMPayloadIntegrity$' -count=1 -timeout=5m
 
+            - name: Validate synthetic HL7 fixtures
+              run: scripts/check-hl7-fixtures.sh
+
             - name: Check formatting
               run: test -z "$(gofmt -l .)"
 
