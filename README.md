@@ -136,8 +136,8 @@ if the update fails.
 Relay uses encrypted outbound connections and normal operating system
 certificate verification. Credentials are stored with restricted permissions.
 
-Relay does not persist clinical ingest payloads or write clinical payloads or
-credentials to operational logs.
+Relay does not persist clinical ingest payloads or returned report payloads,
+or write clinical payloads or credentials to operational logs.
 
 Relay is open-source under the Apache License 2.0, allowing clinics and their
 security assessors to inspect its network, data-handling, and update behavior.

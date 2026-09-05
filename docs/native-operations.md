@@ -110,6 +110,27 @@ Retry-eligible delivery failures use at most three attempts over 60 seconds with
 the same body and idempotency key. Other failures close the clinic exchange
 without a synthetic ACK.
 
+Before sending a returned report to the clinic RIS, Relay durably records a
+pending delivery. It records the exact accepted or rejected outcome before
+responding to Telrad, acknowledges a matching previously accepted delivery
+without resending it, and requires administrator reconciliation after an
+ambiguous interruption. The bounded 30-day, 10,000-record ledger contains only
+delivery identifiers, hashes, states, acknowledgement codes, and timestamps;
+it never contains a report payload, plaintext delivery token, or plaintext HL7
+control ID. Expired terminal records are removed in bounded batches as new
+deliveries arrive; pending records are never expired or evicted.
+
+On first use, Relay recoverably migrates a valid legacy
+`report-delivery-ledger.json` into the transactional
+`report-delivery-ledger.db`. It normalizes the legacy ledger and retains a
+hash-only `report-delivery-ledger.pre-bbolt.json` recovery copy. The normalized
+legacy ledger remains readable by the preceding release until the first new
+state transition. Before that transition, Relay durably replaces it with a
+migration marker so an older Relay fails closed instead of using stale state.
+The recovery copy is never selected automatically when the active ledger is
+damaged. Stop Relay and obtain administrator review before repairing or
+restoring these files.
+
 ## Schema-v2 hard cutover
 
 Stop the service and run the installer-provided migration or:

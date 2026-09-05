@@ -1,8 +1,9 @@
 # Container operations
 
 The Compose deployment runs an immutable image with a read-only root filesystem,
-no additional Linux capabilities, and a named volume for schema-v3 configuration
-and its bearer credential record. The container does not update its own image.
+no additional Linux capabilities, and a named volume for schema-v3 configuration,
+its bearer credential record, and its bounded report-delivery ledger. The
+container does not update its own image.
 
 ## First pairing
 
@@ -85,6 +86,13 @@ binary's `migrate-config` command against the protected volume. It preserves
 non-credential settings and update trust, deletes obsolete certificate and
 pending request files, and requires re-pairing. There is no certificate
 credential migration or protocol compatibility mode.
+
+An image that predates the transactional report-delivery ledger can use the
+normalized legacy snapshot only until the upgraded Relay records its first new
+report state transition. After that point the legacy path contains a deliberate
+migration marker and the older image fails closed rather than risk resending a
+report. Do not remove that marker or roll back across this storage transition
+without administrator reconciliation.
 
 To roll back, restore the recorded immutable image reference only if that
 release supports the current configuration schema. The credential volume is

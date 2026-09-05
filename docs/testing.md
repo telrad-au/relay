@@ -27,6 +27,19 @@ asserts one HTTPS request per message. It checks exact framing, UTF-8,
 concurrency, cancellation, retryable statuses, both `Retry-After` forms, and
 reuse of the exact request body and idempotency key.
 
+Report-return coverage checks durable pending and terminal transitions,
+accepted-delivery deduplication without resend, ambiguous restart behavior,
+metadata-reuse rejection, storage-failure rollback, retention and capacity,
+fail-closed corruption handling, and one-time migration from the legacy JSON
+ledger without retaining plaintext tokens or control IDs. Ledger transition
+benchmarks exercise 100, 1,000, and 10,000 retained records and report allocated
+database-page bytes and write calls per transition.
+
+```bash
+go test ./cmd/telrad-relay -run '^$' \
+  -bench '^BenchmarkReportLedgerTransitions$' -benchmem
+```
+
 DICOM fixtures construct UL PDUs and DIMSE command sets directly. Tests cover
 association acceptance/rejection, presentation-context choice, C-ECHO,
 C-STORE, release/abort, multiple sequential stores, command and PDU bounds,

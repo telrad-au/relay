@@ -26,6 +26,7 @@ sha256_file() {
 
 expected_modules="$(printf '%s\n' \
     'github.com/coder/websocket v1.8.14' \
+    'go.etcd.io/bbolt v1.5.0' \
     'golang.org/x/sys v0.47.0')"
 license_go_cache="${RELAY_LICENSE_GOCACHE:-${TMPDIR:-/tmp}/telrad-relay-license-go-cache}"
 mkdir -p "$license_go_cache"
@@ -57,6 +58,7 @@ actual_modules="$(printf '%s' "$module_lines" | awk 'NF == 2' | LC_ALL=C sort -u
 for heading in \
     '## Alpine ca-certificates-bundle 20260611-r0' \
     '## github.com/coder/websocket v1.8.14' \
+    '## go.etcd.io/bbolt v1.5.0' \
     '## golang.org/x/sys v0.47.0' \
     '## Go 1.27.0 runtime and standard library'; do
     grep -Fqx "$heading" THIRD_PARTY_NOTICES.md || {
@@ -74,6 +76,7 @@ while read -r expected path; do
     }
 done <<EOF
 cc0975a5f6305145bdd7b41ce9479632fdac3870e6ac4281f28017f18c767c4e $module_cache/github.com/coder/websocket@v1.8.14/LICENSE.txt
+c15d721c37e277a11584547de6d618541501f7aa10c4e32a945a4f9ff36cb0f6 $module_cache/go.etcd.io/bbolt@v1.5.0/LICENSE
 911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad $module_cache/golang.org/x/sys@v0.47.0/LICENSE
 96f408bfae65bf137fc2525d3ecb030271c50c1e90799f87abf8846d8dd505cc $module_cache/golang.org/x/sys@v0.47.0/PATENTS
 911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad $go_root/LICENSE
