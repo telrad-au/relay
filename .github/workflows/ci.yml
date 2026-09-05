@@ -55,6 +55,11 @@ jobs:
                       exit 1
                   }
 
+            - name: Test Orthanc DICOM interoperability
+              env:
+                  TELRAD_ORTHANC_INTEROP_TEST: "1"
+              run: go test -race ./cmd/telrad-relay -run '^TestOrthancDICOMPayloadIntegrity$' -count=1 -timeout=5m
+
             - name: Check formatting
               run: test -z "$(gofmt -l .)"
 
