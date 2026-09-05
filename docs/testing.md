@@ -27,6 +27,16 @@ asserts one HTTPS request per message. It checks exact framing, UTF-8,
 concurrency, cancellation, retryable statuses, both `Retry-After` forms, and
 reuse of the exact request body and idempotency key.
 
+MLLP framing and HL7 field-parser benchmarks cover the 1 KiB through 8 MiB
+configuration range, plus representative ACK sizes up to the 64 KiB cloud
+response limit:
+
+```bash
+go test ./cmd/telrad-relay -run '^$' \
+  -bench '^(BenchmarkReadMLLPFrame|BenchmarkHL7ControlID|BenchmarkHL7Acknowledgement)$' \
+  -benchmem
+```
+
 Report-return coverage checks durable pending and terminal transitions,
 accepted-delivery deduplication without resend, ambiguous restart behavior,
 metadata-reuse rejection, storage-failure rollback, retention and capacity,
