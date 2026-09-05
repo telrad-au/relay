@@ -340,7 +340,7 @@ func jsonMarshalIndent(value any) ([]byte, error) {
 
 func TestHL7RetriesSameBodyAndKeyThenReturnsExactACK(t *testing.T) {
 	message := syntheticHL7IntegrityMessage("control-1")
-	ack := []byte("MSH|^~\\&|TELRAD|B|CLINIC|A|20260101000001||ACK|ack-1|P|2.5\rMSA|AE|control-1\r")
+	ack := syntheticHL7Acknowledgement("AE", "control-1", "ack-1")
 	var mu sync.Mutex
 	var bodies [][]byte
 	var keys []string
@@ -376,7 +376,7 @@ func TestHL7RetriesSameBodyAndKeyThenReturnsExactACK(t *testing.T) {
 
 func TestHL7ListenerForwardsCompleteMLLPPayloadByteExact(t *testing.T) {
 	message := syntheticHL7IntegrityMessage("control-listener-1")
-	ack := []byte("MSH|^~\\&|TELRAD|B|CLINIC|A|20260101000001||ACK|ack-listener-1|P|2.5\rMSA|AA|control-listener-1\r")
+	ack := syntheticHL7Acknowledgement("AA", "control-listener-1", "ack-listener-1")
 	received := make(chan []byte, 1)
 	server := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		body, _ := io.ReadAll(request.Body)
@@ -432,13 +432,6 @@ func TestHL7ListenerForwardsCompleteMLLPPayloadByteExact(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("cloud did not receive HL7 payload")
 	}
-}
-
-func syntheticHL7IntegrityMessage(controlID string) []byte {
-	return []byte("MSH|^~\\&|CLINIC|RAD|TELRAD|CLOUD|20260101120000+1000||ORU^R01|" + controlID + "|P|2.5||||||UNICODE UTF-8\r" +
-		"PID|1||RELAY-INTEROP^^^CLINIC^MR||Synthetic^Zoë||19800101|O|||^^Brisbane^QLD^4000^AU||\r" +
-		"OBR|1|||SYNTH^Synthetic integrity test|||||||||||||||||||||F\r" +
-		"OBX|1|TX|NOTE^Synthetic note||Escaped delimiters \\F\\ \\S\\ \\R\\ and UTF-8 café||mmol/L|||F|||\r")
 }
 
 func TestHL7KeepsClinicConnectionForSequentialExchanges(t *testing.T) {

@@ -79,7 +79,18 @@ HL7 listener coverage sends a non-trivial synthetic UTF-8 message through a
 real TCP/MLLP connection and asserts that the HTTPS request body is exactly the
 original message without its MLLP envelope. Retry coverage separately asserts
 that the first HTTPS body and every retry remain byte-identical to that original
-message while retaining the same idempotency key.
+message while retaining the same idempotency key. CI also validates the shared
+ORU^R01 and ACK fixtures against checked-in HL7 v2.5 conformance profiles with
+HAPI HL7 2.6.0 in the test-only image
+`maven:3.9.11-eclipse-temurin-21@sha256:6fdc855a6ed81d288ca7ca37ac6ff5e9308b612485c0801d70b25a858c83d237`.
+The validator checks the report and application acknowledgements, and proves
+that the previous missing and shifted OBR/OBX fields are rejected.
+
+Run the independent fixture validation locally with:
+
+```bash
+scripts/check-hl7-fixtures.sh
+```
 
 The integration cloud uses TLS/WSS bearer authentication. No fixture contains a
 private certificate authority, client identity, custom ALPN, or raw TCP ingest

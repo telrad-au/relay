@@ -1,0 +1,104 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Test-only implementation profile derived from the HL7 v2.5 ORU_R01
+  structure and the MSH, PID, OBR, and OBX field definitions. It deliberately
+  constrains the shared payload-integrity fixture; it is not a clinic profile.
+-->
+<HL7v2xConformanceProfile HL7Version="2.5" ProfileType="HL7" Identifier="1.2.3.4.5.6.7.8.1">
+    <MetaData Name="Synthetic ORU R01" OrgName="Telrad test fixture" Version="1" Status="Draft" Topics="HL7 2.5 ORU R01"/>
+    <UseCase>
+        <Purpose>Validate the synthetic report used by Relay payload-integrity tests.</Purpose>
+    </UseCase>
+    <Encodings>
+        <Encoding>ER7</Encoding>
+    </Encodings>
+    <DynamicDef AccAck="NE" AppAck="AL" MsgAckMode="Immediate"/>
+    <HL7v2xStaticDef MsgType="ORU" EventType="R01" MsgStructID="ORU_R01" EventDesc="Synthetic observation report" Identifier="1.2.3.4.5.6.7.8.1.1" Role="Sender">
+        <Segment Name="MSH" LongName="Message Header" Usage="R" Min="1" Max="1">
+            <Field Name="Field Separator" Usage="R" Min="1" Max="1" Datatype="ST" Length="1" ConstantValue="|"/>
+            <Field Name="Encoding Characters" Usage="R" Min="1" Max="1" Datatype="ST" Length="4" ConstantValue="^~\&amp;"/>
+            <Field Name="Sending Application" Usage="R" Min="1" Max="1" Datatype="HD" Length="227"/>
+            <Field Name="Sending Facility" Usage="R" Min="1" Max="1" Datatype="HD" Length="227"/>
+            <Field Name="Receiving Application" Usage="R" Min="1" Max="1" Datatype="HD" Length="227"/>
+            <Field Name="Receiving Facility" Usage="R" Min="1" Max="1" Datatype="HD" Length="227"/>
+            <Field Name="Date Time Of Message" Usage="R" Min="1" Max="1" Datatype="TS" Length="26"/>
+            <Field Name="Security" Usage="O" Min="0" Max="1" Datatype="ST" Length="40"/>
+            <Field Name="Message Type" Usage="R" Min="1" Max="1" Datatype="MSG" Length="15" ConstantValue="ORU^R01^ORU_R01"/>
+            <Field Name="Message Control ID" Usage="R" Min="1" Max="1" Datatype="ST" Length="20"/>
+            <Field Name="Processing ID" Usage="R" Min="1" Max="1" Datatype="PT" Length="3" ConstantValue="P"/>
+            <Field Name="Version ID" Usage="R" Min="1" Max="1" Datatype="VID" Length="60" ConstantValue="2.5"/>
+            <Field Name="Sequence Number" Usage="O" Min="0" Max="1" Datatype="NM" Length="15"/>
+            <Field Name="Continuation Pointer" Usage="O" Min="0" Max="1" Datatype="ST" Length="180"/>
+            <Field Name="Accept Acknowledgment Type" Usage="X" Min="0" Max="1" Datatype="ID" Length="2"/>
+            <Field Name="Application Acknowledgment Type" Usage="X" Min="0" Max="1" Datatype="ID" Length="2"/>
+            <Field Name="Country Code" Usage="O" Min="0" Max="1" Datatype="ID" Length="3"/>
+            <Field Name="Character Set" Usage="R" Min="1" Max="1" Datatype="ID" Length="16" ConstantValue="UNICODE UTF-8"/>
+        </Segment>
+        <SegGroup Name="PATIENT_RESULT" LongName="Patient Result" Usage="R" Min="1" Max="1">
+            <SegGroup Name="PATIENT" LongName="Patient" Usage="R" Min="1" Max="1">
+                <Segment Name="PID" LongName="Patient Identification" Usage="R" Min="1" Max="1">
+                    <Field Name="Set ID" Usage="R" Min="1" Max="1" Datatype="SI" Length="4"/>
+                    <Field Name="Patient ID" Usage="O" Min="0" Max="1" Datatype="CX" Length="20"/>
+                    <Field Name="Patient Identifier List" Usage="R" Min="1" Max="*" Datatype="CX" Length="250"/>
+                    <Field Name="Alternate Patient ID" Usage="O" Min="0" Max="*" Datatype="CX" Length="20"/>
+                    <Field Name="Patient Name" Usage="R" Min="1" Max="*" Datatype="XPN" Length="250"/>
+                    <Field Name="Mothers Maiden Name" Usage="O" Min="0" Max="*" Datatype="XPN" Length="250"/>
+                    <Field Name="Date Time Of Birth" Usage="R" Min="1" Max="1" Datatype="TS" Length="26"/>
+                    <Field Name="Administrative Sex" Usage="R" Min="1" Max="1" Datatype="IS" Length="1"/>
+                    <Field Name="Patient Alias" Usage="O" Min="0" Max="*" Datatype="XPN" Length="250"/>
+                    <Field Name="Race" Usage="O" Min="0" Max="*" Datatype="CE" Length="250"/>
+                    <Field Name="Patient Address" Usage="R" Min="1" Max="*" Datatype="XAD" Length="250"/>
+                    <Field Name="County Code" Usage="O" Min="0" Max="1" Datatype="IS" Length="4"/>
+                    <Field Name="Phone Number Home" Usage="O" Min="0" Max="*" Datatype="XTN" Length="250"/>
+                </Segment>
+            </SegGroup>
+            <SegGroup Name="ORDER_OBSERVATION" LongName="Order Observation" Usage="R" Min="1" Max="1">
+                <Segment Name="OBR" LongName="Observation Request" Usage="R" Min="1" Max="1">
+                    <Field Name="Set ID" Usage="R" Min="1" Max="1" Datatype="SI" Length="4"/>
+                    <Field Name="Placer Order Number" Usage="R" Min="1" Max="1" Datatype="EI" Length="22"/>
+                    <Field Name="Filler Order Number" Usage="R" Min="1" Max="1" Datatype="EI" Length="22"/>
+                    <Field Name="Universal Service Identifier" Usage="R" Min="1" Max="1" Datatype="CE" Length="250"/>
+                    <Field Name="Priority" Usage="X" Min="0" Max="1" Datatype="ID" Length="2"/>
+                    <Field Name="Requested Date Time" Usage="X" Min="0" Max="1" Datatype="TS" Length="26"/>
+                    <Field Name="Observation Date Time" Usage="R" Min="1" Max="1" Datatype="TS" Length="26"/>
+                    <Field Name="Observation End Date Time" Usage="O" Min="0" Max="1" Datatype="TS" Length="26"/>
+                    <Field Name="Collection Volume" Usage="O" Min="0" Max="1" Datatype="CQ" Length="20"/>
+                    <Field Name="Collector Identifier" Usage="O" Min="0" Max="*" Datatype="XCN" Length="250"/>
+                    <Field Name="Specimen Action Code" Usage="O" Min="0" Max="1" Datatype="ID" Length="1"/>
+                    <Field Name="Danger Code" Usage="O" Min="0" Max="1" Datatype="CE" Length="250"/>
+                    <Field Name="Relevant Clinical Information" Usage="O" Min="0" Max="1" Datatype="ST" Length="300"/>
+                    <Field Name="Specimen Received Date Time" Usage="O" Min="0" Max="1" Datatype="TS" Length="26"/>
+                    <Field Name="Specimen Source" Usage="O" Min="0" Max="1" Datatype="SPS" Length="300"/>
+                    <Field Name="Ordering Provider" Usage="O" Min="0" Max="*" Datatype="XCN" Length="250"/>
+                    <Field Name="Order Callback Phone Number" Usage="O" Min="0" Max="*" Datatype="XTN" Length="250"/>
+                    <Field Name="Placer Field 1" Usage="O" Min="0" Max="1" Datatype="ST" Length="60"/>
+                    <Field Name="Placer Field 2" Usage="O" Min="0" Max="1" Datatype="ST" Length="60"/>
+                    <Field Name="Filler Field 1" Usage="O" Min="0" Max="1" Datatype="ST" Length="60"/>
+                    <Field Name="Filler Field 2" Usage="O" Min="0" Max="1" Datatype="ST" Length="60"/>
+                    <Field Name="Results Report Status Change Date Time" Usage="R" Min="1" Max="1" Datatype="TS" Length="26"/>
+                    <Field Name="Charge To Practice" Usage="O" Min="0" Max="1" Datatype="MOC" Length="40"/>
+                    <Field Name="Diagnostic Service Section ID" Usage="R" Min="1" Max="1" Datatype="ID" Length="10" ConstantValue="RAD"/>
+                    <Field Name="Result Status" Usage="R" Min="1" Max="1" Datatype="ID" Length="1" ConstantValue="F"/>
+                </Segment>
+                <SegGroup Name="OBSERVATION" LongName="Observation" Usage="R" Min="1" Max="*">
+                    <Segment Name="OBX" LongName="Observation Result" Usage="R" Min="1" Max="1">
+                        <Field Name="Set ID" Usage="R" Min="1" Max="1" Datatype="SI" Length="4"/>
+                        <Field Name="Value Type" Usage="R" Min="1" Max="1" Datatype="ID" Length="2" ConstantValue="TX"/>
+                        <Field Name="Observation Identifier" Usage="R" Min="1" Max="1" Datatype="CE" Length="250"/>
+                        <Field Name="Observation Sub ID" Usage="O" Min="0" Max="1" Datatype="ST" Length="20"/>
+                        <Field Name="Observation Value" Usage="R" Min="1" Max="*" Datatype="TX" Length="99999"/>
+                        <Field Name="Units" Usage="X" Min="0" Max="1" Datatype="CE" Length="250"/>
+                        <Field Name="Reference Range" Usage="X" Min="0" Max="1" Datatype="ST" Length="60"/>
+                        <Field Name="Abnormal Flags" Usage="X" Min="0" Max="*" Datatype="IS" Length="5"/>
+                        <Field Name="Probability" Usage="X" Min="0" Max="1" Datatype="NM" Length="5"/>
+                        <Field Name="Nature Of Abnormal Test" Usage="X" Min="0" Max="*" Datatype="ID" Length="2"/>
+                        <Field Name="Observation Result Status" Usage="R" Min="1" Max="1" Datatype="ID" Length="1" ConstantValue="F"/>
+                        <Field Name="Effective Date Of Reference Range" Usage="X" Min="0" Max="1" Datatype="TS" Length="26"/>
+                        <Field Name="User Defined Access Checks" Usage="X" Min="0" Max="1" Datatype="ST" Length="20"/>
+                        <Field Name="Date Time Of Observation" Usage="R" Min="1" Max="1" Datatype="TS" Length="26"/>
+                    </Segment>
+                </SegGroup>
+            </SegGroup>
+        </SegGroup>
+    </HL7v2xStaticDef>
+</HL7v2xConformanceProfile>
