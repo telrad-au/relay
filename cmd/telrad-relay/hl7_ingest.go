@@ -53,6 +53,9 @@ func readMLLPFrame(reader io.Reader, limit int64) ([]byte, error) {
 }
 
 func readMLLPFrameFrom(reader *bufio.Reader, limit int64) ([]byte, error) {
+	if limit < 0 {
+		return nil, errors.New("HL7 message limit is invalid")
+	}
 	start, err := reader.ReadByte()
 	if err != nil {
 		return nil, err
@@ -62,14 +65,21 @@ func readMLLPFrameFrom(reader *bufio.Reader, limit int64) ([]byte, error) {
 	}
 	frame := make([]byte, 1, minInt64(limit+3, 32*1024))
 	frame[0] = start
-	for int64(len(frame)-1) <= limit {
-		value, err := reader.ReadByte()
-		if err != nil {
-			return nil, err
+	for {
+		chunk, readErr := reader.ReadSlice(mllpEnd)
+		payloadBytes := len(chunk)
+		if readErr == nil {
+			payloadBytes--
 		}
-		frame = append(frame, value)
-		if value != mllpEnd {
+		if int64(payloadBytes) > limit-int64(len(frame)-1) {
+			return nil, errors.New("HL7 message exceeds configured limit")
+		}
+		frame = appendMLLPChunk(frame, chunk, limit)
+		if errors.Is(readErr, bufio.ErrBufferFull) {
 			continue
+		}
+		if readErr != nil {
+			return nil, readErr
 		}
 		terminator, err := reader.ReadByte()
 		if err != nil {
@@ -79,12 +89,25 @@ func readMLLPFrameFrom(reader *bufio.Reader, limit int64) ([]byte, error) {
 		if terminator != mllpCR {
 			return nil, errors.New("invalid MLLP terminator")
 		}
-		if int64(len(frame)-3) > limit {
-			return nil, errors.New("HL7 message exceeds configured limit")
-		}
 		return frame, nil
 	}
-	return nil, errors.New("HL7 message exceeds configured limit")
+}
+
+func appendMLLPChunk(frame []byte, chunk []byte, limit int64) []byte {
+	required := len(frame) + len(chunk)
+	if required <= cap(frame) {
+		return append(frame, chunk...)
+	}
+	capacity := cap(frame) * 2
+	if capacity < required {
+		capacity = required
+	}
+	if maximum := int(limit) + 3; capacity > maximum {
+		capacity = maximum
+	}
+	grown := make([]byte, len(frame), capacity)
+	copy(grown, frame)
+	return append(grown, chunk...)
 }
 
 func minInt64(first int64, second int) int {
@@ -98,16 +121,18 @@ func hl7ControlID(message []byte) (string, error) {
 	if !utf8.Valid(message) {
 		return "", errors.New("HL7 message is not valid UTF-8")
 	}
-	for _, segment := range strings.FieldsFunc(string(message), func(r rune) bool { return r == '\r' || r == '\n' }) {
-		if !strings.HasPrefix(segment, "MSH") || len(segment) < 4 {
+	for remaining := message; len(remaining) > 0; {
+		segment, rest := nextHL7Segment(remaining)
+		remaining = rest
+		if !isHL7Segment(segment, 'M', 'S', 'H') || len(segment) < 4 {
 			continue
 		}
-		separator := string(segment[3])
-		fields := strings.Split(segment, separator)
-		if len(fields) <= 9 || strings.TrimSpace(fields[9]) == "" {
+		controlID, present := hl7Field(segment, segment[3], 9)
+		controlID = bytes.TrimSpace(controlID)
+		if !present || len(controlID) == 0 {
 			return "", errors.New("HL7 message has no MSH-10")
 		}
-		return strings.TrimSpace(fields[9]), nil
+		return string(controlID), nil
 	}
 	return "", errors.New("HL7 message has no MSH segment")
 }
@@ -117,25 +142,62 @@ func parseHL7Acknowledgement(message []byte) (string, string, error) {
 		return "", "", errors.New("ACK is not valid UTF-8")
 	}
 	separator := byte('|')
-	segments := strings.FieldsFunc(string(message), func(r rune) bool { return r == '\r' || r == '\n' })
-	for _, segment := range segments {
-		if strings.HasPrefix(segment, "MSH") && len(segment) >= 4 {
+	for remaining := message; len(remaining) > 0; {
+		segment, rest := nextHL7Segment(remaining)
+		remaining = rest
+		if isHL7Segment(segment, 'M', 'S', 'H') && len(segment) >= 4 {
 			separator = segment[3]
 			break
 		}
 	}
-	for _, segment := range segments {
-		prefix := "MSA" + string(separator)
-		if !strings.HasPrefix(segment, prefix) {
+	for remaining := message; len(remaining) > 0; {
+		segment, rest := nextHL7Segment(remaining)
+		remaining = rest
+		if !isHL7Segment(segment, 'M', 'S', 'A') || len(segment) < 4 || segment[3] != separator {
 			continue
 		}
-		fields := strings.Split(segment, string(separator))
-		if len(fields) < 3 || (fields[1] != "AA" && fields[1] != "AE" && fields[1] != "AR") || strings.TrimSpace(fields[2]) == "" {
+		code, haveCode := hl7Field(segment, separator, 1)
+		controlID, haveControlID := hl7Field(segment, separator, 2)
+		controlID = bytes.TrimSpace(controlID)
+		if !haveCode || !haveControlID || (!bytes.Equal(code, []byte("AA")) && !bytes.Equal(code, []byte("AE")) && !bytes.Equal(code, []byte("AR"))) || len(controlID) == 0 {
 			return "", "", errors.New("ACK MSA segment is invalid")
 		}
-		return fields[1], strings.TrimSpace(fields[2]), nil
+		return string(code), string(controlID), nil
 	}
 	return "", "", errors.New("ACK has no MSA segment")
+}
+
+func nextHL7Segment(message []byte) ([]byte, []byte) {
+	for len(message) > 0 && (message[0] == '\r' || message[0] == '\n') {
+		message = message[1:]
+	}
+	for index, value := range message {
+		if value == '\r' || value == '\n' {
+			return message[:index], message[index+1:]
+		}
+	}
+	return message, nil
+}
+
+func isHL7Segment(segment []byte, first byte, second byte, third byte) bool {
+	return len(segment) >= 3 && segment[0] == first && segment[1] == second && segment[2] == third
+}
+
+func hl7Field(segment []byte, separator byte, wanted int) ([]byte, bool) {
+	start := 0
+	for field := 0; ; field++ {
+		end := bytes.IndexByte(segment[start:], separator)
+		if field == wanted {
+			if end < 0 {
+				return segment[start:], true
+			}
+			return segment[start : start+end], true
+		}
+		if end < 0 {
+			return nil, false
+		}
+		start += end + 1
+	}
 }
 
 func ingestHL7(parent context.Context, address string, client *http.Client, provider *credentialProvider, status *runtimeStatusManager, message []byte, controlID string) ([]byte, error) {
