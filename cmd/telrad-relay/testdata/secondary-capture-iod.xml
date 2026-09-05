@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<IOD xml-space="preserved">
+  <!-- DICOM PS3.3 2026c A.8.1.3 mandatory modules for the test profile. -->
+  <!-- Patient Module, C.7.1.1 -->
+  <DataElement keyword="PatientName" tag="00100010" vr="PN" type="2" vm="1" />
+  <DataElement keyword="PatientID" tag="00100020" vr="LO" type="2" vm="1" />
+  <DataElement keyword="PatientBirthDate" tag="00100030" vr="DA" type="2" vm="1" />
+  <DataElement keyword="PatientSex" tag="00100040" vr="CS" type="2" vm="1">
+    <Value>M</Value>
+    <Value>F</Value>
+    <Value>O</Value>
+  </DataElement>
+
+  <!-- General Study Module, C.7.2.1 -->
+  <DataElement keyword="StudyInstanceUID" tag="0020000D" vr="UI" type="1" vm="1" />
+  <DataElement keyword="StudyDate" tag="00080020" vr="DA" type="2" vm="1" />
+  <DataElement keyword="StudyTime" tag="00080030" vr="TM" type="2" vm="1" />
+  <DataElement keyword="ReferringPhysicianName" tag="00080090" vr="PN" type="2" vm="1" />
+  <DataElement keyword="StudyID" tag="00200010" vr="SH" type="2" vm="1" />
+  <DataElement keyword="AccessionNumber" tag="00080050" vr="SH" type="2" vm="1" />
+
+  <!-- General Series and SC Equipment Modules, C.7.3.1 and C.8.6.1 -->
+  <DataElement keyword="SeriesInstanceUID" tag="0020000E" vr="UI" type="1" vm="1" />
+  <DataElement keyword="SeriesNumber" tag="00200011" vr="IS" type="2" vm="1" />
+  <DataElement keyword="ConversionType" tag="00080064" vr="CS" type="1" vm="1">
+    <Value>SYN</Value>
+  </DataElement>
+
+  <!-- General Image Module, C.7.6.1 -->
+  <DataElement keyword="InstanceNumber" tag="00200013" vr="IS" type="2" vm="1" />
+  <DataElement keyword="PatientOrientation" tag="00200020" vr="CS" type="2" vm="2" />
+
+  <!-- Image Pixel Module, C.7.6.3 -->
+  <DataElement keyword="SamplesPerPixel" tag="00280002" vr="US" type="1" vm="1">
+    <Value>1</Value>
+  </DataElement>
+  <DataElement keyword="PhotometricInterpretation" tag="00280004" vr="CS" type="1" vm="1">
+    <Value>MONOCHROME2</Value>
+  </DataElement>
+  <DataElement keyword="Rows" tag="00280010" vr="US" type="1" vm="1">
+    <Value>512</Value>
+  </DataElement>
+  <DataElement keyword="Columns" tag="00280011" vr="US" type="1" vm="1">
+    <Value>512</Value>
+  </DataElement>
+  <DataElement keyword="BitsAllocated" tag="00280100" vr="US" type="1" vm="1">
+    <Value>8</Value>
+  </DataElement>
+  <DataElement keyword="BitsStored" tag="00280101" vr="US" type="1" vm="1">
+    <Value>8</Value>
+  </DataElement>
+  <DataElement keyword="HighBit" tag="00280102" vr="US" type="1" vm="1">
+    <Value>7</Value>
+  </DataElement>
+  <DataElement keyword="PixelRepresentation" tag="00280103" vr="US" type="1" vm="1">
+    <Value>0</Value>
+  </DataElement>
+  <!-- Pixel Data presence and validity are checked by independent decoding. -->
+
+  <!-- SOP Common Module, C.12.1, plus the test fixture's synthetic marker. -->
+  <DataElement keyword="SOPClassUID" tag="00080016" vr="UI" type="1" vm="1">
+    <Value>1.2.840.10008.5.1.4.1.1.7</Value>
+  </DataElement>
+  <DataElement keyword="SOPInstanceUID" tag="00080018" vr="UI" type="1" vm="1" />
+  <DataElement keyword="SyntheticData" tag="0008001C" vr="CS" type="1" vm="1">
+    <Value>YES</Value>
+  </DataElement>
+</IOD>

@@ -242,6 +242,10 @@ func TestOrthancDICOMPayloadIntegrity(t *testing.T) {
 		assertOrthancFixtureBytes(t, fixture, wire.dataset)
 		capturedBodies[fixture.name] = upload.body
 	}
+	for _, fixture := range fixtures {
+		validateSecondaryCaptureWithDcm4che(t, testContext, fixture.name, capturedBodies[fixture.name])
+	}
+	assertDcm4cheRejectsMissingReferringPhysician(t, testContext, capturedBodies[fixtures[0].name])
 	validator := startOrthancContainer(t, testContext, "validator", nil)
 	for _, fixture := range fixtures {
 		captured := capturedBodies[fixture.name]
@@ -521,7 +525,7 @@ func createOrthancFixtures(t *testing.T, ctx context.Context, sender *orthancTes
 			instanceUID:           explicitInstanceUID,
 			transferSyntax:        explicitVRLittleEndianUID,
 			source:                explicitStored,
-			expectedDatasetSHA256: "442cacbba86f644d89b6e694e5e74b84e69dd097cf37207eb9cbb0d4d2c36fe6",
+			expectedDatasetSHA256: "8ba95dd753a0ae35cab3af39d515ad74ff4d91bf8fe7715dab0e36b9ceaa8b22",
 			expectedPixelSHA256:   "4397501c0da648ddd36e664efc8dae7ba448c6ae7b60aa17e57d0a00000f25e7",
 		},
 		{
@@ -530,7 +534,7 @@ func createOrthancFixtures(t *testing.T, ctx context.Context, sender *orthancTes
 			instanceUID:           compressedInstanceUID,
 			transferSyntax:        jpegLosslessSV1UID,
 			source:                compressedStored,
-			expectedDatasetSHA256: "f60a90c90104aba43c8956cdba52c0d9009382479a762460c99529968d1f7dd0",
+			expectedDatasetSHA256: "cf05168f19f061e823a9cc10c512e3822a62d9155d4cfeea990bf1a6bf0318fd",
 			expectedPixelSHA256:   "aafca1f21aecddb6d5bb6af7ab1c5bdf17a84214a314bc0f08f8fdd681c70747",
 		},
 	}
@@ -581,17 +585,19 @@ func buildSyntheticDICOM(instanceUID, seriesUID string) []byte {
 	data = appendDICOMExplicitElement(data, 0x0002, 0x0000, "UL", groupLength)
 	data = append(data, metadata...)
 
-	data = appendDICOMExplicitElement(data, 0x0008, 0x0008, "CS", text("ORIGINAL\\PRIMARY", ' '))
+	data = appendDICOMExplicitElement(data, 0x0008, 0x0008, "CS", text("DERIVED\\SECONDARY", ' '))
 	data = appendDICOMExplicitElement(data, 0x0008, 0x0016, "UI", ui(secondaryCaptureSOPClassUID))
 	data = appendDICOMExplicitElement(data, 0x0008, 0x0018, "UI", ui(instanceUID))
+	data = appendDICOMExplicitElement(data, 0x0008, 0x001c, "CS", text("YES", ' '))
 	data = appendDICOMExplicitElement(data, 0x0008, 0x0020, "DA", text("20260101", ' '))
 	data = appendDICOMExplicitElement(data, 0x0008, 0x0023, "DA", text("20260101", ' '))
 	data = appendDICOMExplicitElement(data, 0x0008, 0x0030, "TM", text("120000", ' '))
 	data = appendDICOMExplicitElement(data, 0x0008, 0x0033, "TM", text("120000", ' '))
 	data = appendDICOMExplicitElement(data, 0x0008, 0x0050, "SH", text("SYNTH0001", ' '))
 	data = appendDICOMExplicitElement(data, 0x0008, 0x0060, "CS", text("OT", ' '))
-	data = appendDICOMExplicitElement(data, 0x0008, 0x0064, "CS", text("WSD", ' '))
+	data = appendDICOMExplicitElement(data, 0x0008, 0x0064, "CS", text("SYN", ' '))
 	data = appendDICOMExplicitElement(data, 0x0008, 0x0070, "LO", text("Telrad test fixture", ' '))
+	data = appendDICOMExplicitElement(data, 0x0008, 0x0090, "PN", nil)
 	data = appendDICOMExplicitElement(data, 0x0008, 0x1030, "LO", text("Synthetic Relay interoperability", ' '))
 	data = appendDICOMExplicitElement(data, 0x0008, 0x103e, "LO", text("Deterministic payload integrity", ' '))
 	data = appendDICOMExplicitElement(data, 0x0010, 0x0010, "PN", text("SYNTHETIC^RELAY", ' '))
@@ -603,6 +609,7 @@ func buildSyntheticDICOM(instanceUID, seriesUID string) []byte {
 	data = appendDICOMExplicitElement(data, 0x0020, 0x0010, "SH", text("SYNTHETIC", ' '))
 	data = appendDICOMExplicitElement(data, 0x0020, 0x0011, "IS", text("1", ' '))
 	data = appendDICOMExplicitElement(data, 0x0020, 0x0013, "IS", text("1", ' '))
+	data = appendDICOMExplicitElement(data, 0x0020, 0x0020, "CS", nil)
 	data = appendDICOMExplicitElement(data, 0x0028, 0x0002, "US", us(1))
 	data = appendDICOMExplicitElement(data, 0x0028, 0x0004, "CS", text("MONOCHROME2", ' '))
 	data = appendDICOMExplicitElement(data, 0x0028, 0x0010, "US", us(512))
@@ -612,13 +619,17 @@ func buildSyntheticDICOM(instanceUID, seriesUID string) []byte {
 	data = appendDICOMExplicitElement(data, 0x0028, 0x0102, "US", us(7))
 	data = appendDICOMExplicitElement(data, 0x0028, 0x0103, "US", us(0))
 
+	return appendDICOMExplicitElement(data, 0x7fe0, 0x0010, "OB", syntheticPixelData())
+}
+
+func syntheticPixelData() []byte {
 	pixels := make([]byte, 512*512)
 	for row := 0; row < 512; row++ {
 		for column := 0; column < 512; column++ {
 			pixels[row*512+column] = byte((row*17 + column*31 + (row*column)%251) % 256)
 		}
 	}
-	return appendDICOMExplicitElement(data, 0x7fe0, 0x0010, "OB", pixels)
+	return pixels
 }
 
 func appendDICOMExplicitElement(destination []byte, group, element uint16, vr string, value []byte) []byte {

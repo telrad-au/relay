@@ -58,8 +58,13 @@ VR Little Endian plus JPEG Lossless SV1 over a real TCP C-STORE association.
 The harness records fragmented dataset PDVs before Relay, compares them
 byte-for-byte with the dataset in Relay's HTTPS Part 10 body, and imports the
 result into a second clean Orthanc instance to validate the SOP identifiers,
-transfer syntax, representative tags, and Pixel Data. Relay returns C-STORE
-success only after the fake HTTPS cloud supplies a valid receipt.
+transfer syntax, and representative tags. A separate test-only dcm4che
+5.33.1 image pinned at
+`dcm4che/dcm4che-tools:5.33.1@sha256:c8fbede4a6cf6047370ad21ce12fcc6be7ab013ff4996f1d032eb55239f870ed`
+validates the captured objects against the checked-in Secondary Capture IOD
+profile and independently decodes both transfer syntaxes. The decoded pixels
+must exactly match the deterministic 512x512 source image. Relay returns
+C-STORE success only after the fake HTTPS cloud supplies a valid receipt.
 
 The Docker-backed test is opt-in locally and has bounded startup, execution,
 and cleanup timeouts:
