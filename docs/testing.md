@@ -50,6 +50,32 @@ HTTP `201` receipts, DIMSE status mappings, backpressure, disconnect
 cancellation, total size accounting, drain behavior, and the rule that success
 cannot precede a valid cloud receipt.
 
+CI also runs a blocking Orthanc-backed interoperability test in the required
+`Test and build` job. It uses the test-only image
+`jodogne/orthanc-plugins:1.12.11@sha256:e7bffe0351cd391eacab8e78098e236efe6cafed987830e9b462b2050a0eae4a`,
+creates deterministic PHI-free Secondary Capture fixtures, and sends Explicit
+VR Little Endian plus JPEG Lossless SV1 over a real TCP C-STORE association.
+The harness records fragmented dataset PDVs before Relay, compares them
+byte-for-byte with the dataset in Relay's HTTPS Part 10 body, and imports the
+result into a second clean Orthanc instance to validate the SOP identifiers,
+transfer syntax, representative tags, and Pixel Data. Relay returns C-STORE
+success only after the fake HTTPS cloud supplies a valid receipt.
+
+The Docker-backed test is opt-in locally and has bounded startup, execution,
+and cleanup timeouts:
+
+```bash
+TELRAD_ORTHANC_INTEROP_TEST=1 \
+go test -race ./cmd/telrad-relay \
+  -run '^TestOrthancDICOMPayloadIntegrity$' -count=1 -timeout=5m
+```
+
+HL7 listener coverage sends a non-trivial synthetic UTF-8 message through a
+real TCP/MLLP connection and asserts that the HTTPS request body is exactly the
+original message without its MLLP envelope. Retry coverage separately asserts
+that the first HTTPS body and every retry remain byte-identical to that original
+message while retaining the same idempotency key.
+
 The integration cloud uses TLS/WSS bearer authentication. No fixture contains a
 private certificate authority, client identity, custom ALPN, or raw TCP ingest
 proxy.

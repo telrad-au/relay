@@ -339,7 +339,7 @@ func jsonMarshalIndent(value any) ([]byte, error) {
 }
 
 func TestHL7RetriesSameBodyAndKeyThenReturnsExactACK(t *testing.T) {
-	message := []byte("MSH|^~\\&|CLINIC|A|TELRAD|B|20260101000000||ORM^O01|control-1|P|2.5\rPID|1")
+	message := syntheticHL7IntegrityMessage("control-1")
 	ack := []byte("MSH|^~\\&|TELRAD|B|CLINIC|A|20260101000001||ACK|ack-1|P|2.5\rMSA|AE|control-1\r")
 	var mu sync.Mutex
 	var bodies [][]byte
@@ -369,9 +369,76 @@ func TestHL7RetriesSameBodyAndKeyThenReturnsExactACK(t *testing.T) {
 	if err != nil || !bytes.Equal(result, ack) {
 		t.Fatalf("ACK=%q error=%v", result, err)
 	}
-	if len(bodies) != 3 || !bytes.Equal(bodies[0], bodies[1]) || !bytes.Equal(bodies[1], bodies[2]) || keys[0] == "" || keys[0] != keys[1] || keys[1] != keys[2] {
+	if len(bodies) != 3 || !bytes.Equal(bodies[0], message) || !bytes.Equal(bodies[0], bodies[1]) || !bytes.Equal(bodies[1], bodies[2]) || keys[0] == "" || keys[0] != keys[1] || keys[1] != keys[2] {
 		t.Fatalf("retry bodies/keys differ: %d %#v", len(bodies), keys)
 	}
+}
+
+func TestHL7ListenerForwardsCompleteMLLPPayloadByteExact(t *testing.T) {
+	message := syntheticHL7IntegrityMessage("control-listener-1")
+	ack := []byte("MSH|^~\\&|TELRAD|B|CLINIC|A|20260101000001||ACK|ack-listener-1|P|2.5\rMSA|AA|control-listener-1\r")
+	received := make(chan []byte, 1)
+	server := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		body, _ := io.ReadAll(request.Body)
+		received <- body
+		writer.Header().Set("Content-Type", "application/hl7-v2")
+		_, _ = writer.Write(ack)
+	}))
+	defer server.Close()
+
+	listener, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	cfg := defaultConfig()
+	cfg.HL7URL = server.URL
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	provider := testProvider(t, testCredential('H'))
+	status := newRuntimeStatus(filepath.Join(t.TempDir(), "relay.json"))
+	go func() {
+		connection, acceptErr := listener.Accept()
+		if acceptErr == nil {
+			serveHL7(ctx, connection, cfg, server.Client(), provider, status)
+			_ = connection.Close()
+		}
+	}()
+
+	clinic, err := net.Dial("tcp4", listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer clinic.Close()
+	frame := append([]byte{mllpStart}, message...)
+	frame = append(frame, mllpEnd, mllpCR)
+	if _, err := clinic.Write(frame); err != nil {
+		t.Fatal(err)
+	}
+	response, err := readMLLPFrame(clinic, 1024*1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantResponse := append([]byte{mllpStart}, ack...)
+	wantResponse = append(wantResponse, mllpEnd, mllpCR)
+	if !bytes.Equal(response, wantResponse) {
+		t.Fatalf("listener ACK=%q, want %q", response, wantResponse)
+	}
+	select {
+	case body := <-received:
+		if !bytes.Equal(body, message) {
+			t.Fatalf("HTTPS body differs from MLLP payload:\nreceived=%q\noriginal=%q", body, message)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("cloud did not receive HL7 payload")
+	}
+}
+
+func syntheticHL7IntegrityMessage(controlID string) []byte {
+	return []byte("MSH|^~\\&|CLINIC|RAD|TELRAD|CLOUD|20260101120000+1000||ORU^R01|" + controlID + "|P|2.5||||||UNICODE UTF-8\r" +
+		"PID|1||RELAY-INTEROP^^^CLINIC^MR||Synthetic^Zoë||19800101|O|||^^Brisbane^QLD^4000^AU||\r" +
+		"OBR|1|||SYNTH^Synthetic integrity test|||||||||||||||||||||F\r" +
+		"OBX|1|TX|NOTE^Synthetic note||Escaped delimiters \\F\\ \\S\\ \\R\\ and UTF-8 café||mmol/L|||F|||\r")
 }
 
 func TestHL7KeepsClinicConnectionForSequentialExchanges(t *testing.T) {
