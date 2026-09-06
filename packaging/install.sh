@@ -22,7 +22,7 @@ ln -sfn /usr/local/lib/telrad-relay/telrad /usr/local/bin/telrad
 if [ ! -f /etc/telrad-relay/relay.json ]; then
     install -m 0600 relay.example.json /etc/telrad-relay/relay.json
 fi
-if grep -Eq '"schemaVersion"[[:space:]]*:[[:space:]]*2' /etc/telrad-relay/relay.json; then
+if grep -Eq '"schemaVersion"[[:space:]]*:[[:space:]]*[23]' /etc/telrad-relay/relay.json; then
     /usr/local/lib/telrad-relay/telrad --config /etc/telrad-relay/relay.json migrate-config
 fi
 install -m 0600 installation-manifest.json /etc/telrad-relay/installation.json

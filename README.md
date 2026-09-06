@@ -110,6 +110,11 @@ Once Relay is running, point clinic systems to the Relay host's LAN address:
 Allow only the required clinic systems to reach these ports. Validate the
 route with approved test traffic before sending clinical data.
 
+Report return uses HTTPS polling, with up to three seconds of idle pickup
+latency. Telrad retains the delivery queue; Relay has no local delivery ledger.
+If delivery succeeds but its confirmation is lost, the RIS may receive the
+same report and message control ID again. The receiver must handle duplicates.
+
 ## Check and manage Relay
 
 ```text

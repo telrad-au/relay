@@ -3,9 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"encoding/binary"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -20,8 +18,6 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"github.com/coder/websocket"
 )
 
 func TestPairing201DerivesEndpointsAuthorizationAndPersistsAtomically(t *testing.T) {
@@ -64,7 +60,7 @@ func TestPairing201DerivesEndpointsAuthorizationAndPersistsAtomically(t *testing
 		t.Fatal(err)
 	}
 	loaded, err := loadConfig(configPath)
-	wantControlURL := strings.Replace(server.URL, "https://", "wss://", 1) + "/v1/relay/control"
+	wantControlURL := server.URL + "/v1/relay/control"
 	if err != nil || loaded.RelayID != "relay-1" || loaded.ControlURL != wantControlURL ||
 		loaded.DicomURL != server.URL+"/v1/relay/ingest/dicom" || loaded.HL7URL != server.URL+"/v1/relay/ingest/hl7" {
 		t.Fatalf("loaded=%#v error=%v", loaded, err)
@@ -150,7 +146,7 @@ func TestNativeDeviceAuthorizationDisplaysApprovalFlowAndRedeemsPairingToken(t *
 			writer.Header().Set("Content-Type", "application/json")
 			writer.WriteHeader(http.StatusCreated)
 			_, _ = fmt.Fprintf(writer, `{"relayId":"relay-native","credential":%q,"protocolVersion":1,"pairingUrl":%q,"controlUrl":%q,"dicomUrl":%q,"hl7Url":%q}`,
-				credential, server.URL+"/v1/relay/pairing-enrollments", strings.Replace(server.URL, "https://", "wss://", 1)+"/v1/relay/control", server.URL+"/v1/relay/ingest/dicom", server.URL+"/v1/relay/ingest/hl7")
+				credential, server.URL+"/v1/relay/pairing-enrollments", server.URL+"/v1/relay/control", server.URL+"/v1/relay/ingest/dicom", server.URL+"/v1/relay/ingest/hl7")
 		default:
 			t.Fatalf("unexpected request %s", request.URL.Path)
 		}
@@ -246,71 +242,6 @@ func TestCredentialRotationSendsEmptyBearerPostAndStoresOverlap(t *testing.T) {
 	}
 	if record.Credential != newCredential || record.PreviousCredential != oldCredential || record.PreviousValidUntil == nil || !record.PreviousValidUntil.Equal(deadline) {
 		t.Fatalf("rotation record=%#v", record)
-	}
-}
-
-func TestControlUsesBearerHelloAndTrustedReadyTransports(t *testing.T) {
-	credential := testCredential('C')
-	var server *httptest.Server
-	server = httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		authorization := request.Header.Values("Authorization")
-		if request.URL.Path != "/v1/relay/control" || len(authorization) != 1 || authorization[0] != "Bearer "+credential {
-			http.Error(writer, "unauthorized", http.StatusUnauthorized)
-			return
-		}
-		connection, err := websocket.Accept(writer, request, nil)
-		if err != nil {
-			return
-		}
-		defer connection.CloseNow()
-		var hello map[string]any
-		if err := readJSON(request.Context(), connection, &hello); err != nil {
-			return
-		}
-		capabilities, _ := hello["capabilities"].(map[string]any)
-		if hello["type"] != "hello" || capabilities["httpsIngest"] != true {
-			_ = connection.Close(websocket.StatusPolicyViolation, "invalid hello")
-			return
-		}
-		if _, present := capabilities["directMtls"]; present {
-			_ = connection.Close(websocket.StatusPolicyViolation, "legacy capability")
-			return
-		}
-		origin := server.URL
-		_ = writeJSON(request.Context(), connection, readyMessage{Type: "ready", SessionID: "session-1", Transports: map[string]readyTransport{
-			"dicom": {URL: origin + "/v1/relay/ingest/dicom", ContentType: "application/dicom"},
-			"hl7":   {URL: origin + "/v1/relay/ingest/hl7", ContentType: "application/hl7-v2"},
-		}})
-		for {
-			if _, _, err := connection.Read(request.Context()); err != nil {
-				return
-			}
-		}
-	}))
-	defer server.Close()
-	directory := t.TempDir()
-	cfg := pairedTestConfig(directory)
-	cfg.ControlURL = strings.Replace(server.URL, "https://", "wss://", 1) + "/v1/relay/control"
-	cfg.DicomURL = server.URL + "/v1/relay/ingest/dicom"
-	cfg.HL7URL = server.URL + "/v1/relay/ingest/hl7"
-	provider := testProvider(t, credential)
-	ctx, cancel := context.WithCancel(context.Background())
-	status := newRuntimeStatus(filepath.Join(directory, "relay.json"))
-	established, errors := connectControl(ctx, cfg, filepath.Join(directory, "relay.json"), server.Client(), provider, newWorkDrainer(), status)
-	if !established {
-		t.Fatalf("control failed: %v", <-errors)
-	}
-	status.mu.Lock()
-	connected := status.status.ControlConnected && status.status.ReportReturnAvailable
-	status.mu.Unlock()
-	if !connected {
-		t.Fatal("control status was not connected")
-	}
-	cancel()
-	select {
-	case <-errors:
-	case <-time.After(time.Second):
-		t.Fatal("control did not stop")
 	}
 }
 
@@ -756,96 +687,6 @@ func TestDICOMReceiptStatusMappings(t *testing.T) {
 				t.Fatalf("http %d authentication attention=%t", test.status, authenticationAttention)
 			}
 		})
-	}
-}
-
-type failingCompletionReportLedger struct{}
-
-func (failingCompletionReportLedger) Begin(_, _, _, _ string, now time.Time) (reportDeliveryRecord, bool, error) {
-	return reportDeliveryRecord{State: "pending", UpdatedAt: now}, true, nil
-}
-
-func (failingCompletionReportLedger) Complete(_, _, _, _ string, _ time.Time) error {
-	return errors.New("injected completion failure")
-}
-
-func TestReportReturnRequiresRejectedStateToBeDurable(t *testing.T) {
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer listener.Close()
-	go func() {
-		connection, acceptErr := listener.Accept()
-		if acceptErr != nil {
-			return
-		}
-		defer connection.Close()
-		if _, readErr := readMLLPFrame(connection, 1024*1024); readErr != nil {
-			return
-		}
-		_, _ = connection.Write([]byte("\x0bMSA|AE|report-control-rejected\r\x1c\x0d"))
-	}()
-	address := listener.Addr().(*net.TCPAddr)
-	cfg := defaultConfig()
-	cfg.ReportHost = "127.0.0.1"
-	cfg.ReportPort = address.Port
-	payload := "MSH|^~\\&|TELRAD|A|CLINIC|B|20260101000000||ORU^R01|report-control-rejected|P|2.5\r"
-	digest := sha256.Sum256([]byte(payload))
-	response := deliverReport(context.Background(), cfg, failingCompletionReportLedger{}, "delivery-rejected", "token-rejected", payload, hex.EncodeToString(digest[:]))
-	if response["type"] != "reportFail" || response["error"] != "ledger_error" || response["ackCode"] != "AE" {
-		t.Fatalf("report response=%#v", response)
-	}
-}
-
-func TestReportReturnDeliveryAndDurableDeduplication(t *testing.T) {
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer listener.Close()
-	deliveries := make(chan []byte, 1)
-	go func() {
-		connection, acceptErr := listener.Accept()
-		if acceptErr != nil {
-			return
-		}
-		defer connection.Close()
-		frame, readErr := readMLLPFrame(connection, 1024*1024)
-		if readErr != nil {
-			return
-		}
-		deliveries <- frame
-		_, _ = connection.Write([]byte("\x0bMSA|AA|report-control-1\r\x1c\x0d"))
-	}()
-	address := listener.Addr().(*net.TCPAddr)
-	cfg := defaultConfig()
-	cfg.ReportHost = "127.0.0.1"
-	cfg.ReportPort = address.Port
-	ledger, err := openReportDeliveryLedger(filepath.Join(t.TempDir(), "relay.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { closeReportLedgerForTest(t, ledger) })
-	payload := "MSH|^~\\&|TELRAD|A|CLINIC|B|20260101000000||ORU^R01|report-control-1|P|2.5\r"
-	digest := sha256.Sum256([]byte(payload))
-	hash := hex.EncodeToString(digest[:])
-	first := deliverReport(context.Background(), cfg, ledger, "delivery-1", "token-1", payload, hash)
-	if first["type"] != "reportAck" || first["ackCode"] != "AA" {
-		t.Fatalf("first report response=%#v", first)
-	}
-	select {
-	case frame := <-deliveries:
-		if !bytes.Equal(frame, append(append([]byte{mllpStart}, []byte(payload)...), mllpEnd, mllpCR)) {
-			t.Fatalf("report frame=%q", frame)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("clinic did not receive returned report")
-	}
-	_ = listener.Close()
-	second := deliverReport(context.Background(), cfg, ledger, "delivery-1", "token-1", payload, hash)
-	if second["type"] != "reportAck" || second["ackCode"] != "AA" {
-		t.Fatalf("deduplicated report response=%#v", second)
 	}
 }
 

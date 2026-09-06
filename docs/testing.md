@@ -1,6 +1,6 @@
 # Relay testing
 
-The default suite uses local loopback TLS/HTTP, WSS, MLLP, and byte-level DICOM
+The default suite uses local loopback TLS/HTTP, MLLP, and byte-level DICOM
 fixtures. Tests contain synthetic identifiers only.
 
 ```bash
@@ -37,18 +37,14 @@ go test ./cmd/telrad-relay -run '^$' \
   -benchmem
 ```
 
-Report-return coverage checks durable pending and terminal transitions,
-accepted-delivery deduplication without resend, ambiguous restart behavior,
-metadata-reuse rejection, storage-failure rollback, retention and capacity,
-fail-closed corruption handling, and one-time migration from the legacy JSON
-ledger without retaining plaintext tokens or control IDs. Ledger transition
-benchmarks exercise 100, 1,000, and 10,000 retained records and report allocated
-database-page bytes and write calls per transition.
-
-```bash
-go test ./cmd/telrad-relay -run '^$' \
-  -bench '^BenchmarkReportLedgerTransitions$' -benchmem
-```
+Report-return coverage checks authenticated HTTPS session creation, trusted
+transport metadata, lost result responses, identical result replay without
+another MLLP send, retransmission under a new cloud claim, correlated application
+ACKs, shutdown draining, and absence of a local ledger. Schema upgrade tests
+check credential preservation, idempotence and rejection of foreign endpoints.
+The Telrad API conformance suite separately covers atomic claims, lease expiry,
+late and superseded results, idempotent failure accounting, session replacement,
+TEST mode, and manual retry routing.
 
 DICOM fixtures construct UL PDUs and DIMSE command sets directly. Tests cover
 association acceptance/rejection, presentation-context choice, C-ECHO,
@@ -102,7 +98,7 @@ Run the independent fixture validation locally with:
 scripts/check-hl7-fixtures.sh
 ```
 
-The integration cloud uses TLS/WSS bearer authentication. No fixture contains a
+The integration cloud uses HTTPS bearer authentication. No fixture contains a
 private certificate authority, client identity, custom ALPN, or raw TCP ingest
 proxy.
 

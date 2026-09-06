@@ -29,10 +29,10 @@ if (-not (Test-Path (Join-Path $config "relay.json"))) {
     Copy-Item .\relay.example.json (Join-Path $config "relay.json")
 }
 $installedSchema = (Get-Content -Raw (Join-Path $config "relay.json") | ConvertFrom-Json).schemaVersion
-if ($installedSchema -eq 2) {
+if ($installedSchema -eq 2 -or $installedSchema -eq 3) {
     & $installedBinary --config (Join-Path $config "relay.json") migrate-config
     if ($LASTEXITCODE -ne 0) { throw "Relay configuration migration failed." }
-} elseif ($installedSchema -ne 3) {
+} elseif ($installedSchema -ne 4) {
     throw "The installed Relay configuration schema is unsupported."
 }
 Copy-Item .\installation-manifest.json (Join-Path $config "installation.json") -Force

@@ -41,6 +41,7 @@ type updateTrust struct {
 type updateTransaction struct {
 	Target          string    `json:"target"`
 	Previous        string    `json:"previous"`
+	PreviousConfig  string    `json:"previousConfig,omitempty"`
 	ExpectedVersion string    `json:"expectedVersion"`
 	ConfigPath      string    `json:"configPath"`
 	ActivatedAt     time.Time `json:"activatedAt"`
@@ -529,10 +530,20 @@ func applyStagedUpdate(args []string) error {
 	if err := atomicWriteFile(previous, current, 0o755); err != nil {
 		return fmt.Errorf("preserve previous relay executable: %w", err)
 	}
+	previousConfig := ""
+	if configData, err := os.ReadFile(*configPath); err == nil {
+		previousConfig = *configPath + ".previous"
+		if err := atomicWriteFile(previousConfig, configData, 0o600); err != nil {
+			return fmt.Errorf("preserve previous relay configuration: %w", err)
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("read previous relay configuration: %w", err)
+	}
 	activatedAt := time.Now().UTC()
 	transaction := updateTransaction{
 		Target:          *target,
 		Previous:        previous,
+		PreviousConfig:  previousConfig,
 		ExpectedVersion: *expectedVersion,
 		ConfigPath:      *configPath,
 		ActivatedAt:     activatedAt,
@@ -573,6 +584,9 @@ func applyStagedUpdate(args []string) error {
 		return fmt.Errorf("complete update transaction: %w", err)
 	}
 	_ = os.Remove(previous)
+	if previousConfig != "" {
+		_ = os.Remove(previousConfig)
+	}
 	_ = os.Remove(self)
 	if err := syncDirectory(filepath.Dir(*target)); err != nil {
 		return err
@@ -633,6 +647,16 @@ func rollbackUpdate(transaction updateTransaction, cause error) error {
 	}
 	if rollbackError != nil {
 		return errors.Join(cause, fmt.Errorf("restore previous relay executable: %w", rollbackError))
+	}
+	if transaction.PreviousConfig != "" {
+		configData, err := os.ReadFile(transaction.PreviousConfig)
+		if err != nil {
+			return errors.Join(cause, fmt.Errorf("read previous relay configuration: %w", err))
+		}
+		if err := atomicWriteFile(transaction.ConfigPath, configData, 0o600); err != nil {
+			return errors.Join(cause, fmt.Errorf("restore previous relay configuration: %w", err))
+		}
+		_ = os.Remove(transaction.PreviousConfig)
 	}
 	_ = os.Remove(updateJournalPath(transaction.Target))
 	_ = os.Remove(transaction.Previous)

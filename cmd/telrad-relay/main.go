@@ -34,7 +34,7 @@ var (
 )
 
 const (
-	currentConfigSchemaVersion = 3
+	currentConfigSchemaVersion = 4
 	protocolVersion            = "1"
 	maxCloudResponseBytes      = 64 * 1024
 	serviceDrainTimeout        = 60 * time.Second
@@ -554,7 +554,11 @@ func runWithContext(ctx context.Context, cfg *config, configPath string) error {
 	errCh := make(chan error, 8)
 	credentialChanged := make(chan struct{}, 1)
 	go watchCredentialFile(ctx, provider, credentialChanged, status)
-	go superviseControl(ctx, cfg, configPath, clients.secure, provider, credentialChanged, work, status)
+	controlDone := make(chan struct{})
+	go func() {
+		defer close(controlDone)
+		superviseControl(ctx, workCtx, cfg, clients.secure, provider, credentialChanged, work, status)
+	}()
 	go maintainRuntimeStatus(ctx, status, errCh)
 	go acceptRelayConnections(ctx, "dicom", dicomListener, work, limits, func(conn net.Conn) { serveDICOM(workCtx, conn, cfg, clients.secure, provider, status) }, errCh)
 	go acceptRelayConnections(ctx, "hl7", hl7Listener, work, limits, func(conn net.Conn) { serveHL7(workCtx, conn, cfg, clients.secure, provider, status) }, errCh)
@@ -563,6 +567,11 @@ func runWithContext(ctx context.Context, cfg *config, configPath string) error {
 		status.SetIngestReady(false)
 		if err := drainRelayWork(work, dicomListener, hl7Listener); err != nil {
 			slog.Warn("relay shutdown drain deadline expired", "activeWork", work.Active())
+		}
+		cancelWork()
+		select {
+		case <-controlDone:
+		case <-time.After(6 * time.Second):
 		}
 		return nil
 	case err := <-errCh:
@@ -740,6 +749,9 @@ func loadConfig(path string) (*config, error) {
 	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
 		return nil, errors.New("decode relay configuration: multiple JSON values are not allowed")
 	}
+	if err := upgradePollingConfig(path, cfg); err != nil {
+		return nil, err
+	}
 	applyConnectionDefaults(cfg)
 	if value := strings.TrimSpace(os.Getenv("TELRAD_RELAY_PAIRING_URL")); value != "" {
 		cfg.PairingURL = value
@@ -854,7 +866,7 @@ func validateProtocolEndpoints(cfg *config, requirePaired bool) error {
 	}
 	if requirePaired {
 		values = append(values,
-			struct{ name, value, scheme, path string }{"controlUrl", cfg.ControlURL, "wss", "/v1/relay/control"},
+			struct{ name, value, scheme, path string }{"controlUrl", cfg.ControlURL, "https", "/v1/relay/control"},
 			struct{ name, value, scheme, path string }{"dicomUrl", cfg.DicomURL, "https", "/v1/relay/ingest/dicom"},
 			struct{ name, value, scheme, path string }{"hl7Url", cfg.HL7URL, "https", "/v1/relay/ingest/hl7"},
 		)
@@ -897,6 +909,19 @@ func migrateConfig(path, pairingURL, updateURL, updateKey string) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return err
+	}
+	var header struct {
+		SchemaVersion int `json:"schemaVersion"`
+	}
+	if json.Unmarshal(data, &header) == nil && (header.SchemaVersion == 3 || header.SchemaVersion == 4) {
+		if pairingURL != "" || updateURL != "" || updateKey != "" {
+			return errors.New("polling migration preserves the existing origin and trust")
+		}
+		if _, err := loadConfig(path); err != nil {
+			return err
+		}
+		fmt.Println("Relay configuration migrated to schema v4; existing authentication preserved")
+		return nil
 	}
 	var old struct {
 		SchemaVersion              int    `json:"schemaVersion"`
@@ -975,7 +1000,7 @@ func migrateConfig(path, pairingURL, updateURL, updateKey string) error {
 	if cleanupError != nil {
 		return fmt.Errorf("remove obsolete credential material: %w", cleanupError)
 	}
-	fmt.Println("Relay configuration migrated to schema v3; re-pairing is required before the service can start")
+	fmt.Println("Relay configuration migrated to schema v4; re-pairing is required before the service can start")
 	return nil
 }
 

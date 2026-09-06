@@ -105,7 +105,7 @@ func TestPairingCommitPermissionsAndRecovery(t *testing.T) {
 	cfg.configPath = configPath
 	cfg.CredentialPath = credentialPath
 	cfg.RelayID = "relay-1"
-	cfg.ControlURL = "wss://ingest.dev.app.telrad.com.au/v1/relay/control"
+	cfg.ControlURL = "https://ingest.dev.app.telrad.com.au/v1/relay/control"
 	cfg.DicomURL = "https://ingest.dev.app.telrad.com.au/v1/relay/ingest/dicom"
 	cfg.HL7URL = "https://ingest.dev.app.telrad.com.au/v1/relay/ingest/hl7"
 	if err := commitPairing(configPath, cfg, credentialFile{SchemaVersion: 1, Credential: testCredential('A')}); err != nil {
