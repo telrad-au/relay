@@ -169,7 +169,7 @@ environment secrets:
 
 Configure `RELAY_DEV_ENROLLMENT_URL` as an environment variable containing the
 complete HTTPS development Relay pairing endpoint. The protected variable name
-is retained for release-workflow compatibility; generated schema-v3
+is retained for release-workflow compatibility; generated schema-v4
 configuration writes it as `pairingUrl`.
 
 The official container's production pairing endpoint is source-controlled in

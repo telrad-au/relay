@@ -1,8 +1,8 @@
 # Container operations
 
 The Compose deployment runs an immutable image with a read-only root filesystem,
-no additional Linux capabilities, and a named volume for schema-v3 configuration,
-its bearer credential record, and its bounded report-delivery ledger. The
+no additional Linux capabilities, and a named volume for schema-v4 configuration
+and its bearer credential record. The
 container does not update its own image.
 
 ## First pairing
@@ -53,7 +53,7 @@ The report destination must be reachable from the container:
 - add `host.docker.internal:host-gateway` on Linux when that topology is
   explicitly chosen.
 
-Outbound HTTPS/WSS uses system CA roots and the standard `HTTPS_PROXY` and
+Outbound HTTPS uses system CA roots and the standard `HTTPS_PROXY` and
 `NO_PROXY` variables. Redirects are rejected for all authenticated protocol
 requests. Do not install a private CA merely to bypass certificate errors;
 review the intended enterprise trust policy first.
@@ -87,12 +87,11 @@ non-credential settings and update trust, deletes obsolete certificate and
 pending request files, and requires re-pairing. There is no certificate
 credential migration or protocol compatibility mode.
 
-An image that predates the transactional report-delivery ledger can use the
-normalized legacy snapshot only until the upgraded Relay records its first new
-report state transition. After that point the legacy path contains a deliberate
-migration marker and the older image fails closed rather than risk resending a
-report. Do not remove that marker or roll back across this storage transition
-without administrator reconciliation.
+Schema v3 upgrades automatically on startup to schema v4 and HTTPS polling,
+preserving the credential and listener settings. Coordinate this change with
+the Telrad API and edge cutover. Existing ledger files are ignored and can be
+removed once the cutover is complete. There is no local report state to restore.
+See [native operations](native-operations.md#schema-v3-polling-cutover).
 
 To roll back, restore the recorded immutable image reference only if that
 release supports the current configuration schema. The credential volume is

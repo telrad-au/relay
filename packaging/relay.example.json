@@ -1,7 +1,7 @@
 {
-  "schemaVersion": 3,
+  "schemaVersion": 4,
   "pairingUrl": "https://ingest.dev.app.telrad.com.au/v1/relay/pairing-enrollments",
-  "controlUrl": "wss://ingest.dev.app.telrad.com.au/v1/relay/control",
+  "controlUrl": "https://ingest.dev.app.telrad.com.au/v1/relay/control",
   "dicomUrl": "https://ingest.dev.app.telrad.com.au/v1/relay/ingest/dicom",
   "hl7Url": "https://ingest.dev.app.telrad.com.au/v1/relay/ingest/hl7",
   "relayId": "OPAQUE_RELAY_ID",

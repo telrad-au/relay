@@ -48,3 +48,22 @@ func TestHostedInstallersCarryVersionedRepairableMigrations(t *testing.T) {
 		t.Fatal("Windows installer does not include repair rollback")
 	}
 }
+
+func TestHostedInstallersGeneratePollingSchemaAndPreserveExistingEnrollment(t *testing.T) {
+	_, sourceFile, _, _ := runtime.Caller(0)
+	packagingDir := filepath.Join(filepath.Dir(sourceFile), "..", "..", "packaging")
+	for _, fixture := range []struct{ name, schema, preservation string }{
+		{"install-hosted.sh.template", `"schemaVersion": 4`, `*[34]'`},
+		{"install-hosted.ps1.template", `schemaVersion = 4`, `$existingSchema -eq 3 -or $existingSchema -eq 4`},
+	} {
+		contents, err := os.ReadFile(filepath.Join(packagingDir, fixture.name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, contract := range []string{fixture.schema, fixture.preservation, "migrate-config"} {
+			if !strings.Contains(string(contents), contract) {
+				t.Errorf("%s is missing polling upgrade contract %q", fixture.name, contract)
+			}
+		}
+	}
+}

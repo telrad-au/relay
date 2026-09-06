@@ -112,7 +112,7 @@ backup_component /etc/telrad-relay/ca.crt relay-ca
 had_enrollment=false
 migration_required=false
 if [ -f /etc/telrad-relay/relay.json ]; then
-    if grep -Eq '"schemaVersion"[[:space:]]*:[[:space:]]*3' /etc/telrad-relay/relay.json; then
+    if grep -Eq '"schemaVersion"[[:space:]]*:[[:space:]]*[34]' /etc/telrad-relay/relay.json; then
         if [ -f /etc/telrad-relay/relay-credential.json ]; then
             had_enrollment=true
         fi
@@ -122,7 +122,7 @@ if [ -f /etc/telrad-relay/relay.json ]; then
 else
     cat > /etc/telrad-relay/relay.json <<EOF
 {
-  "schemaVersion": 3,
+  "schemaVersion": 4,
   "pairingUrl": "$PAIRING_URL",
   "controlUrl": "",
   "dicomUrl": "",
@@ -170,6 +170,8 @@ if [ "$migration_required" = true ]; then
         --migration-update-manifest-url "$UPDATE_MANIFEST_URL" \
         --migration-update-public-key "$UPDATE_PUBLIC_KEY" \
         migrate-config
+elif grep -Eq '"schemaVersion"[[:space:]]*:[[:space:]]*3' /etc/telrad-relay/relay.json; then
+    /usr/local/lib/telrad-relay/telrad --config /etc/telrad-relay/relay.json migrate-config
 fi
 printf '%s' "$INSTALLATION_MANIFEST_BASE64" | base64 -d > /etc/telrad-relay/installation.json
 chown -R telrad-relay:telrad-relay /etc/telrad-relay /var/lib/telrad-relay

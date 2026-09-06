@@ -15,7 +15,7 @@ func pairedTestConfig(directory string) *config {
 	cfg.configPath = filepath.Join(directory, "relay.json")
 	cfg.CredentialPath = filepath.Join(directory, "relay-credential.json")
 	cfg.RelayID = "opaque-relay"
-	cfg.ControlURL = "wss://ingest.dev.app.telrad.com.au/v1/relay/control"
+	cfg.ControlURL = "https://ingest.dev.app.telrad.com.au/v1/relay/control"
 	cfg.DicomURL = "https://ingest.dev.app.telrad.com.au/v1/relay/ingest/dicom"
 	cfg.HL7URL = "https://ingest.dev.app.telrad.com.au/v1/relay/ingest/hl7"
 	return cfg
@@ -129,7 +129,7 @@ func TestValidateConfigRequiresExactCommonOriginEndpoints(t *testing.T) {
 	tests := []func(*config){
 		func(cfg *config) { cfg.PairingURL += "?token=secret" },
 		func(cfg *config) { cfg.PairingURL += "?" },
-		func(cfg *config) { cfg.ControlURL = "wss://other.example/v1/relay/control" },
+		func(cfg *config) { cfg.ControlURL = "https://other.example/v1/relay/control" },
 		func(cfg *config) { cfg.DicomURL = "http://ingest.dev.app.telrad.com.au/v1/relay/ingest/dicom" },
 		func(cfg *config) { cfg.HL7URL += "/legacy" },
 		func(cfg *config) {
@@ -204,7 +204,7 @@ func TestMigrateConfigHardCutsV2AndRemovesCertificateMaterial(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.SchemaVersion != 3 || cfg.RelayID != "" || cfg.ControlURL != "" || cfg.DicomPort != 21112 || cfg.MaxConnections != 20 {
+	if cfg.SchemaVersion != 4 || cfg.RelayID != "" || cfg.ControlURL != "" || cfg.DicomPort != 21112 || cfg.MaxConnections != 20 {
 		t.Fatalf("migrated config=%#v", cfg)
 	}
 	encoded, _ := os.ReadFile(path)

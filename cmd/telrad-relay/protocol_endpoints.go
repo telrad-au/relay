@@ -19,7 +19,7 @@ func deriveProtocolEndpoints(pairingURL string) (protocolEndpoints, error) {
 	}
 	return protocolEndpoints{
 		PairingURL: pairingURL,
-		ControlURL: build("wss", "/v1/relay/control"),
+		ControlURL: build("https", "/v1/relay/control"),
 		DicomURL:   build("https", "/v1/relay/ingest/dicom"),
 		HL7URL:     build("https", "/v1/relay/ingest/hl7"),
 	}, nil

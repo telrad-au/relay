@@ -113,7 +113,7 @@ $hadEnrollment = $false
 $migrationRequired = $false
 if ($hadConfig) {
     $existingSchema = (Get-Content -Raw (Join-Path $configDir "relay.json") | ConvertFrom-Json).schemaVersion
-    if ($existingSchema -eq 3) {
+    if ($existingSchema -eq 3 -or $existingSchema -eq 4) {
         $hadEnrollment = Test-Path (Join-Path $configDir "relay-credential.json")
     } elseif ($existingSchema -eq 2) {
         $migrationRequired = $true
@@ -162,7 +162,7 @@ try {
 
     if (-not $hadConfig) {
         $config = @{
-            schemaVersion = 3
+            schemaVersion = 4
             pairingUrl = $PairingUrl
             controlUrl = ""
             dicomUrl = ""
@@ -196,6 +196,10 @@ try {
             --migration-update-public-key $TrustedUpdatePublicKey `
             migrate-config
         if ($LASTEXITCODE -ne 0) { throw "Relay configuration migration failed." }
+    }
+    if ($hadConfig -and $existingSchema -eq 3) {
+        & $binary --config (Join-Path $configDir "relay.json") migrate-config
+        if ($LASTEXITCODE -ne 0) { throw "Relay polling configuration upgrade failed." }
     }
     $updateTrust = [ordered]@{
         schemaVersion = 1

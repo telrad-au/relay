@@ -101,6 +101,10 @@ func TestApplyStagedUpdateRestoresPreviousBinaryAfterHealthFailure(t *testing.T)
 		t.Fatal(err)
 	}
 
+	oldConfig := []byte(`{"schemaVersion":3}`)
+	if err := os.WriteFile(configPath, oldConfig, 0600); err != nil {
+		t.Fatal(err)
+	}
 	restoreUpdateHandoffSeams(t)
 	approvedUpdateExecutable = func() (string, error) { return staged, nil }
 	var serviceActions []string
@@ -119,7 +123,12 @@ func TestApplyStagedUpdateRestoresPreviousBinaryAfterHealthFailure(t *testing.T)
 		return nil
 	}
 	healthFailure := errors.New("health check failed")
-	waitForApprovedUpdate = func(updateTransaction) error { return healthFailure }
+	waitForApprovedUpdate = func(updateTransaction) error {
+		if err := os.WriteFile(configPath, []byte(`{"schemaVersion":4}`), 0600); err != nil {
+			t.Fatal(err)
+		}
+		return healthFailure
+	}
 
 	err := applyStagedUpdate([]string{
 		"-target", target,
@@ -139,7 +148,11 @@ func TestApplyStagedUpdateRestoresPreviousBinaryAfterHealthFailure(t *testing.T)
 	if !bytes.Equal(restored, oldBinary) {
 		t.Fatalf("restored binary = %q", restored)
 	}
-	for _, removed := range []string{target + ".previous", updateJournalPath(target)} {
+	restoredConfig, configErr := os.ReadFile(configPath)
+	if configErr != nil || !bytes.Equal(restoredConfig, oldConfig) {
+		t.Fatal("rollback did not restore pre-upgrade configuration")
+	}
+	for _, removed := range []string{target + ".previous", configPath + ".previous", updateJournalPath(target)} {
 		if _, statErr := os.Stat(removed); !errors.Is(statErr, os.ErrNotExist) {
 			t.Fatalf("rollback retained %s: %v", removed, statErr)
 		}
