@@ -123,7 +123,6 @@ LINUX_ARM64_SHA="$(tr -d '\r\n ' < "${LINUX_ARM64_BINARY}.sha256")"
 LINUX_SIGNATURE="$(base64 -w0 < "${LINUX_BINARY}.update.sig")"
 LINUX_ARM64_SIGNATURE="$(base64 -w0 < "${LINUX_ARM64_BINARY}.update.sig")"
 UPDATE_PUBLIC_KEY_PEM_BASE64="$(base64 -w0 < "$OUTPUT_DIR/update-public-key.pem")"
-SERVICE_FILE_BASE64="$(base64 -w0 < "$OUTPUT_DIR/telrad-relay.service")"
 INSTALLATION_MANIFEST_BASE64="$(base64 -w0 < "$OUTPUT_DIR/installation-manifest.json")"
 
 jq -n \
@@ -146,7 +145,6 @@ sed -e "s|@@ARTIFACT_BASE_URL@@|$ARTIFACT_BASE_URL|g" \
     -e "s|@@ENROLLMENT_URL@@|$ENROLLMENT_URL|g" \
     -e "s|@@UPDATE_PUBLIC_KEY@@|$(< "$OUTPUT_DIR/update-public-key.txt")|g" \
     -e "s|@@UPDATE_PUBLIC_KEY_PEM_BASE64@@|$UPDATE_PUBLIC_KEY_PEM_BASE64|g" \
-    -e "s|@@SERVICE_FILE_BASE64@@|$SERVICE_FILE_BASE64|g" \
     -e "s|@@INSTALLATION_MANIFEST_BASE64@@|$INSTALLATION_MANIFEST_BASE64|g" \
     "$ROOT_DIR/packaging/install-hosted.sh.template" > "$OUTPUT_DIR/install.sh"
 chmod 0755 "$OUTPUT_DIR/install.sh" "$LINUX_BINARY" "$LINUX_ARM64_BINARY"

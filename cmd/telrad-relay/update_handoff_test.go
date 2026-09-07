@@ -7,34 +7,22 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
-	"time"
 )
 
-func TestApplyStagedUpdateCompletesTransactionalHandoff(t *testing.T) {
+func TestApprovedUpdateCompletesTransaction(t *testing.T) {
 	directory := t.TempDir()
 	target := filepath.Join(directory, "telrad")
-	staged := target + ".new"
 	configPath := filepath.Join(directory, "relay.json")
 	oldBinary := []byte("old relay")
 	newBinary := []byte("new relay")
 	if err := os.WriteFile(target, oldBinary, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(staged, newBinary, 0o755); err != nil {
-		t.Fatal(err)
-	}
 
 	restoreUpdateHandoffSeams(t)
-	approvedUpdateExecutable = func() (string, error) { return staged, nil }
 	var serviceActions []string
 	updateServiceAction = func(action string) error {
 		serviceActions = append(serviceActions, action)
-		return nil
-	}
-	waitForUpdateParent = func(processID int, timeout time.Duration) error {
-		if processID != 123 || timeout != 30*time.Second {
-			t.Fatalf("parent wait = %d, %s", processID, timeout)
-		}
 		return nil
 	}
 	validateApprovedUpdate = func(gotTarget, gotConfigPath, expectedVersion string) error {
@@ -56,12 +44,7 @@ func TestApplyStagedUpdateCompletesTransactionalHandoff(t *testing.T) {
 		return nil
 	}
 
-	if err := applyStagedUpdate([]string{
-		"-target", target,
-		"-parent", "123",
-		"-version", "2.0.0",
-		"-config", configPath,
-	}); err != nil {
+	if err := applyUpdateAt(target, configPath, "2.0.0", newBinary); err != nil {
 		t.Fatal(err)
 	}
 	if !reflect.DeepEqual(serviceActions, []string{"stop", "start"}) {
@@ -80,24 +63,20 @@ func TestApplyStagedUpdateCompletesTransactionalHandoff(t *testing.T) {
 	if transaction.ActivatedAt.IsZero() || transaction.Deadline.Sub(transaction.ActivatedAt) != updateHealthTimeout {
 		t.Fatalf("transaction timing = %+v", transaction)
 	}
-	for _, removed := range []string{staged, target + ".previous", updateJournalPath(target)} {
+	for _, removed := range []string{target + ".previous", updateJournalPath(target)} {
 		if _, err := os.Stat(removed); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("completed update retained %s: %v", removed, err)
 		}
 	}
 }
 
-func TestApplyStagedUpdateRestoresPreviousBinaryAfterHealthFailure(t *testing.T) {
+func TestApprovedUpdateRestoresPreviousBinaryAfterHealthFailure(t *testing.T) {
 	directory := t.TempDir()
 	target := filepath.Join(directory, "telrad")
-	staged := target + ".new"
 	configPath := filepath.Join(directory, "relay.json")
 	oldBinary := []byte("known-good relay")
 	newBinary := []byte("unhealthy relay")
 	if err := os.WriteFile(target, oldBinary, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(staged, newBinary, 0o755); err != nil {
 		t.Fatal(err)
 	}
 
@@ -106,7 +85,6 @@ func TestApplyStagedUpdateRestoresPreviousBinaryAfterHealthFailure(t *testing.T)
 		t.Fatal(err)
 	}
 	restoreUpdateHandoffSeams(t)
-	approvedUpdateExecutable = func() (string, error) { return staged, nil }
 	var serviceActions []string
 	updateServiceAction = func(action string) error {
 		serviceActions = append(serviceActions, action)
@@ -130,11 +108,7 @@ func TestApplyStagedUpdateRestoresPreviousBinaryAfterHealthFailure(t *testing.T)
 		return healthFailure
 	}
 
-	err := applyStagedUpdate([]string{
-		"-target", target,
-		"-version", "2.0.0",
-		"-config", configPath,
-	})
+	err := applyUpdateAt(target, configPath, "2.0.0", newBinary)
 	if err == nil || !errors.Is(err, healthFailure) {
 		t.Fatalf("update error = %v", err)
 	}
@@ -152,7 +126,7 @@ func TestApplyStagedUpdateRestoresPreviousBinaryAfterHealthFailure(t *testing.T)
 	if configErr != nil || !bytes.Equal(restoredConfig, oldConfig) {
 		t.Fatal("rollback did not restore pre-upgrade configuration")
 	}
-	for _, removed := range []string{target + ".previous", configPath + ".previous", updateJournalPath(target)} {
+	for _, removed := range []string{target + ".previous", target + ".config.previous", updateJournalPath(target)} {
 		if _, statErr := os.Stat(removed); !errors.Is(statErr, os.ErrNotExist) {
 			t.Fatalf("rollback retained %s: %v", removed, statErr)
 		}
@@ -166,7 +140,7 @@ func TestApplyStagedUpdateRequiresCompleteSafeArguments(t *testing.T) {
 		{"-target", "telrad", "-version", "2.0.0", "-config", "relay.json", "-parent", "-1"},
 	}
 	for _, args := range tests {
-		if err := applyStagedUpdate(args); err == nil {
+		if err := execute(append([]string{"apply-update"}, args...)); err == nil {
 			t.Fatalf("unsafe arguments %q were accepted", args)
 		}
 	}
@@ -174,14 +148,10 @@ func TestApplyStagedUpdateRequiresCompleteSafeArguments(t *testing.T) {
 
 func restoreUpdateHandoffSeams(t *testing.T) {
 	t.Helper()
-	originalExecutable := approvedUpdateExecutable
-	originalWaitForParent := waitForUpdateParent
 	originalServiceAction := updateServiceAction
 	originalValidate := validateApprovedUpdate
 	originalWaitForReady := waitForApprovedUpdate
 	t.Cleanup(func() {
-		approvedUpdateExecutable = originalExecutable
-		waitForUpdateParent = originalWaitForParent
 		updateServiceAction = originalServiceAction
 		validateApprovedUpdate = originalValidate
 		waitForApprovedUpdate = originalWaitForReady

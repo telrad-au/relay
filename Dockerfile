@@ -7,7 +7,7 @@ COPY . .
 ARG VERSION=dev
 ARG TARGETOS=linux
 ARG TARGETARCH=amd64
-RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath \
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -tags relay_container -trimpath \
     -ldflags="-s -w -X main.version=${VERSION} -X main.distribution=docker" \
     -o /telrad-relay ./cmd/telrad-relay \
     && install -d -m 0700 /image-root/var/lib/telrad-relay \

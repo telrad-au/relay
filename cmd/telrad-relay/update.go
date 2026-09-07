@@ -8,7 +8,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"net/http"
@@ -82,13 +81,11 @@ type updateRelease struct {
 }
 
 var (
-	approvedUpdateExecutable = os.Executable
-	startApprovedUpdate      = launchStagedUpdate
-	isManagedUpdateConfig    = func(path string) bool { return path == defaultConfigPath() }
-	waitForUpdateParent      = waitForProcessExit
-	updateServiceAction      = serviceAction
-	validateApprovedUpdate   = validateInstalledUpdate
-	waitForApprovedUpdate    = waitForUpdatedRuntimeReady
+	isManagedUpdateConfig  = managedConfig
+	submitUpdatePayload    = submitApprovedUpdate
+	updateServiceAction    = serviceAction
+	validateApprovedUpdate = validateInstalledUpdate
+	waitForApprovedUpdate  = waitForUpdatedRuntimeReady
 )
 
 func updateRelay(ctx context.Context, cfg *config, configPath string, args []string, client *http.Client) error {
@@ -115,11 +112,7 @@ func updateRelay(ctx context.Context, cfg *config, configPath string, args []str
 		fmt.Println("No changes made.")
 		if precedence < 0 {
 			fmt.Println("Inspect the source for this exact release, then approve it with:")
-			if runtime.GOOS == "windows" {
-				fmt.Printf("  telrad update %s\n", release.Manifest.Version)
-			} else {
-				fmt.Printf("  sudo telrad update %s\n", release.Manifest.Version)
-			}
+			fmt.Printf("  telrad update %s\n", release.Manifest.Version)
 		}
 		return nil
 	}
@@ -139,15 +132,8 @@ func updateRelay(ctx context.Context, cfg *config, configPath string, args []str
 	if precedence > 0 {
 		return fmt.Errorf("refusing to downgrade Relay from %s to %s", version, approvedVersion)
 	}
-	if err := checkRuntimeReady(configPath, time.Now()); err != nil {
+	if err := updatePreparationReady(configPath); err != nil {
 		return fmt.Errorf("Relay must be running and ready before an update: %w", err)
-	}
-	runtimeStatus, err := readRuntimeStatus(configPath)
-	if err != nil {
-		return err
-	}
-	if runtimeStatus.Version != version {
-		return fmt.Errorf("running Relay version %s does not match this update command version %s", runtimeStatus.Version, version)
 	}
 	binary, err := download(ctx, client, release.Artifact.URL, 100*1024*1024)
 	if err != nil {
@@ -160,29 +146,7 @@ func updateRelay(ctx context.Context, cfg *config, configPath string, args []str
 	if err := verifyUpdateArtifact(publicKey, release.Manifest, release.Platform, release.Artifact, signature, binary); err != nil {
 		return err
 	}
-	current, err := approvedUpdateExecutable()
-	if err != nil {
-		return err
-	}
-	staged := current + ".new"
-	if err := atomicWriteFile(staged, binary, 0o755); err != nil {
-		return fmt.Errorf("stage approved update: %w", err)
-	}
-	fmt.Println("Artifact signature and SHA-256: verified")
-	fmt.Printf("Applying clinic-approved Relay %s...\n", approvedVersion)
-	if runtime.GOOS == "windows" {
-		fmt.Println("Keep this Administrator terminal open until the update reports completion.")
-	}
-	if err := startApprovedUpdate(staged, []string{
-		"apply-update",
-		"-target", current,
-		"-version", approvedVersion,
-		"-config", configPath,
-	}); err != nil {
-		_ = os.Remove(staged)
-		return fmt.Errorf("launch approved update: %w", err)
-	}
-	return nil
+	return submitUpdatePayload(release, binary)
 }
 
 func loadUpdateTrust(cfg *config, configPath string) (updateTrust, error) {
@@ -191,7 +155,7 @@ func loadUpdateTrust(cfg *config, configPath string) (updateTrust, error) {
 		if err := validateManagedUpdateTrust(defaultUpdateTrustPath()); err != nil {
 			return trust, err
 		}
-		data, err := os.ReadFile(defaultUpdateTrustPath())
+		data, err := readProtectedFile(defaultUpdateTrustPath(), maxCloudResponseBytes)
 		if errors.Is(err, os.ErrNotExist) {
 			return trust, errors.New("managed update trust is not installed; rerun a reviewed native installer")
 		}
@@ -221,32 +185,39 @@ func loadUpdateTrust(cfg *config, configPath string) (updateTrust, error) {
 			PublicKey:     cfg.UpdatePublicKey,
 		}
 	}
+	return trust, validateUpdateTrust(trust)
+}
+
+func validateUpdateTrust(trust updateTrust) error {
+	if trust.SchemaVersion != updateTrustSchemaVersion {
+		return errors.New("unsupported update trust schema")
+	}
 	if trust.PublicKey == "" || (trust.ManifestURL == "" && trust.ReleaseFeedURL == "") {
-		return trust, errors.New("updates are not configured for this installation")
+		return errors.New("updates are not configured for this installation")
 	}
 	if trust.Channel != stableUpdateChannel && trust.Channel != testingUpdateChannel {
-		return trust, fmt.Errorf("update trust channel %q is unsupported", trust.Channel)
+		return fmt.Errorf("update trust channel %q is unsupported", trust.Channel)
 	}
 	if trust.ManifestURL != "" && trust.ReleaseFeedURL != "" {
-		return trust, errors.New("update trust must configure either manifestUrl or releaseFeedUrl, not both")
+		return errors.New("update trust must configure either manifestUrl or releaseFeedUrl, not both")
 	}
 	if trust.ManifestURL != "" {
 		if err := validateEndpointURL("update manifest URL", trust.ManifestURL, "https", ""); err != nil {
-			return trust, err
+			return err
 		}
 	}
 	if trust.ReleaseFeedURL != "" {
 		if trust.Channel != testingUpdateChannel {
-			return trust, errors.New("release feed discovery is supported only for the testing update channel")
+			return errors.New("release feed discovery is supported only for the testing update channel")
 		}
 		if err := validateEndpointURL("update release feed URL", trust.ReleaseFeedURL, "https", ""); err != nil {
-			return trust, err
+			return err
 		}
 	}
 	if _, _, err := decodeUpdateSignature(trust.PublicKey, base64.StdEncoding.EncodeToString(make([]byte, ed25519.SignatureSize))); err != nil {
-		return trust, err
+		return err
 	}
-	return trust, nil
+	return nil
 }
 
 func validateManagedUpdateTrust(path string) error {
@@ -487,31 +458,9 @@ func validateUpdateManifestIdentity(manifest updateManifest) error {
 	return nil
 }
 
-func applyStagedUpdate(args []string) error {
-	flags := flag.NewFlagSet("apply-update", flag.ContinueOnError)
-	target := flags.String("target", "", "target executable")
-	parent := flags.Int("parent", 0, "parent process id")
-	expectedVersion := flags.String("version", "", "expected release version")
-	configPath := flags.String("config", "", "relay configuration path")
-	if err := flags.Parse(args); err != nil {
-		return err
-	}
-	if *target == "" || *parent < 0 || *expectedVersion == "" || *configPath == "" {
-		return errors.New("target, parent, version, and config are required")
-	}
-	self, err := approvedUpdateExecutable()
-	if err != nil {
-		return err
-	}
-	binary, err := os.ReadFile(self)
-	if err != nil {
-		return err
-	}
-	if *parent > 0 {
-		if err := waitForUpdateParent(*parent, 30*time.Second); err != nil {
-			return fmt.Errorf("wait for relay process to exit: %w", err)
-		}
-	}
+// Only the restricted installer supplies production targets; tests use isolated
+// directories to exercise replacement and rollback without changing the host.
+func applyUpdateAt(target, configPath, expectedVersion string, binary []byte) error {
 	fmt.Println("Stopping the Relay service and draining active exchanges...")
 	if err := updateServiceAction("stop"); err != nil {
 		return fmt.Errorf("stop relay service: %w", err)
@@ -522,8 +471,8 @@ func applyStagedUpdate(args []string) error {
 			_ = updateServiceAction("start")
 		}
 	}()
-	previous := *target + ".previous"
-	current, err := os.ReadFile(*target)
+	previous := target + ".previous"
+	current, err := safeReadFile(target, 100*1024*1024)
 	if err != nil {
 		return fmt.Errorf("read current relay executable: %w", err)
 	}
@@ -531,8 +480,8 @@ func applyStagedUpdate(args []string) error {
 		return fmt.Errorf("preserve previous relay executable: %w", err)
 	}
 	previousConfig := ""
-	if configData, err := os.ReadFile(*configPath); err == nil {
-		previousConfig = *configPath + ".previous"
+	if configData, err := safeReadFile(configPath, maxCloudResponseBytes); err == nil {
+		previousConfig = target + ".config.previous"
 		if err := atomicWriteFile(previousConfig, configData, 0o600); err != nil {
 			return fmt.Errorf("preserve previous relay configuration: %w", err)
 		}
@@ -541,21 +490,21 @@ func applyStagedUpdate(args []string) error {
 	}
 	activatedAt := time.Now().UTC()
 	transaction := updateTransaction{
-		Target:          *target,
+		Target:          target,
 		Previous:        previous,
 		PreviousConfig:  previousConfig,
-		ExpectedVersion: *expectedVersion,
-		ConfigPath:      *configPath,
+		ExpectedVersion: expectedVersion,
+		ConfigPath:      configPath,
 		ActivatedAt:     activatedAt,
 		Deadline:        activatedAt.Add(updateHealthTimeout),
 	}
-	journalPath := updateJournalPath(*target)
+	journalPath := updateJournalPath(target)
 	if err := atomicWriteJSON(journalPath, transaction); err != nil {
 		return fmt.Errorf("write update transaction journal: %w", err)
 	}
 	var lastError error
 	for attempt := 0; attempt < 60; attempt++ {
-		if err := replaceExecutable(*target, binary); err == nil {
+		if err := replaceExecutable(target, binary); err == nil {
 			lastError = nil
 			break
 		} else {
@@ -564,10 +513,10 @@ func applyStagedUpdate(args []string) error {
 		time.Sleep(500 * time.Millisecond)
 	}
 	if lastError != nil {
-		_ = os.Remove(journalPath)
+		_ = safeRemove(journalPath)
 		return fmt.Errorf("could not replace relay executable: %w", lastError)
 	}
-	if err := validateApprovedUpdate(*target, *configPath, *expectedVersion); err != nil {
+	if err := validateApprovedUpdate(target, configPath, expectedVersion); err != nil {
 		serviceStopped = false
 		return rollbackUpdateAndRestart(transaction, fmt.Errorf("validate installed update: %w", err))
 	}
@@ -580,18 +529,17 @@ func applyStagedUpdate(args []string) error {
 	if err := waitForApprovedUpdate(transaction); err != nil {
 		return rollbackUpdateAndRestart(transaction, err)
 	}
-	if err := os.Remove(journalPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err := safeRemove(journalPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("complete update transaction: %w", err)
 	}
-	_ = os.Remove(previous)
+	_ = safeRemove(previous)
 	if previousConfig != "" {
-		_ = os.Remove(previousConfig)
+		_ = safeRemove(previousConfig)
 	}
-	_ = os.Remove(self)
-	if err := syncDirectory(filepath.Dir(*target)); err != nil {
+	if err := syncDirectory(filepath.Dir(target)); err != nil {
 		return err
 	}
-	fmt.Printf("Relay %s is installed and ready.\n", *expectedVersion)
+	fmt.Printf("Relay %s is installed and ready.\n", expectedVersion)
 	return nil
 }
 
@@ -605,10 +553,6 @@ func validateInstalledUpdate(target, configPath, expectedVersion string) error {
 	if strings.TrimSpace(string(output)) != expectedVersion {
 		return fmt.Errorf("installed relay reported version %q, expected %q", strings.TrimSpace(string(output)), expectedVersion)
 	}
-	output, err = exec.CommandContext(ctx, target, "--config", configPath, "doctor").CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("run installed relay diagnostics: %w: %s", err, strings.TrimSpace(string(output)))
-	}
 	return nil
 }
 
@@ -620,6 +564,9 @@ func waitForUpdatedRuntimeReady(transaction updateTransaction) error {
 	for {
 		status, err := readRuntimeStatus(transaction.ConfigPath)
 		if err == nil && status.State == "ready" && status.IngestReady && !status.AuthenticationAttention && status.Version == transaction.ExpectedVersion && !status.UpdatedAt.Before(transaction.ActivatedAt) {
+			if nativeManagementEnabled(transaction.ConfigPath) {
+				return callUpdatedDiagnostics()
+			}
 			return nil
 		}
 		select {
@@ -631,7 +578,7 @@ func waitForUpdatedRuntimeReady(transaction updateTransaction) error {
 }
 
 func rollbackUpdate(transaction updateTransaction, cause error) error {
-	previous, err := os.ReadFile(transaction.Previous)
+	previous, err := safeReadFile(transaction.Previous, 100*1024*1024)
 	if err != nil {
 		return errors.Join(cause, fmt.Errorf("read previous relay executable: %w", err))
 	}
@@ -649,23 +596,26 @@ func rollbackUpdate(transaction updateTransaction, cause error) error {
 		return errors.Join(cause, fmt.Errorf("restore previous relay executable: %w", rollbackError))
 	}
 	if transaction.PreviousConfig != "" {
-		configData, err := os.ReadFile(transaction.PreviousConfig)
+		configData, err := safeReadFile(transaction.PreviousConfig, maxCloudResponseBytes)
 		if err != nil {
 			return errors.Join(cause, fmt.Errorf("read previous relay configuration: %w", err))
 		}
 		if err := atomicWriteFile(transaction.ConfigPath, configData, 0o600); err != nil {
 			return errors.Join(cause, fmt.Errorf("restore previous relay configuration: %w", err))
 		}
-		_ = os.Remove(transaction.PreviousConfig)
+		_ = safeRemove(transaction.PreviousConfig)
 	}
-	_ = os.Remove(updateJournalPath(transaction.Target))
-	_ = os.Remove(transaction.Previous)
+	_ = safeRemove(updateJournalPath(transaction.Target))
+	_ = safeRemove(transaction.Previous)
 	return cause
 }
 
 func rollbackUpdateAndRestart(transaction updateTransaction, cause error) error {
 	_ = updateServiceAction("stop")
 	rollbackErr := rollbackUpdate(transaction, cause)
+	if rollbackErr != cause {
+		return fmt.Errorf("update rollback requires administrator repair: %w", rollbackErr)
+	}
 	if err := updateServiceAction("start"); err != nil {
 		return errors.Join(rollbackErr, fmt.Errorf("restart previous relay service: %w", err))
 	}
@@ -678,14 +628,14 @@ func updateJournalPath(target string) string {
 
 func replaceExecutable(target string, binary []byte) error {
 	temporary := filepath.Join(filepath.Dir(target), "."+filepath.Base(target)+".update")
-	if err := os.Remove(temporary); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err := safeRemove(temporary); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
 	if err := atomicWriteFile(temporary, binary, 0o755); err != nil {
 		return err
 	}
 	if err := activateExecutable(temporary, target); err != nil {
-		_ = os.Remove(temporary)
+		_ = safeRemove(temporary)
 		return err
 	}
 	return syncDirectory(filepath.Dir(target))

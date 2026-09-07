@@ -132,3 +132,33 @@ only to test the Authenticode, installer-pin, and bundle-finalization contracts.
 The production workflow never uses that PFX path: Azure Artifact Signing signs
 the Windows executable before `scripts/finalize-signed-release.sh` applies the
 Relay update signatures.
+
+## Native privilege boundaries
+
+The suite covers malformed and injected recovery paths, link replacement races,
+read-only command behavior, unauthorized/malformed local IPC, serialized credential
+operations, unpaired management startup, and independent signature verification at
+the update privilege boundary. Windows adds Known Folder environment isolation,
+ancestor-junction rejection, private backup creation ACLs, replacement while the
+original CLI image remains running, and identification-only named-pipe client tests.
+
+CI uses `scripts/check-native-installation.sh` on its disposable Linux runner and
+`packaging/install-native.Tests.ps1` on its disposable Windows runner. These install
+at the real managed paths and exercise service identities, unpaired startup,
+configuration preservation, stopped-service repair, and malicious state links.
+The installed lifecycle test pairs against a synthetic HTTPS server, rotates and
+replaces the live identity, installs a signed candidate, and verifies rollback
+and enrollment preservation when a signed candidate reports the wrong version.
+The failing update must finish rollback before returning a nonzero result. Native
+tests also exercise service-setting/link restoration and fresh Windows installation
+rollback after firewall setup fails.
+Its temporary CA is confined to the disposable host and removed after the test.
+They require `TELRAD_NATIVE_INSTALL_TEST=1`; do not run them on a clinic host.
+Cross-compilation alone does not validate SCM, UAC, Windows ACLs, or systemd.
+
+The Linux coverage gate combines race-enabled unit and installed-process coverage
+using Go's `covdata merge -pcombine` command. Both collect binary coverage data;
+the existing 69% total threshold still applies.
+
+Container builds use `-tags relay_container`. CI checks the dependency exclusion,
+non-root UID, read-only root filesystem, and absence of native-service assumptions.

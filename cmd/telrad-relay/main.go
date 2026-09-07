@@ -46,6 +46,8 @@ const (
 )
 
 type config struct {
+	commandOutput              io.Writer
+	beforePairingCommit        func() error
 	SchemaVersion              int    `json:"schemaVersion"`
 	PairingURL                 string `json:"pairingUrl"`
 	ControlURL                 string `json:"controlUrl"`
@@ -109,13 +111,22 @@ func main() {
 }
 
 func execute(args []string) error {
+	if len(args) > 0 && args[0] == "install-native" {
+		if len(args) != 1 {
+			return errors.New("install-native accepts no arguments")
+		}
+		return installNative(os.Stdin)
+	}
+	if len(args) > 0 && args[0] == "native-action" {
+		return executeNativeAction(args[1:], os.Stdin)
+	}
 	var dockerToken []byte
 	if distribution == "docker" {
 		dockerToken = captureDockerPairingToken()
 		defer zeroBytes(dockerToken)
 	}
 	if len(args) > 0 && args[0] == "apply-update" {
-		return applyStagedUpdate(args[1:])
+		return errors.New("detached update handoff is unsupported; use telrad update VERSION")
 	}
 	flags := flag.NewFlagSet("telrad", flag.ContinueOnError)
 	flags.Usage = printHelp
@@ -128,6 +139,9 @@ func execute(args []string) error {
 			return nil
 		}
 		return err
+	}
+	if managedConfig(*configPath) {
+		*configPath = nativePaths().Config
 	}
 	command := "auth"
 	if flags.NArg() > 0 {
@@ -142,10 +156,15 @@ func execute(args []string) error {
 		return nil
 	}
 	if command == "migrate-config" {
-		if shouldElevate(command, *configPath) {
-			return elevateWithSudo(args)
+		if nativeManagementEnabled(*configPath) && !platformAdministrator() {
+			return invokeNativeAction([]string{"migrate"}, nil)
 		}
-		if *configPath == defaultConfigPath() {
+		if managedConfig(*configPath) {
+			if err := validateManagedLayout(); err != nil {
+				return err
+			}
+		}
+		if distribution != "docker" && *configPath == defaultConfigPath() {
 			if err := disableService(); err != nil {
 				return err
 			}
@@ -155,22 +174,41 @@ func execute(args []string) error {
 	if *migrationPairingURL != "" || *migrationManifestURL != "" || *migrationPublicKey != "" {
 		return errors.New("migration trust options are valid only with migrate-config")
 	}
-	if shouldElevate(command, *configPath) {
-		return elevateWithSudo(args)
+	commandArgs := flags.Args()
+	if len(commandArgs) > 0 {
+		commandArgs = commandArgs[1:]
+	}
+	if handled, err := dispatchNative(command, *configPath, commandArgs); handled {
+		return err
 	}
 	if command == "status" {
 		if status, err := readRuntimeStatus(*configPath); err == nil {
 			printRuntimeStatus(status)
 		}
+		if distribution == "docker" {
+			_, err := readRuntimeStatus(*configPath)
+			return err
+		}
 		return serviceStatus()
 	}
 	if command == "start" || command == "stop" || command == "restart" {
+		if distribution == "docker" {
+			return errors.New("manage the Relay container through its container runtime")
+		}
 		return serviceAction(command)
 	}
-	if err := recoverPairingTransaction(*configPath); err != nil {
-		return fmt.Errorf("recover pairing transaction: %w", err)
+	if command == "run" && nativeManagementEnabled(*configPath) {
+		if err := requireServiceIdentity(); err != nil {
+			return err
+		}
 	}
-	cfg, err := loadConfig(*configPath)
+	mutating := command == "run" || command == "auth" || command == "enroll" || command == "rotate-credential"
+	if mutating {
+		if err := recoverPairingTransaction(*configPath); err != nil {
+			return fmt.Errorf("recover pairing transaction: %w", err)
+		}
+	}
+	cfg, err := loadConfigMode(*configPath, mutating)
 	if err != nil {
 		return err
 	}
@@ -180,7 +218,7 @@ func execute(args []string) error {
 		return err
 	}
 	validationCommand := command
-	if bootstrap {
+	if bootstrap || command == "run" && nativeManagementEnabled(*configPath) {
 		validationCommand = "enroll"
 	}
 	if err := validateConfig(cfg, validationCommand); err != nil {
@@ -192,6 +230,13 @@ func execute(args []string) error {
 	}
 	switch command {
 	case "auth":
+		if distribution == "docker" {
+			if relayIsEnrolled(cfg) {
+				fmt.Println("Relay is authenticated.")
+				return nil
+			}
+			return enrollForService(cfg, *configPath)
+		}
 		return authenticateAndStart(cfg, *configPath)
 	case "enroll":
 		return enrollForService(cfg, *configPath)
@@ -296,7 +341,7 @@ func authorizeNativeDevice(ctx context.Context, cfg *config) ([]byte, error) {
 		return nil, errors.New("device authorization failed: invalid_response")
 	}
 
-	fmt.Printf("\nApprove this relay in your browser:\n\n  %s\n\nWaiting for authorization...\n", authorization.VerificationURI)
+	fmt.Fprintf(nativeCommandOutput(cfg), "\nApprove this relay in your browser:\n\n  %s\n\nWaiting for authorization...\n", authorization.VerificationURI)
 	return pollDeviceAuthorization(authorizationCtx, clients.secure, authorizationURL, authorization)
 }
 
@@ -445,10 +490,15 @@ func enrollWithPairingToken(ctx context.Context, cfg *config, configPath string,
 	cfg.ControlURL = endpoints.ControlURL
 	cfg.DicomURL = endpoints.DicomURL
 	cfg.HL7URL = endpoints.HL7URL
+	if cfg.beforePairingCommit != nil {
+		if err := cfg.beforePairingCommit(); err != nil {
+			return err
+		}
+	}
 	if err := commitPairing(configPath, cfg, credentialFile{SchemaVersion: credentialSchemaVersion, Credential: result.Credential}); err != nil {
 		return fmt.Errorf("commit pairing: %w", err)
 	}
-	fmt.Printf("Paired relay %s\n", result.RelayID)
+	fmt.Fprintf(nativeCommandOutput(cfg), "Paired relay %s\n", result.RelayID)
 	return nil
 }
 
@@ -518,7 +568,7 @@ func rotateCredential(ctx context.Context, cfg *config) error {
 	if err := commitCredential(cfg.CredentialPath, record); err != nil {
 		return err
 	}
-	fmt.Println("Relay credential rotated")
+	fmt.Fprintln(nativeCommandOutput(cfg), "Relay credential rotated")
 	return nil
 }
 
@@ -529,6 +579,13 @@ func run(cfg *config, configPath string) error {
 }
 
 func runWithContext(ctx context.Context, cfg *config, configPath string) error {
+	if nativeManagementEnabled(configPath) {
+		return runNativeManagement(ctx, cfg, configPath)
+	}
+	return runClinicalWithContext(ctx, cfg, configPath)
+}
+
+func runClinicalWithContext(ctx context.Context, cfg *config, configPath string) error {
 	provider, err := newCredentialProvider(cfg.CredentialPath, time.Now())
 	if err != nil {
 		return errors.New("stored credential is invalid")
@@ -676,11 +733,13 @@ func drainRelayWork(work *workDrainer, listeners ...net.Listener) error {
 	}
 }
 
-func doctor(cfg *config) error {
+func doctor(cfg *config) error { return doctorTo(cfg, os.Stdout) }
+
+func doctorTo(cfg *config, output io.Writer) error {
 	if _, err := readCredentialFile(cfg.CredentialPath, time.Now()); err != nil {
 		return errors.New("stored credential is invalid")
 	}
-	fmt.Printf("configuration and credential ok; DICOM %s:%d, HL7 %s:%d, reports %s:%d\n", cfg.ListenAddress, cfg.DicomPort, cfg.ListenAddress, cfg.HL7Port, cfg.ReportHost, cfg.ReportPort)
+	fmt.Fprintf(output, "configuration and credential ok; DICOM %s:%d, HL7 %s:%d, reports %s:%d\n", cfg.ListenAddress, cfg.DicomPort, cfg.ListenAddress, cfg.HL7Port, cfg.ReportHost, cfg.ReportPort)
 	return nil
 }
 
@@ -734,8 +793,10 @@ func captureDockerPairingToken() []byte {
 	return []byte(value)
 }
 
-func loadConfig(path string) (*config, error) {
-	data, err := os.ReadFile(path)
+func loadConfig(path string) (*config, error) { return loadConfigMode(path, true) }
+
+func loadConfigMode(path string, migrate bool) (*config, error) {
+	data, err := safeReadFile(path, maxCloudResponseBytes)
 	if err != nil {
 		return nil, err
 	}
@@ -749,8 +810,16 @@ func loadConfig(path string) (*config, error) {
 	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
 		return nil, errors.New("decode relay configuration: multiple JSON values are not allowed")
 	}
-	if err := upgradePollingConfig(path, cfg); err != nil {
+	if err := normalizeManagedCredential(cfg, path); err != nil {
 		return nil, err
+	}
+	if cfg.SchemaVersion == 3 && !migrate {
+		return nil, errors.New("configuration migration required; run migrate-config")
+	}
+	if migrate {
+		if err := upgradePollingConfig(path, cfg); err != nil {
+			return nil, err
+		}
 	}
 	applyConnectionDefaults(cfg)
 	if value := strings.TrimSpace(os.Getenv("TELRAD_RELAY_PAIRING_URL")); value != "" {
@@ -906,7 +975,7 @@ func validateSecureURL(name, value, expectedScheme string) error {
 }
 
 func migrateConfig(path, pairingURL, updateURL, updateKey string) error {
-	data, err := os.ReadFile(path)
+	data, err := safeReadFile(path, maxCloudResponseBytes)
 	if err != nil {
 		return err
 	}
@@ -975,26 +1044,11 @@ func migrateConfig(path, pairingURL, updateURL, updateKey string) error {
 	if err := secureWrite(path, append(encoded, '\n')); err != nil {
 		return err
 	}
-	legacyPaths := []string{old.CertificatePath, old.PrivateKeyPath, old.CACertificatePath}
-	for _, base := range []string{old.CertificatePath, old.PrivateKeyPath, old.CACertificatePath} {
-		if base == "" {
-			continue
-		}
-		for _, suffix := range []string{".next", ".previous"} {
-			legacyPaths = append(legacyPaths, base+suffix)
-		}
-	}
-	if old.PrivateKeyPath != "" {
-		for _, suffix := range []string{".pairing", ".pairing.csr", ".pairing-key.pem", ".pairing.csr.pem", ".transaction.json"} {
-			legacyPaths = append(legacyPaths, old.PrivateKeyPath+suffix)
-		}
-	}
+	// Configuration is service-writable. It cannot nominate privileged cleanup targets.
 	var cleanupError error
-	for _, legacy := range legacyPaths {
-		if legacy != "" {
-			if err := os.Remove(absolute(filepath.Dir(path), legacy)); err != nil && !errors.Is(err, os.ErrNotExist) {
-				cleanupError = errors.Join(cleanupError, err)
-			}
+	for _, name := range legacyCredentialNames() {
+		if err := safeRemove(filepath.Join(filepath.Dir(path), name)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			cleanupError = errors.Join(cleanupError, err)
 		}
 	}
 	if cleanupError != nil {
@@ -1002,6 +1056,20 @@ func migrateConfig(path, pairingURL, updateURL, updateKey string) error {
 	}
 	fmt.Println("Relay configuration migrated to schema v4; re-pairing is required before the service can start")
 	return nil
+}
+
+func legacyCredentialNames() []string {
+	var names []string
+	for _, base := range []string{"relay.crt", "relay.key", "ca.crt"} {
+		suffixes := []string{"", ".next", ".previous"}
+		if base == "relay.key" {
+			suffixes = append(suffixes, ".pairing", ".pairing.csr", ".pairing-key.pem", ".pairing.csr.pem", ".transaction.json")
+		}
+		for _, suffix := range suffixes {
+			names = append(names, base+suffix)
+		}
+	}
+	return names
 }
 
 func nextReconnectBackoff(current time.Duration, established bool, sessionDuration time.Duration) time.Duration {
@@ -1063,20 +1131,6 @@ func absolute(base, path string) string {
 }
 
 func secureWrite(path string, data []byte) error { return atomicWriteFile(path, data, 0600) }
-
-func defaultConfigPath() string {
-	if runtime.GOOS == "windows" {
-		return filepath.Join(os.Getenv("ProgramData"), "Telrad", "Relay", "relay.json")
-	}
-	return "/etc/telrad-relay/relay.json"
-}
-
-func defaultUpdateTrustPath() string {
-	if runtime.GOOS == "windows" {
-		return filepath.Join(os.Getenv("ProgramFiles"), "Telrad Relay", "update-trust.json")
-	}
-	return "/usr/local/lib/telrad-relay/update-trust.json"
-}
 
 func fatal(err error) {
 	slog.Error("relay failed", "error", err)

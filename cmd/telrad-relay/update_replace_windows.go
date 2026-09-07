@@ -2,16 +2,29 @@
 
 package main
 
-import "golang.org/x/sys/windows"
+import (
+	"errors"
+	"golang.org/x/sys/windows"
+	"os"
+)
 
 func activateExecutable(staged, target string) error {
-	stagedPath, err := windows.UTF16PtrFromString(staged)
-	if err != nil {
+	err := safeRename(staged, target)
+	if err == nil || !errors.Is(err, windows.ERROR_ACCESS_DENIED) && !errors.Is(err, windows.ERROR_SHARING_VIOLATION) {
 		return err
 	}
-	targetPath, err := windows.UTF16PtrFromString(target)
-	if err != nil {
+	// The operator's CLI may still map the old executable while waiting for this
+	// transaction. Windows permits renaming that image, but not overwriting it.
+	// Keep one fixed retired name; it is reclaimed once those callers have exited.
+	retired := target + ".retired"
+	if err := safeRemove(retired); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	return windows.MoveFileEx(stagedPath, targetPath, windows.MOVEFILE_REPLACE_EXISTING|windows.MOVEFILE_WRITE_THROUGH)
+	if err := safeRename(target, retired); err != nil {
+		return err
+	}
+	if err := safeRename(staged, target); err != nil {
+		return errors.Join(err, safeRename(retired, target))
+	}
+	return nil
 }

@@ -57,7 +57,7 @@ func readCredentialFile(path string, now time.Time) (credentialFile, error) {
 			return credentialFile{}, errors.New("credential directory permissions are invalid")
 		}
 	}
-	data, err := os.ReadFile(path)
+	data, err := safeReadFile(path, maxCloudResponseBytes)
 	if err != nil {
 		return credentialFile{}, err
 	}
@@ -192,6 +192,12 @@ func commitPairing(configPath string, cfg *config, record credentialFile) error 
 	if filepath.Clean(configPath) == filepath.Clean(cfg.CredentialPath) {
 		return errors.New("configuration and credential paths must be different")
 	}
+	if !samePath(filepath.Dir(configPath), filepath.Dir(cfg.CredentialPath)) || !safeLeaf(filepath.Base(cfg.CredentialPath)) {
+		return errors.New("pairing credentials must be in the configuration directory")
+	}
+	if managedConfig(configPath) && !samePath(cfg.CredentialPath, nativePaths().Credential) {
+		return errors.New("managed credential path is invalid; repair the installation")
+	}
 	if err := secureCredentialDirectory(filepath.Dir(cfg.CredentialPath)); err != nil {
 		return err
 	}
@@ -217,21 +223,27 @@ func commitPairing(configPath string, cfg *config, record credentialFile) error 
 	}
 	transaction.HadConfig = regularFileExists(configPath)
 	transaction.HadCredential = regularFileExists(cfg.CredentialPath)
+	if err := validatePairingTransaction(configPath, transaction); err != nil {
+		return err
+	}
 	if err := atomicWriteFile(transaction.ConfigNext, append(encodedConfig, '\n'), 0600); err != nil {
 		return err
 	}
 	if err := atomicWriteFile(transaction.CredentialNext, encodedCredential, 0600); err != nil {
-		_ = os.Remove(transaction.ConfigNext)
+		_ = safeRemove(transaction.ConfigNext)
 		return err
 	}
 	if err := atomicWriteJSON(pairingJournalPath(configPath), transaction); err != nil {
+		return err
+	}
+	if err := validatePairingTransaction(configPath, transaction); err != nil {
 		return err
 	}
 	return activatePairingTransaction(transaction)
 }
 
 func recoverPairingTransaction(configPath string) error {
-	data, err := os.ReadFile(pairingJournalPath(configPath))
+	data, err := safeReadFile(pairingJournalPath(configPath), maxCloudResponseBytes)
 	if errors.Is(err, os.ErrNotExist) {
 		return removeOrphanedPairingStages(configPath)
 	}
@@ -242,27 +254,50 @@ func recoverPairingTransaction(configPath string) error {
 	if json.Unmarshal(data, &transaction) != nil || transaction.ConfigPath != configPath || transaction.CredentialPath == "" {
 		return errors.New("pairing transaction journal is invalid; administrator repair is required")
 	}
+	if err := validatePairingTransaction(configPath, transaction); err != nil {
+		return err
+	}
 	if pairedFilesAreValid(transaction.ConfigPath, transaction.CredentialPath) {
 		return finishPairingTransaction(transaction)
 	}
 	return rollbackPairingTransaction(transaction, nil)
 }
 
+// Recovery is constrained before even inspecting staged payloads. Legacy journals
+// are compatible only when they describe the exact locally derived transaction.
+func validatePairingTransaction(configPath string, t pairingTransaction) error {
+	expectedCredential := filepath.Join(filepath.Dir(configPath), "relay-credential.json")
+	if !managedConfig(configPath) {
+		// Custom callers may choose a credential basename in the same directory.
+		if samePath(filepath.Dir(t.CredentialPath), filepath.Dir(configPath)) && safeLeaf(filepath.Base(t.CredentialPath)) {
+			expectedCredential = t.CredentialPath
+		}
+	}
+	for _, pair := range [][2]string{{t.ConfigPath, configPath}, {t.CredentialPath, expectedCredential},
+		{t.ConfigNext, configPath + ".next"}, {t.CredentialNext, expectedCredential + ".next"},
+		{t.ConfigBackup, configPath + ".previous"}, {t.CredentialBack, expectedCredential + ".previous"}} {
+		if !samePath(pair[0], pair[1]) || pair[0] != filepath.Clean(pair[0]) {
+			return errors.New("pairing transaction paths are invalid; administrator repair is required")
+		}
+	}
+	d, err := openSafeDirectory(filepath.Dir(configPath))
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	for _, p := range []string{t.ConfigPath, t.CredentialPath, t.ConfigNext, t.CredentialNext, t.ConfigBackup, t.CredentialBack} {
+		if err := d.check(filepath.Base(p)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func removeOrphanedPairingStages(configPath string) error {
 	var cleanupError error
-	if err := os.Remove(configPath + ".next"); err != nil && !errors.Is(err, os.ErrNotExist) {
-		cleanupError = errors.Join(cleanupError, err)
-	}
-	data, err := os.ReadFile(configPath)
-	if err == nil {
-		var paths struct {
-			CredentialPath string `json:"credentialPath"`
-		}
-		if json.Unmarshal(data, &paths) == nil && paths.CredentialPath != "" {
-			credentialPath := absolute(filepath.Dir(configPath), paths.CredentialPath)
-			if err := os.Remove(credentialPath + ".next"); err != nil && !errors.Is(err, os.ErrNotExist) {
-				cleanupError = errors.Join(cleanupError, err)
-			}
+	for _, path := range []string{configPath + ".next", filepath.Join(filepath.Dir(configPath), "relay-credential.json.next")} {
+		if err := safeRemove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			cleanupError = errors.Join(cleanupError, err)
 		}
 	}
 	return cleanupError
@@ -270,27 +305,27 @@ func removeOrphanedPairingStages(configPath string) error {
 
 func activatePairingTransaction(transaction pairingTransaction) error {
 	for _, path := range []string{transaction.ConfigBackup, transaction.CredentialBack} {
-		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		if err := safeRemove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
 	}
 	if transaction.HadConfig {
-		if err := os.Rename(transaction.ConfigPath, transaction.ConfigBackup); err != nil {
+		if err := safeRename(transaction.ConfigPath, transaction.ConfigBackup); err != nil {
 			return rollbackPairingTransaction(transaction, err)
 		}
 	}
 	if transaction.HadCredential {
-		if err := os.Rename(transaction.CredentialPath, transaction.CredentialBack); err != nil {
+		if err := safeRename(transaction.CredentialPath, transaction.CredentialBack); err != nil {
 			return rollbackPairingTransaction(transaction, err)
 		}
 	}
-	if err := os.Rename(transaction.CredentialNext, transaction.CredentialPath); err != nil {
+	if err := safeRename(transaction.CredentialNext, transaction.CredentialPath); err != nil {
 		return rollbackPairingTransaction(transaction, fmt.Errorf("activate relay credential: %w", err))
 	}
 	if err := syncDirectory(filepath.Dir(transaction.CredentialPath)); err != nil {
 		return rollbackPairingTransaction(transaction, err)
 	}
-	if err := os.Rename(transaction.ConfigNext, transaction.ConfigPath); err != nil {
+	if err := safeRename(transaction.ConfigNext, transaction.ConfigPath); err != nil {
 		return rollbackPairingTransaction(transaction, fmt.Errorf("activate relay configuration: %w", err))
 	}
 	if err := syncDirectory(filepath.Dir(transaction.ConfigPath)); err != nil {
@@ -301,11 +336,11 @@ func activatePairingTransaction(transaction pairingTransaction) error {
 
 func finishPairingTransaction(transaction pairingTransaction) error {
 	for _, path := range []string{transaction.ConfigBackup, transaction.CredentialBack, transaction.ConfigNext, transaction.CredentialNext} {
-		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		if err := safeRemove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
 	}
-	if err := os.Remove(pairingJournalPath(transaction.ConfigPath)); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err := safeRemove(pairingJournalPath(transaction.ConfigPath)); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
 	return syncDirectory(filepath.Dir(transaction.ConfigPath))
@@ -316,23 +351,23 @@ func rollbackPairingTransaction(transaction pairingTransaction, cause error) err
 	restore := func(path, backup string, hadOriginal bool) {
 		if hadOriginal {
 			if _, err := os.Stat(backup); err == nil {
-				_ = os.Remove(path)
-				if err := os.Rename(backup, path); err != nil {
+				_ = safeRemove(path)
+				if err := safeRename(backup, path); err != nil {
 					rollbackErr = errors.Join(rollbackErr, err)
 				}
 			}
 		} else {
-			if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			if err := safeRemove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 				rollbackErr = errors.Join(rollbackErr, err)
 			}
 		}
 	}
 	restore(transaction.CredentialPath, transaction.CredentialBack, transaction.HadCredential)
 	restore(transaction.ConfigPath, transaction.ConfigBackup, transaction.HadConfig)
-	_ = os.Remove(transaction.CredentialNext)
-	_ = os.Remove(transaction.ConfigNext)
+	_ = safeRemove(transaction.CredentialNext)
+	_ = safeRemove(transaction.ConfigNext)
 	if rollbackErr == nil {
-		_ = os.Remove(pairingJournalPath(transaction.ConfigPath))
+		_ = safeRemove(pairingJournalPath(transaction.ConfigPath))
 	}
 	return errors.Join(cause, rollbackErr)
 }
@@ -343,7 +378,7 @@ func regularFileExists(path string) bool {
 }
 
 func pairedFilesAreValid(configPath, credentialPath string) bool {
-	data, err := os.ReadFile(configPath)
+	data, err := safeReadFile(configPath, maxCloudResponseBytes)
 	if err != nil {
 		return false
 	}
@@ -365,66 +400,32 @@ func atomicWriteJSON(path string, value any) error {
 	return atomicWriteFile(path, data, 0600)
 }
 
-func atomicWriteFile(path string, data []byte, mode os.FileMode) (returnErr error) {
-	directory := filepath.Dir(path)
-	if err := os.MkdirAll(directory, 0700); err != nil {
-		return err
-	}
-	temporary, err := os.CreateTemp(directory, ".telrad-write-*")
+func atomicWriteFile(path string, data []byte, mode os.FileMode) error {
+	d, err := openDirectory(filepath.Dir(path), true)
 	if err != nil {
 		return err
 	}
-	temporaryPath := temporary.Name()
-	defer func() {
-		_ = temporary.Close()
-		if returnErr != nil {
-			_ = os.Remove(temporaryPath)
-		}
-	}()
-	if err := temporary.Chmod(mode); err != nil {
-		return err
-	}
-	if err := preserveTargetOwner(temporary, path); err != nil {
-		return err
-	}
-	if _, err := temporary.Write(data); err != nil {
-		return err
-	}
-	if err := temporary.Sync(); err != nil {
-		return err
-	}
-	if err := temporary.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(temporaryPath, path); err != nil {
-		return err
-	}
-	if runtime.GOOS != "windows" {
-		if err := os.Chmod(path, mode); err != nil {
-			return err
-		}
-	}
-	return syncDirectory(directory)
+	d.Close()
+	return safeAtomicWrite(path, data, mode)
 }
 
 func secureCredentialDirectory(directory string) error {
-	if err := os.MkdirAll(directory, 0700); err != nil {
+	d, err := openDirectory(directory, true)
+	if err != nil {
 		return err
 	}
+	defer d.Close()
 	if runtime.GOOS != "windows" {
-		return os.Chmod(directory, 0700)
+		return d.file.Chmod(0700)
 	}
 	return nil
 }
 
 func syncDirectory(path string) error {
-	if runtime.GOOS == "windows" {
-		return nil
-	}
-	directory, err := os.Open(path)
+	directory, err := openSafeDirectory(path)
 	if err != nil {
 		return err
 	}
 	defer directory.Close()
-	return directory.Sync()
+	return syncDirectoryHandle(directory.file)
 }

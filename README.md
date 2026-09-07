@@ -24,12 +24,14 @@ telrad
 
 ### Windows service
 
-Run PowerShell as Administrator:
+Run the installer in PowerShell as Administrator:
 
 ```powershell
 irm https://github.com/telrad-au/relay/releases/latest/download/install.ps1 | iex
-telrad
 ```
+
+Then run `telrad` from an ordinary terminal. It requests administrator authorization
+for the specific management action; pairing runs inside the unprivileged service.
 
 ### Docker Compose
 
@@ -124,7 +126,14 @@ telrad update
 ```
 
 `status` shows whether ingest, Telrad connectivity, and report return are
-available. `doctor` checks the installation and configuration.
+available. `doctor` checks the installation and configuration. These commands,
+`ready`, and update checks never request elevation or repair state. When the
+service is stopped, credential diagnostics are unavailable.
+
+A new native installation starts local management under its dedicated service
+identity. DICOM and HL7 listeners remain closed until pairing succeeds. Pairing,
+rotation, service control, and exact update application require administrator
+authorization; the CLI announces each action before sudo or UAC.
 
 `telrad update` only checks for an update. It does not change the host. After
 reviewing the release, an administrator can approve that exact version with:

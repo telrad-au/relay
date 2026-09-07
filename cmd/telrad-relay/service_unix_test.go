@@ -5,83 +5,31 @@ package main
 import (
 	"errors"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
-	"time"
 )
 
 func TestUnixServiceCommandsUseExpectedSystemdContract(t *testing.T) {
-	directory := t.TempDir()
-	logPath := filepath.Join(directory, "systemctl.log")
-	writeUnixTestCommand(t, directory, "systemctl", `#!/bin/sh
-printf '%s\n' "$*" >> "$TELRAD_RELAY_TEST_COMMAND_LOG"
-exit "${TELRAD_RELAY_TEST_EXIT_CODE:-0}"
-`)
-	t.Setenv("PATH", directory)
-	t.Setenv("TELRAD_RELAY_TEST_COMMAND_LOG", logPath)
-
-	for _, run := range []func() error{
-		enableAndStartService,
-		func() error { return serviceAction("restart") },
-		disableService,
-		serviceStatus,
-	} {
+	original := executeServiceCommand
+	t.Cleanup(func() { executeServiceCommand = original })
+	var commands []string
+	executeServiceCommand = func(name string, args ...string) error {
+		commands = append(commands, name+" "+strings.Join(args, " "))
+		return nil
+	}
+	for _, run := range []func() error{enableAndStartService, func() error { return serviceAction("restart") }, disableService, serviceStatus} {
 		if err := run(); err != nil {
 			t.Fatal(err)
 		}
 	}
-	content, err := os.ReadFile(logPath)
-	if err != nil {
-		t.Fatal(err)
+	want := []string{"systemctl enable --now " + linuxServiceName, "systemctl restart " + linuxServiceName, "systemctl disable --now " + linuxServiceName, "systemctl status --no-pager " + linuxServiceName}
+	if !reflect.DeepEqual(commands, want) {
+		t.Fatalf("commands=%q, want %q", commands, want)
 	}
-	got := strings.Split(strings.TrimSpace(string(content)), "\n")
-	want := []string{
-		"enable --now " + linuxServiceName,
-		"restart " + linuxServiceName,
-		"disable --now " + linuxServiceName,
-		"status --no-pager " + linuxServiceName,
-	}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("service commands = %q, want %q", got, want)
-	}
-
-	t.Setenv("TELRAD_RELAY_TEST_EXIT_CODE", "7")
-	if err := serviceAction("stop"); err == nil || !strings.Contains(err.Error(), "service command failed") {
-		t.Fatalf("failed service command error = %v", err)
-	}
-}
-
-func TestElevateWithSudoForwardsExecutableAndArguments(t *testing.T) {
-	directory := t.TempDir()
-	logPath := filepath.Join(directory, "sudo.log")
-	writeUnixTestCommand(t, directory, "sudo", `#!/bin/sh
-printf '%s\n' "$@" > "$TELRAD_RELAY_TEST_COMMAND_LOG"
-`)
-	t.Setenv("PATH", directory)
-	t.Setenv("TELRAD_RELAY_TEST_COMMAND_LOG", logPath)
-
-	wantArgs := []string{"--config", "/tmp/relay.json", "status"}
-	if err := elevateWithSudo(wantArgs); err != nil {
-		t.Fatal(err)
-	}
-	content, err := os.ReadFile(logPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := strings.Split(strings.TrimSpace(string(content)), "\n")
-	if len(got) != len(wantArgs)+1 || !reflect.DeepEqual(got[1:], wantArgs) {
-		t.Fatalf("sudo arguments = %q", got)
-	}
-	if executable, err := os.Executable(); err != nil || got[0] != executable {
-		t.Fatalf("sudo executable = %q, current executable = %q, error = %v", got[0], executable, err)
-	}
-
-	t.Setenv("PATH", t.TempDir())
-	if err := elevateWithSudo(nil); err == nil || !strings.Contains(err.Error(), "sudo is not installed") {
-		t.Fatalf("missing sudo error = %v", err)
+	if err := runServiceCommand("/bin/sh", "-c", "exit 7"); err == nil {
+		t.Fatal("service command failure was ignored")
 	}
 }
 
@@ -112,30 +60,7 @@ esac
 	if err := validateInstalledUpdate(target, configPath, "2.0.1"); err == nil || !strings.Contains(err.Error(), "expected \"2.0.1\"") {
 		t.Fatalf("version mismatch error = %v", err)
 	}
-	t.Setenv("TELRAD_RELAY_TEST_DOCTOR_FAIL", "1")
-	if err := validateInstalledUpdate(target, configPath, "2.0.0"); err == nil || !strings.Contains(err.Error(), "doctor failed") {
-		t.Fatalf("doctor failure error = %v", err)
-	}
-}
 
-func TestUnixProcessAndLaunchBoundaries(t *testing.T) {
-	process := exec.Command("/bin/sh", "-c", "exit 0")
-	if err := process.Start(); err != nil {
-		t.Fatal(err)
-	}
-	processID := process.Process.Pid
-	if err := process.Wait(); err != nil {
-		t.Fatal(err)
-	}
-	if err := waitForProcessExit(processID, time.Second); err != nil {
-		t.Fatal(err)
-	}
-	if err := waitForProcessExit(os.Getpid(), 20*time.Millisecond); err == nil || !strings.Contains(err.Error(), "did not exit") {
-		t.Fatalf("live process wait error = %v", err)
-	}
-	if err := launchStagedUpdate(filepath.Join(t.TempDir(), "missing"), nil); err == nil {
-		t.Fatal("missing staged executable was launched")
-	}
 }
 
 func TestNonWindowsPlatformServiceDelegatesToRelayRunner(t *testing.T) {

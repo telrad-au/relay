@@ -19,32 +19,10 @@ func TestTestingLinuxInstallerHasStateAwareUpdateExperience(t *testing.T) {
 		t.Fatal(err)
 	}
 	installer := string(installerData)
-	for _, required := range []string{
-		"systemctl is-active --quiet telrad-relay.service",
-		"systemctl restart telrad-relay.service",
-		"Existing authentication preserved.",
-		"Service restarted successfully.",
-		"The service remains stopped. Run 'telrad' to start it.",
-		"Run 'telrad' to authenticate this host and start the service.",
-	} {
+	for _, required := range []string{"install-native", "update-trust.json", "installation-manifest.json"} {
 		if !strings.Contains(installer, required) {
-			t.Errorf("testing Linux installer does not contain %q", required)
+			t.Errorf("installer missing %s", required)
 		}
-	}
-	if strings.Contains(installer, "Edit /etc/telrad-relay/relay.json") {
-		t.Fatal("testing Linux installer still asks operators to edit managed configuration")
-	}
-	if strings.Index(installer, "systemctl is-active") > strings.Index(installer, "install -m 0755 -o root -g root telrad-relay") {
-		t.Fatal("testing Linux installer checks service state after replacing the executable")
-	}
-	if !strings.Contains(installer, "/usr/local/lib/telrad-relay/telrad") || strings.Contains(installer, "install -m 0755 -o telrad-relay -g telrad-relay telrad-relay") {
-		t.Fatal("testing Linux installer does not enforce an administrator-owned executable")
-	}
-	if !strings.Contains(installer, `install -m 0644 -o root -g root update-trust.json /usr/local/lib/telrad-relay/update-trust.json`) || strings.Contains(installer, `"manifestUrl": ""`) {
-		t.Fatal("testing Linux installer does not install the generated administrator-owned testing trust")
-	}
-	if strings.Index(installer, "systemctl restart") < strings.Index(installer, "systemctl daemon-reload") {
-		t.Fatal("testing Linux installer restarts before reloading the service definition")
 	}
 
 	bootstrapData, err := os.ReadFile(filepath.Join(packagingDir, "install-testing.sh.template"))

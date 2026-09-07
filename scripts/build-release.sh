@@ -59,7 +59,7 @@ build_binary() {
 build_binary linux amd64 ""
 build_binary linux arm64 ""
 build_binary windows amd64 ".exe"
-install -m 0644 "$ROOT_DIR/packaging/telrad-relay.service" "$OUTPUT_DIR/telrad-relay.service"
+install -m 0644 "$ROOT_DIR/cmd/telrad-relay/telrad-relay.service" "$OUTPUT_DIR/telrad-relay.service"
 install -m 0644 "$ROOT_DIR/LICENSE" "$OUTPUT_DIR/LICENSE"
 install -m 0644 "$ROOT_DIR/NOTICE" "$OUTPUT_DIR/NOTICE"
 install -m 0644 "$ROOT_DIR/THIRD_PARTY_NOTICES.md" "$OUTPUT_DIR/THIRD_PARTY_NOTICES.md"
@@ -69,8 +69,8 @@ cat > "$OUTPUT_DIR/installation-manifest.json" <<EOF
   "releaseVersion": "$VERSION",
   "components": {
     "configuration": 4,
-    "linuxService": 2,
-    "windowsService": 3,
+    "linuxService": 3,
+    "windowsService": 4,
     "windowsFirewall": 1,
     "updateTrust": 2
   }

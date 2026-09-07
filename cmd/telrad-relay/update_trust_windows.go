@@ -4,6 +4,7 @@ package main
 
 import "os"
 
-func validateManagedUpdateTrustOwnership(_ string, _ os.FileInfo) error {
-	return nil
+func validateManagedUpdateTrustOwnership(path string, _ os.FileInfo) error {
+	_, err := readProtectedFile(path, maxCloudResponseBytes)
+	return err
 }

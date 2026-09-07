@@ -466,3 +466,21 @@ rotated. There is no production PFX or Azure client secret to rotate.
 For a GitHub Actions or GHCR compromise, disable the release workflow, revoke relevant tokens and sessions, compare published digests with retained release evidence, remove mutable tags, and publish a security advisory before resuming releases.
 
 Every rollback or revocation records who authorized it, timestamps, affected versions and digests, actions taken, customer communications, and the replacement release.
+
+## Native privilege-boundary upgrade
+
+Native installers delegate filesystem changes and migration to the verified Relay
+binary using a bounded contents-only installation input. Bundles continue shipping
+the existing executable and signature formats. `installation.json` and update
+rollback snapshots now reside in the protected executable directory with private
+Windows creation ACLs. Update application stays in the trusted installer process
+until readiness or rollback completes; no candidate updater is launched. Fresh
+installations start an unprivileged local-management service before pairing.
+The Windows executable additionally links Microsoft go-winio for local named pipes;
+the dependency and MIT notice are included in the licence audit. Container builds
+exclude this native management implementation.
+
+Qualify Linux systemd installation and Windows SCM/ACL/UAC behavior on disposable
+hosts before promoting a release. Existing custom managed credential paths and
+malformed recovery journals fail closed and need administrator repair. A build or
+successful cross-compilation does not replace these native qualification checks.

@@ -21,6 +21,28 @@ func pairedTestConfig(directory string) *config {
 	return cfg
 }
 
+func TestContainerAuthenticationDoesNotControlHostServices(t *testing.T) {
+	oldDistribution, oldStart := distribution, startServiceForAuthentication
+	distribution = "docker"
+	startServiceForAuthentication = func() error { t.Fatal("container invoked native service management"); return nil }
+	t.Cleanup(func() { distribution = oldDistribution; startServiceForAuthentication = oldStart })
+	cfg := pairedTestConfig(t.TempDir())
+	if err := atomicWriteJSON(cfg.configPath, cfg); err != nil {
+		t.Fatal(err)
+	}
+	if err := commitCredential(cfg.CredentialPath, credentialFile{SchemaVersion: 1, Credential: testCredential('A')}); err != nil {
+		t.Fatal(err)
+	}
+	if err := execute([]string{"--config", cfg.configPath, "auth"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, action := range []string{"start", "stop", "restart"} {
+		if err := execute([]string{"--config", cfg.configPath, action}); err == nil || !strings.Contains(err.Error(), "container runtime") {
+			t.Fatalf("container %s: %v", action, err)
+		}
+	}
+}
+
 func TestBareAndAuthAlreadyEnrolledStartServiceWithConciseResult(t *testing.T) {
 	directory := t.TempDir()
 	if err := os.Chmod(directory, 0700); err != nil {
@@ -85,14 +107,15 @@ func TestCommandContractUsesAuthInsteadOfSetup(t *testing.T) {
 	if strings.Contains(output, "telrad setup") {
 		t.Fatalf("help output %q still advertises telrad setup", output)
 	}
-	if !commandRequiresAdministrator("auth", defaultConfigPath()) {
-		t.Fatal("auth does not require administrator access for the managed configuration")
+	for _, action := range []string{"auth", "enroll", "rotate-credential", "start", "stop", "restart", "migrate"} {
+		if err := validateNativeAction([]string{action}); err != nil {
+			t.Fatal(err)
+		}
 	}
-	if !commandRequiresAdministrator("update", defaultConfigPath()) {
-		t.Fatal("update does not require administrator access for the managed installation")
-	}
-	if commandRequiresAdministrator("setup", defaultConfigPath()) {
-		t.Fatal("removed setup command still has command privileges")
+	for _, action := range []string{"status", "doctor", "ready", "version", "setup"} {
+		if err := validateNativeAction([]string{action}); err == nil {
+			t.Fatalf("read-only or unknown command %s entered privileged dispatch", action)
+		}
 	}
 }
 

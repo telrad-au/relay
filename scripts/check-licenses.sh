@@ -25,6 +25,7 @@ sha256_file() {
 }
 
 expected_modules="$(printf '%s\n' \
+    'github.com/Microsoft/go-winio v0.6.2' \
     'golang.org/x/sys v0.47.0')"
 license_go_cache="${RELAY_LICENSE_GOCACHE:-${TMPDIR:-/tmp}/telrad-relay-license-go-cache}"
 mkdir -p "$license_go_cache"
@@ -55,6 +56,7 @@ actual_modules="$(printf '%s' "$module_lines" | awk 'NF == 2' | LC_ALL=C sort -u
 
 for heading in \
     '## Alpine ca-certificates-bundle 20260611-r0' \
+    '## github.com/Microsoft/go-winio v0.6.2' \
     '## golang.org/x/sys v0.47.0' \
     '## Go 1.27.0 runtime and standard library'; do
     grep -Fqx "$heading" THIRD_PARTY_NOTICES.md || {
@@ -71,6 +73,7 @@ while read -r expected path; do
         exit 1
     }
 done <<EOF
+cf248820bf1178370bb4f1670a59f8748d46bc96d0f64080cd631511c6046409 $module_cache/github.com/!microsoft/go-winio@v0.6.2/LICENSE
 911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad $module_cache/golang.org/x/sys@v0.47.0/LICENSE
 96f408bfae65bf137fc2525d3ecb030271c50c1e90799f87abf8846d8dd505cc $module_cache/golang.org/x/sys@v0.47.0/PATENTS
 911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad $go_root/LICENSE
