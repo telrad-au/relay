@@ -567,7 +567,7 @@ func TestDICOMAssociationEchoAndRepeatedStoresCreateDistinctArrivals(t *testing.
 	storageClass := "1.2.840.10008.5.1.4.1.1.2"
 	instance := "1.2.826.0.1.3680043.10.543.1"
 	association := associationRequest(storageClass)
-	copy(association[4:20], padAE("CLINIC_ARCHIVE"))
+	copy(association[4:20], padAE("\tTELRAD\r\n"))
 	if err := writeDICOMPDU(clinic, 0x01, association); err != nil {
 		t.Fatal(err)
 	}

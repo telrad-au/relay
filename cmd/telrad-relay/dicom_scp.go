@@ -410,7 +410,9 @@ func associationItem(itemType byte, value []byte) []byte {
 }
 
 func validAETitle(value []byte) bool {
-	if len(bytes.Trim(value, " ")) == 0 {
+	// Preserve the previous strings.TrimSpace tolerance for sender padding.
+	value = bytes.TrimSpace(value)
+	if len(value) == 0 {
 		return false
 	}
 	for _, character := range value {

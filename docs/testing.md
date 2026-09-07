@@ -47,7 +47,8 @@ late and superseded results, idempotent failure accounting, session replacement,
 TEST mode, and manual retry routing.
 
 DICOM fixtures construct UL PDUs and DIMSE command sets directly. Tests cover
-acceptance of arbitrary valid called AE titles, rejection of malformed titles,
+acceptance of arbitrary valid called AE titles, existing whitespace-padding
+tolerance, rejection of blank titles and invalid characters within titles,
 exact AE title echo in association responses, presentation-context choice, C-ECHO,
 C-STORE, release/abort, multiple sequential stores, command and PDU bounds,
 deterministic Part 10 file meta, every supported transfer syntax, unchanged
