@@ -1,5 +1,21 @@
 # Agent Notes
 
+## Engineering Approach
+
+Apply these steps in order, within the requested scope and this file's existing
+protocol, privacy, validation, and release constraints:
+
+1. **Question the requirements.** Understand the problem each requirement solves,
+   where it came from, and whether it is still necessary. Challenge assumptions.
+2. **Delete unnecessary parts or processes.** Remove code, dependencies,
+   abstractions, and steps that are not needed to meet the validated requirements.
+3. **Simplify and optimize.** Make what remains as simple as possible. Optimize
+   only after establishing that it needs to exist.
+4. **Accelerate cycle time.** Shorten feedback loops and address measured
+   bottlenecks after deleting and simplifying.
+5. **Automate last.** Automate the remaining useful, repeatable process once it is
+   understood and stable.
+
 ## Source of Truth
 
 Before changing behavior, inspect the relevant implementation and its tests, plus:
