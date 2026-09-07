@@ -566,7 +566,9 @@ func TestDICOMAssociationEchoAndRepeatedStoresCreateDistinctArrivals(t *testing.
 
 	storageClass := "1.2.840.10008.5.1.4.1.1.2"
 	instance := "1.2.826.0.1.3680043.10.543.1"
-	if err := writeDICOMPDU(clinic, 0x01, associationRequest(storageClass)); err != nil {
+	association := associationRequest(storageClass)
+	copy(association[4:20], padAE("CLINIC_ARCHIVE"))
+	if err := writeDICOMPDU(clinic, 0x01, association); err != nil {
 		t.Fatal(err)
 	}
 	if pduType, _, err := readDICOMPDU(clinic); err != nil || pduType != 0x02 {
@@ -810,20 +812,7 @@ func TestDICOMClinicDisconnectCancelsCloudUpload(t *testing.T) {
 	}
 }
 
-func TestDICOMRejectsWrongCalledAEAndAbortsUnsupportedDIMSE(t *testing.T) {
-	wrongClinic, wrongRelay := net.Pipe()
-	go serveDICOM(context.Background(), wrongRelay, defaultConfig(), http.DefaultClient, testProvider(t, testCredential('A')), newRuntimeStatus(filepath.Join(t.TempDir(), "relay.json")))
-	body := associationRequest("1.2.840.10008.5.1.4.1.1.2")
-	copy(body[4:20], padAE("WRONG"))
-	if err := writeDICOMPDU(wrongClinic, 0x01, body); err != nil {
-		t.Fatal(err)
-	}
-	if pduType, _, err := readDICOMPDU(wrongClinic); err != nil || pduType != 0x03 {
-		t.Fatalf("association rejection type=%x error=%v", pduType, err)
-	}
-	_ = wrongClinic.Close()
-	_ = wrongRelay.Close()
-
+func TestDICOMAbortsUnsupportedDIMSE(t *testing.T) {
 	clinic, relay := net.Pipe()
 	defer clinic.Close()
 	go serveDICOM(context.Background(), relay, defaultConfig(), http.DefaultClient, testProvider(t, testCredential('A')), newRuntimeStatus(filepath.Join(t.TempDir(), "relay.json")))
@@ -891,6 +880,12 @@ func testProvider(t *testing.T, credential string) *credentialProvider {
 		t.Fatal(err)
 	}
 	return provider
+}
+
+func padAE(value string) []byte {
+	result := bytes.Repeat([]byte{' '}, 16)
+	copy(result, value)
+	return result
 }
 
 func associationRequest(storageClass string) []byte {

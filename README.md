@@ -103,7 +103,7 @@ from that one administrator-approved origin.
 
 Once Relay is running, point clinic systems to the Relay host's LAN address:
 
-- DICOM: called AE title `TELRAD`, TCP port `11112`;
+- DICOM: any valid called AE title (for example `TELRAD`), TCP port `11112`;
 - HL7: MLLP, TCP port `2575`; and
 - report return: TCP port `2576` at the configured report receiver.
 

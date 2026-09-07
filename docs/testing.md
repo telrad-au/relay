@@ -47,7 +47,8 @@ late and superseded results, idempotent failure accounting, session replacement,
 TEST mode, and manual retry routing.
 
 DICOM fixtures construct UL PDUs and DIMSE command sets directly. Tests cover
-association acceptance/rejection, presentation-context choice, C-ECHO,
+acceptance of arbitrary valid called AE titles, rejection of malformed titles,
+exact AE title echo in association responses, presentation-context choice, C-ECHO,
 C-STORE, release/abort, multiple sequential stores, command and PDU bounds,
 deterministic Part 10 file meta, every supported transfer syntax, unchanged
 dataset bytes, repeated identical and byte-different arrivals sharing a SOP
@@ -60,7 +61,8 @@ CI also runs a blocking Orthanc-backed interoperability test in the required
 `Test and build` job. It uses the test-only image
 `jodogne/orthanc-plugins:1.12.11@sha256:e7bffe0351cd391eacab8e78098e236efe6cafed987830e9b462b2050a0eae4a`,
 creates deterministic PHI-free Secondary Capture fixtures, and sends Explicit
-VR Little Endian plus JPEG Lossless SV1 over a real TCP C-STORE association.
+VR Little Endian plus JPEG Lossless SV1 over a real TCP C-STORE association
+addressed to `CLINIC_ARCHIVE` to exercise a called AE title other than `TELRAD`.
 The harness records fragmented dataset PDVs before Relay, compares them
 byte-for-byte with the dataset in Relay's HTTPS Part 10 body, and imports the
 result into a second clean Orthanc instance to validate the SOP identifiers,
