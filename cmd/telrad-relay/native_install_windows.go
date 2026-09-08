@@ -3,8 +3,6 @@
 package main
 
 import (
-	"encoding/base64"
-	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"golang.org/x/sys/windows"
@@ -17,7 +15,6 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
-	"unicode/utf16"
 	"unsafe"
 )
 
@@ -213,14 +210,9 @@ func windowsIntegrationCommand(mode, remote string, previous []byte) (*exec.Cmd,
 	if err != nil {
 		return nil, err
 	}
-	words := utf16.Encode([]rune(windowsIntegrationScript))
-	encoded := make([]byte, len(words)*2)
-	for i, v := range words {
-		binary.LittleEndian.PutUint16(encoded[2*i:], v)
-	}
-	// Relay forwards stderr as text. EncodedCommand otherwise emits CLIXML,
-	// which an outer PowerShell cannot parse once Relay appends its own error.
-	command := exec.Command(filepath.Join(system, `WindowsPowerShell\v1.0\powershell.exe`), "-NoProfile", "-NonInteractive", "-OutputFormat", "Text", "-EncodedCommand", base64.StdEncoding.EncodeToString(encoded))
+	// Windows PowerShell emits CLIXML errors for EncodedCommand even with
+	// OutputFormat Text. Pass only the fixed script as code; inputs stay in Env.
+	command := exec.Command(filepath.Join(system, `WindowsPowerShell\v1.0\powershell.exe`), "-NoProfile", "-NonInteractive", "-OutputFormat", "Text", "-Command", windowsIntegrationScript)
 	command.Env = append(serviceCommandEnvironment(), "TELRAD_INSTALL_MODE="+mode, "TELRAD_INSTALL_FIREWALL_SCOPE="+remote, "TELRAD_INSTALL_PREVIOUS="+string(previous))
 	return command, nil
 }

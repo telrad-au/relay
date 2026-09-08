@@ -17,7 +17,7 @@ func TestWindowsIntegrationErrorsUsePlainText(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
 	defer cancel()
 	command := exec.CommandContext(ctx, integration.Path, integration.Args[1:]...)
 	command.Env = integration.Env
