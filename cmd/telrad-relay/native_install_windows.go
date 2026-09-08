@@ -48,6 +48,14 @@ func nativeServiceFiles() []string { return nil }
 func reloadNativeService() error   { return nil }
 
 func setNativeACL(path string, serviceWrite, publicRead bool) error {
+	sid, _, _, err := windows.LookupSID("", `NT SERVICE\TelradRelay`)
+	if err != nil {
+		return err
+	}
+	return setNativeACLForSID(path, serviceWrite, publicRead, sid)
+}
+
+func setNativeACLForSID(path string, serviceWrite, publicRead bool, sid *windows.SID) error {
 	parent, err := openSafeDirectory(filepath.Dir(path))
 	if err != nil {
 		return err
@@ -63,7 +71,8 @@ func setNativeACL(path string, serviceWrite, publicRead bool) error {
 	// MAXIMUM_ALLOWED deliberately disables SetSecurityInfo propagation to existing
 	// children. Only the explicit managed leaves below have their ACLs repaired.
 	// https://learn.microsoft.com/windows/win32/api/aclapi/nf-aclapi-setsecurityinfo
-	err = windows.NtCreateFile(&handle, windows.MAXIMUM_ALLOWED, &oa, &windows.IO_STATUS_BLOCK{}, nil, 0, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE, windows.FILE_OPEN, windows.FILE_OPEN_REPARSE_POINT|windows.FILE_SYNCHRONOUS_IO_NONALERT, 0, 0)
+	// Synchronous opens also require SYNCHRONIZE explicitly in DesiredAccess.
+	err = windows.NtCreateFile(&handle, windows.MAXIMUM_ALLOWED|windows.SYNCHRONIZE, &oa, &windows.IO_STATUS_BLOCK{}, nil, 0, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE, windows.FILE_OPEN, windows.FILE_OPEN_REPARSE_POINT|windows.FILE_SYNCHRONOUS_IO_NONALERT, 0, 0)
 	if err != nil {
 		return err
 	}
@@ -74,10 +83,6 @@ func setNativeACL(path string, serviceWrite, publicRead bool) error {
 	}
 	if info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 || info.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY == 0 && info.NumberOfLinks != 1 {
 		return errors.New("unsafe Relay ACL target")
-	}
-	sid, _, _, err := windows.LookupSID("", `NT SERVICE\TelradRelay`)
-	if err != nil {
-		return err
 	}
 	access := "GRGX"
 	if serviceWrite {

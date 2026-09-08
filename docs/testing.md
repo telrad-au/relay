@@ -147,6 +147,8 @@ original CLI image remains running, and identification-only named-pipe client te
 Fresh Windows directory tests use a parent with inherited public write access and
 verify that managed directories are protected at creation; existing unsafe
 installation directories and junctions remain rejected without permission changes.
+ACL repair tests cover real file and directory handles, reject hard-linked targets,
+and verify that directory repair does not change existing child permissions.
 A real PowerShell subprocess test verifies that nested installation errors remain
 plain text so an outer PowerShell installer can capture the failure.
 
