@@ -105,7 +105,7 @@ from that one administrator-approved origin.
 
 Once Relay is running, point clinic systems to the Relay host's LAN address:
 
-- DICOM: called AE title `TELRAD`, TCP port `11112`;
+- DICOM: any valid called AE title (for example `TELRAD`), TCP port `11112`;
 - HL7: MLLP, TCP port `2575`; and
 - report return: TCP port `2576` at the configured report receiver.
 
@@ -144,6 +144,52 @@ telrad update VERSION
 
 Relay verifies the release, safely restarts, checks readiness, and rolls back
 if the update fails.
+
+## Why not a VPN?
+
+Connecting a clinic to a reporting provider should be straightforward and give
+the provider only the access needed to exchange studies, orders, and reports.
+Relay is designed around that requirement.
+
+- **Simpler setup.** Install Relay, approve the host through Telrad, and point
+  your PACS or RIS to its local address. Relay connects over outbound HTTPS on
+  TCP `443`, with no inbound internet firewall rules, public static IP, or
+  site-to-site VPN configuration required. Local firewall rules and any
+  outbound allowlisting still apply.
+
+- **A narrower security boundary.** Relay handles specific DICOM and HL7
+  exchanges without giving Telrad routable access to the clinic network. There
+  is no general-purpose tunnel through which unrelated services can be
+  reached. A VPN can be tightly restricted, but those restrictions must be
+  configured and maintained separately.
+
+- **Encrypted, authenticated communication.** Traffic between Relay and Telrad
+  uses TLS with certificate verification and credentials specific to the
+  enrolled Relay. Studies and orders travel outbound; returned reports are
+  collected through outbound HTTPS requests and delivered to the configured
+  local receiver.
+
+- **Fewer networking dependencies.** There are no VPN peers, tunnel routes, or
+  cross-site address translations to coordinate. Clinics can use overlapping
+  private address ranges without conflicts between sites, and changing an
+  internet connection does not require renegotiating a VPN peer configuration.
+
+- **Fits existing clinical systems.** Your PACS and RIS continue using
+  familiar DICOM and HL7 interfaces on the local network. Relay handles the
+  connection to Telrad, so those systems do not need native support for cloud
+  APIs or internet-facing endpoints.
+
+- **Easier operation and review.** Built-in status and diagnostic commands
+  distinguish clinical connectivity from Telrad connectivity and
+  authentication problems. Relay is open source, does not persist clinical
+  payloads, and applies verified software updates only when an administrator
+  approves a specific version.
+
+A well-configured VPN can provide secure connectivity. Relay’s advantage is a
+smaller integration to configure, review, and maintain for this particular
+workflow. It still requires a secured host and appropriate local network
+controls, but it removes the need to operate a network tunnel just to exchange
+clinical data.
 
 ## Security and privacy
 

@@ -96,8 +96,10 @@ durations, outcomes, and error codes.
 
 ## DICOM and HL7 delivery behavior
 
-The DICOM SCP accepts the called AE `TELRAD`, negotiates one supported transfer
-syntax per presentation context, and supports C-ECHO plus sequential C-STORE.
+The DICOM SCP accepts any valid called AE title, negotiates one supported
+transfer syntax per presentation context, and supports C-ECHO plus sequential
+C-STORE. `TELRAD` remains a suggested title; no AE title configuration is needed.
+Leading and trailing whitespace remains tolerated for existing senders.
 It writes a deterministic Part 10 header and streams unchanged dataset PDVs to
 HTTPS with a 1 GiB total cap. There is no spool, transcode, or internal replay.
 Each C-STORE is one distinct HTTPS request without an `Idempotency-Key`; Relay
