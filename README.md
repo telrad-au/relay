@@ -99,6 +99,43 @@ Development and self-hosted deployments can override it at runtime with
 `TELRAD_RELAY_PAIRING_URL`. Relay derives the fixed control and ingest paths
 from that one administrator-approved origin.
 
+## Connect your PACS or RIS
+
+Once Relay is running, point clinic systems to the Relay host's LAN address:
+
+- DICOM: any valid called AE title (for example `TELRAD`), TCP port `11112`;
+- HL7: MLLP, TCP port `2575`; and
+- report return: TCP port `2576` at the configured report receiver.
+
+Allow only the required clinic systems to reach these ports. Validate the
+route with approved test traffic before sending clinical data.
+
+Report return uses HTTPS polling, with up to three seconds of idle pickup
+latency. Telrad retains the delivery queue; Relay has no local delivery ledger.
+If delivery succeeds but its confirmation is lost, the RIS may receive the
+same report and message control ID again. The receiver must handle duplicates.
+
+## Check and manage Relay
+
+```text
+telrad status
+telrad doctor
+telrad update
+```
+
+`status` shows whether ingest, Telrad connectivity, and report return are
+available. `doctor` checks the installation and configuration.
+
+`telrad update` only checks for an update. It does not change the host. After
+reviewing the release, an administrator can approve that exact version with:
+
+```text
+telrad update VERSION
+```
+
+Relay verifies the release, safely restarts, checks readiness, and rolls back
+if the update fails.
+
 ## Why not a VPN?
 
 Connecting a clinic to a reporting provider should be straightforward and give
@@ -144,43 +181,6 @@ smaller integration to configure, review, and maintain for this particular
 workflow. It still requires a secured host and appropriate local network
 controls, but it removes the need to operate a network tunnel just to exchange
 clinical data.
-
-## Connect your PACS or RIS
-
-Once Relay is running, point clinic systems to the Relay host's LAN address:
-
-- DICOM: any valid called AE title (for example `TELRAD`), TCP port `11112`;
-- HL7: MLLP, TCP port `2575`; and
-- report return: TCP port `2576` at the configured report receiver.
-
-Allow only the required clinic systems to reach these ports. Validate the
-route with approved test traffic before sending clinical data.
-
-Report return uses HTTPS polling, with up to three seconds of idle pickup
-latency. Telrad retains the delivery queue; Relay has no local delivery ledger.
-If delivery succeeds but its confirmation is lost, the RIS may receive the
-same report and message control ID again. The receiver must handle duplicates.
-
-## Check and manage Relay
-
-```text
-telrad status
-telrad doctor
-telrad update
-```
-
-`status` shows whether ingest, Telrad connectivity, and report return are
-available. `doctor` checks the installation and configuration.
-
-`telrad update` only checks for an update. It does not change the host. After
-reviewing the release, an administrator can approve that exact version with:
-
-```text
-telrad update VERSION
-```
-
-Relay verifies the release, safely restarts, checks readiness, and rolls back
-if the update fails.
 
 ## Security and privacy
 
