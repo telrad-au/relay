@@ -291,7 +291,7 @@ func negotiateAssociation(connection net.Conn) (map[byte]presentationContext, er
 	if err != nil || pduType != 0x01 || len(body) < 68 || binary.BigEndian.Uint16(body[:2]) != 1 {
 		return nil, errors.New("invalid association request")
 	}
-	if strings.TrimSpace(string(body[4:20])) != "TELRAD" {
+	if !validAETitle(body[4:20]) {
 		_ = writeAssociationReject(connection, 1, 1, 7)
 		return nil, errAssociationRejected
 	}
@@ -329,8 +329,7 @@ func negotiateAssociation(connection net.Conn) (map[byte]presentationContext, er
 	}
 	response := make([]byte, 68)
 	binary.BigEndian.PutUint16(response[:2], 1)
-	copy(response[4:20], padAE("TELRAD"))
-	copy(response[20:36], body[20:36])
+	copy(response[4:36], body[4:36])
 	response = append(response, associationItem(0x10, []byte(applicationContext))...)
 	ids := make([]int, 0, len(contexts))
 	for id := range contexts {
@@ -410,10 +409,18 @@ func associationItem(itemType byte, value []byte) []byte {
 	return append(item, value...)
 }
 
-func padAE(value string) []byte {
-	result := bytes.Repeat([]byte{' '}, 16)
-	copy(result, value)
-	return result
+func validAETitle(value []byte) bool {
+	// Preserve the previous strings.TrimSpace tolerance for sender padding.
+	value = bytes.TrimSpace(value)
+	if len(value) == 0 {
+		return false
+	}
+	for _, character := range value {
+		if character < 0x20 || character > 0x7e || character == '\\' {
+			return false
+		}
+	}
+	return true
 }
 
 func writeAssociationReject(writer io.Writer, result, source, reason byte) error {
