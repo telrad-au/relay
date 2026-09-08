@@ -2,4 +2,7 @@ module github.com/telrad-au/relay
 
 go 1.27.0
 
-require golang.org/x/sys v0.47.0
+require (
+	github.com/Microsoft/go-winio v0.6.2
+	golang.org/x/sys v0.47.0
+)

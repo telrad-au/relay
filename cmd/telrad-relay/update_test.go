@@ -37,7 +37,7 @@ func TestUpdateCheckVerifiesMetadataWithoutDownloadingOrChangingAnything(t *test
 	if updateErr != nil {
 		t.Fatal(updateErr)
 	}
-	approvalCommand := "sudo telrad update 1.1.0"
+	approvalCommand := "telrad update 1.1.0"
 	if runtime.GOOS == "windows" {
 		approvalCommand = "telrad update 1.1.0"
 	}
@@ -79,23 +79,21 @@ func TestUpdateApplyRequiresExactVersionAndStagesVerifiedArtifact(t *testing.T) 
 		t.Fatal(err)
 	}
 	originalVersion := version
-	originalExecutable := approvedUpdateExecutable
-	originalStart := startApprovedUpdate
+	originalSubmit := submitUpdatePayload
 	originalManagedConfig := isManagedUpdateConfig
 	version = "1.0.0"
-	approvedUpdateExecutable = func() (string, error) { return current, nil }
 	isManagedUpdateConfig = func(path string) bool { return path == configPath }
-	var launchedPath string
-	var launchedArgs []string
-	startApprovedUpdate = func(path string, args []string) error {
-		launchedPath = path
-		launchedArgs = append([]string(nil), args...)
+	var submitted []byte
+	submitUpdatePayload = func(release updateRelease, artifact []byte) error {
+		if release.Manifest.Version != "1.1.0" {
+			t.Fatal("wrong approved version")
+		}
+		submitted = append([]byte(nil), artifact...)
 		return nil
 	}
 	t.Cleanup(func() {
 		version = originalVersion
-		approvedUpdateExecutable = originalExecutable
-		startApprovedUpdate = originalStart
+		submitUpdatePayload = originalSubmit
 		isManagedUpdateConfig = originalManagedConfig
 	})
 
@@ -111,16 +109,13 @@ func TestUpdateApplyRequiresExactVersionAndStagesVerifiedArtifact(t *testing.T) 
 	if *artifactRequests != 1 {
 		t.Fatalf("approved update artifact requests = %d, want 1", *artifactRequests)
 	}
-	if launchedPath != current+".new" || !strings.Contains(strings.Join(launchedArgs, " "), "-version 1.1.0") {
-		t.Fatalf("launched path %q args %q", launchedPath, launchedArgs)
+	if !bytes.Equal(submitted, binary) {
+		t.Fatal("privilege boundary did not receive verified artifact")
 	}
-	staged, err := os.ReadFile(current + ".new")
-	if err != nil {
-		t.Fatal(err)
+	if _, err := os.Stat(current + ".new"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("unprivileged CLI staged into installation directory")
 	}
-	if !bytes.Equal(staged, binary) {
-		t.Fatal("staged update does not match the signed artifact")
-	}
+
 }
 
 func signedUpdateServer(t *testing.T, releaseVersion string, binary []byte) (*httptest.Server, *config, *int) {
@@ -526,7 +521,7 @@ func TestGeneratedReleaseBundle(t *testing.T) {
 	if strings.Contains(windowsInstaller, "@@") || strings.Contains(windowsInstaller, "/update-public-key.txt") {
 		t.Fatal("Windows installer contains an unresolved or remotely downloaded trust root")
 	}
-	if !strings.Contains(windowsInstaller, `channel = "stable"`) || !strings.Contains(windowsInstaller, `manifestUrl = $UpdateManifestUrl`) || !strings.Contains(windowsInstaller, `Join-Path $target "update-trust.json"`) || strings.Contains(windowsInstaller, `$ArtifactBaseUrl/stable.json`) {
+	if !strings.Contains(windowsInstaller, `channel="stable"`) || !strings.Contains(windowsInstaller, `manifestUrl=$UpdateManifestUrl`) || !strings.Contains(windowsInstaller, `& $download install-native`) || strings.Contains(windowsInstaller, `$ArtifactBaseUrl/stable.json`) {
 		t.Fatal("Windows installer does not install separate administrator-owned update trust")
 	}
 
@@ -541,11 +536,11 @@ func TestGeneratedReleaseBundle(t *testing.T) {
 	if strings.Contains(linuxInstaller, "@@") || strings.Contains(linuxInstaller, `$ARTIFACT_BASE_URL/update-public-key.pem`) || strings.Contains(linuxInstaller, `$ARTIFACT_BASE_URL/update-public-key.txt`) {
 		t.Fatal("Linux installer contains an unresolved or remotely downloaded trust root")
 	}
-	if !strings.Contains(linuxInstaller, `"channel": "stable"`) || !strings.Contains(linuxInstaller, `"manifestUrl": "$UPDATE_MANIFEST_URL"`) || !strings.Contains(linuxInstaller, `/usr/local/lib/telrad-relay/update-trust.json`) || strings.Contains(linuxInstaller, `$ARTIFACT_BASE_URL/stable.json`) {
+	if !strings.Contains(linuxInstaller, `"channel":"stable"`) || !strings.Contains(linuxInstaller, `"manifestUrl":"%s"`) || !strings.Contains(linuxInstaller, `"$UPDATE_MANIFEST_URL" "$UPDATE_PUBLIC_KEY"`) || strings.Contains(linuxInstaller, `$ARTIFACT_BASE_URL/stable.json`) {
 		t.Fatal("Linux installer does not install separate administrator-owned update trust")
 	}
-	if !strings.Contains(linuxInstaller, `install -m 0755 -o root -g root "$work_dir/telrad-relay" /usr/local/lib/telrad-relay/telrad`) {
-		t.Fatal("Linux installer does not make the executable administrator-owned")
+	if !strings.Contains(linuxInstaller, `| "$work_dir/telrad-relay" install-native`) {
+		t.Fatal("Linux installer does not delegate protected writes to the verified native installer")
 	}
 	if !strings.Contains(linuxInstaller, `aarch64|arm64) artifact_arch="arm64"`) || !strings.Contains(linuxInstaller, `telrad-relay-linux-$artifact_arch`) {
 		t.Fatal("Linux installer does not select the release artifact for the host architecture")
@@ -583,6 +578,9 @@ func TestGeneratedReleaseBundle(t *testing.T) {
 	}
 	if installation.Components["configuration"] != currentConfigSchemaVersion {
 		t.Fatalf("installation manifest configuration component = %d, want %d", installation.Components["configuration"], currentConfigSchemaVersion)
+	}
+	if installation.Components["linuxService"] != 3 || installation.Components["windowsService"] != 4 {
+		t.Fatal("installation manifest does not version the native management service changes")
 	}
 	for _, component := range []string{"configuration", "linuxService", "windowsService", "windowsFirewall", "updateTrust"} {
 		if installation.Components[component] < 1 {
@@ -678,9 +676,10 @@ func TestGeneratedDevelopmentReleaseBundle(t *testing.T) {
 		`UPDATE_MANIFEST_URL="https://`,
 		`PAIRING_URL="https://`,
 		`UPDATE_PUBLIC_KEY="` + encodedPublicKey + `"`,
-		`/usr/local/lib/telrad-relay/update-trust.json`,
-		`"channel": "stable"`,
-		`"manifestUrl": "$UPDATE_MANIFEST_URL"`,
+		`| "$work_dir/telrad-relay" install-native`,
+		`"channel":"stable"`,
+		`"manifestUrl":"%s"`,
+		`"$UPDATE_MANIFEST_URL" "$UPDATE_PUBLIC_KEY"`,
 		`aarch64|arm64) artifact_arch="arm64"`,
 		`telrad-relay-linux-$artifact_arch`,
 	} {
@@ -690,6 +689,14 @@ func TestGeneratedDevelopmentReleaseBundle(t *testing.T) {
 	}
 	if strings.Contains(linuxInstaller, "@@") || strings.Contains(linuxInstaller, `$ARTIFACT_BASE_URL/update-public-key.pem`) || strings.Contains(linuxInstaller, `$ARTIFACT_BASE_URL/update-public-key.txt`) {
 		t.Fatal("development Linux installer contains an unresolved or remotely downloaded trust root")
+	}
+	unit, err := os.ReadFile("telrad-relay.service")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundledUnit, err := os.ReadFile(filepath.Join(releaseDir, "telrad-relay.service"))
+	if err != nil || !bytes.Equal(unit, bundledUnit) {
+		t.Fatal("release bundle changed the embedded service unit")
 	}
 	for _, filename := range []string{"LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.md", "telrad-relay.service", "installation-manifest.json"} {
 		contents, err := os.ReadFile(filepath.Join(releaseDir, filename))

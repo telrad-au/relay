@@ -4,9 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
-	"os/user"
+	"path/filepath"
 	"runtime"
 )
 
@@ -44,46 +45,6 @@ Options:
 `)
 }
 
-func shouldElevate(command, configPath string) bool {
-	if runtime.GOOS != "linux" || os.Geteuid() == 0 || os.Getenv("TELRAD_RELAY_SERVICE_ENROLL") == "1" {
-		return false
-	}
-	if current, err := user.Current(); err == nil && current.Username == linuxServiceUser {
-		return false
-	}
-	return commandRequiresAdministrator(command, configPath)
-}
-
-func commandRequiresAdministrator(command, configPath string) bool {
-	switch command {
-	case "start", "stop", "restart":
-		return true
-	case "auth", "enroll", "rotate-credential", "doctor", "migrate-config", "status", "update":
-		return configPath == defaultConfigPath()
-	default:
-		return false
-	}
-}
-
-func elevateWithSudo(args []string) error {
-	executable, err := os.Executable()
-	if err != nil {
-		return err
-	}
-	if _, err := exec.LookPath("sudo"); err != nil {
-		return errors.New("administrator access is required, but sudo is not installed")
-	}
-	fmt.Println("Telrad needs administrator access to manage this installation.")
-	command := exec.Command("sudo", append([]string{executable}, args...)...)
-	command.Stdin = os.Stdin
-	command.Stdout = os.Stdout
-	command.Stderr = os.Stderr
-	if err := command.Run(); err != nil {
-		return fmt.Errorf("administrator command failed: %w", err)
-	}
-	return nil
-}
-
 func authenticateAndStart(cfg *config, configPath string) error {
 	fmt.Println("Telrad Relay")
 	fmt.Println()
@@ -94,9 +55,6 @@ func authenticateAndStart(cfg *config, configPath string) error {
 		fmt.Println("Telrad Relay is already authenticated and running.")
 		fmt.Println("Run 'telrad status' for details.")
 		return nil
-	}
-	if err := requireAuthenticationPrivileges(); err != nil {
-		return err
 	}
 	fmt.Println("Let's connect this host to your Telrad clinic account.")
 	if err := enrollForService(cfg, configPath); err != nil {
@@ -110,71 +68,16 @@ func authenticateAndStart(cfg *config, configPath string) error {
 	return nil
 }
 
-func requireAuthenticationPrivileges() error {
-	switch runtime.GOOS {
-	case "linux":
-		if os.Geteuid() != 0 {
-			return errors.New("first-time authentication requires administrator access")
-		}
-	case "windows":
-		// Service Control Manager returns a clear access-denied error if the
-		// terminal is not elevated. Enrollment itself does not need a separate
-		// privilege probe on Windows.
-	default:
-		return fmt.Errorf("automatic service authentication is not supported on %s", runtime.GOOS)
-	}
-	return nil
+func enrollForService(cfg *config, path string) error { return enroll(context.Background(), cfg, path) }
+func rotateCredentialForService(cfg *config, path string) error {
+	return rotateCredential(context.Background(), cfg)
 }
 
-func enrollForService(cfg *config, configPath string) error {
-	if runtime.GOOS != "linux" || configPath != defaultConfigPath() {
-		return enroll(context.Background(), cfg, configPath)
+func nativeCommandOutput(cfg *config) io.Writer {
+	if cfg.commandOutput != nil {
+		return cfg.commandOutput
 	}
-	current, err := user.Current()
-	if err == nil && current.Username == linuxServiceUser {
-		return enroll(context.Background(), cfg, configPath)
-	}
-	if os.Geteuid() != 0 {
-		return errors.New("relay enrollment requires administrator access")
-	}
-	executable, err := os.Executable()
-	if err != nil {
-		return err
-	}
-	command := exec.Command("runuser", "-u", linuxServiceUser, "--", executable, "--config", configPath, "enroll")
-	command.Env = append(os.Environ(), "TELRAD_RELAY_SERVICE_ENROLL=1")
-	command.Stdin = os.Stdin
-	command.Stdout = os.Stdout
-	command.Stderr = os.Stderr
-	if err := command.Run(); err != nil {
-		return fmt.Errorf("relay enrollment failed: %w", err)
-	}
-	return nil
-}
-
-func rotateCredentialForService(cfg *config, configPath string) error {
-	if runtime.GOOS != "linux" || configPath != defaultConfigPath() {
-		return rotateCredential(context.Background(), cfg)
-	}
-	current, err := user.Current()
-	if err == nil && current.Username == linuxServiceUser {
-		return rotateCredential(context.Background(), cfg)
-	}
-	if os.Geteuid() != 0 {
-		return errors.New("credential rotation requires administrator access")
-	}
-	executable, err := os.Executable()
-	if err != nil {
-		return err
-	}
-	command := exec.Command("runuser", "-u", linuxServiceUser, "--", executable, "--config", configPath, "rotate-credential")
-	command.Env = append(os.Environ(), "TELRAD_RELAY_SERVICE_ENROLL=1")
-	command.Stdout = os.Stdout
-	command.Stderr = os.Stderr
-	if err := command.Run(); err != nil {
-		return fmt.Errorf("relay credential rotation failed: %w", err)
-	}
-	return nil
+	return os.Stdout
 }
 
 func enableAndStartService() error {
@@ -217,12 +120,27 @@ func serviceStatus() error {
 }
 
 func runServiceCommand(name string, args ...string) error {
+	if name == "systemctl" {
+		name = platformSystemctlPath()
+	}
+	if name == "sc.exe" {
+		directory := platformWindowsSystemDirectory()
+		if directory == "" {
+			return errors.New("Windows system directory is unavailable")
+		}
+		name = filepath.Join(directory, name)
+	}
 	command := exec.Command(name, args...)
+	command.Env = serviceCommandEnvironment()
 	command.Stdin = os.Stdin
 	command.Stdout = os.Stdout
 	command.Stderr = os.Stderr
 	if err := command.Run(); err != nil {
+		var exit *exec.ExitError
+		if runtime.GOOS == "windows" && errors.As(err, &exit) && ((len(args) > 0 && args[0] == "start" && exit.ExitCode() == 1056) || (len(args) > 0 && args[0] == "stop" && exit.ExitCode() == 1062)) {
+			return waitPlatformServiceControl(args)
+		}
 		return fmt.Errorf("service command failed: %w", err)
 	}
-	return nil
+	return waitPlatformServiceControl(args)
 }

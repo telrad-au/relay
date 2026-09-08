@@ -42,7 +42,25 @@ jobs:
             - name: Test
               run: |
                   set -euo pipefail
-                  go test -race -covermode=atomic -coverprofile=coverage.out ./...
+                  mkdir -p "$RUNNER_TEMP/relay-unit-coverage"
+                  go test -race -covermode=atomic -cover ./... -args -test.gocoverdir="$RUNNER_TEMP/relay-unit-coverage"
+
+            - name: Exercise native Linux installation and collect process coverage
+              env:
+                  TELRAD_NATIVE_INSTALL_TEST: "1"
+                  RELAY_NATIVE_COVERAGE_DIR: ${{ runner.temp }}/relay-native-coverage
+              run: |
+                  # The hosted image makes this directory world-writable for npm.
+                  # Restore normal permissions only on this disposable test host.
+                  sudo chown root:root /usr/local/bin
+                  sudo chmod 0755 /usr/local/bin
+                  scripts/check-native-installation.sh
+                  mkdir -p "$RUNNER_TEMP/relay-combined-coverage"
+                  go tool covdata merge -pcombine -i "$RUNNER_TEMP/relay-unit-coverage,$RELAY_NATIVE_COVERAGE_DIR" -o "$RUNNER_TEMP/relay-combined-coverage"
+                  go tool covdata textfmt -i "$RUNNER_TEMP/relay-combined-coverage" -o coverage.out
+
+            - name: Enforce combined Go coverage
+              run: |
                   {
                       echo '### Relay coverage'
                       echo '```text'
@@ -190,15 +208,19 @@ jobs:
                       https://github.com/telrad-au/relay/releases/latest/download/stable.json \
                       https://example.invalid/v1/relay/pairing-enrollments
 
+            - name: Verify container build excludes native management
+              run: |
+                  ! go list -tags relay_container -f '{{join .GoFiles "\n"}}' ./cmd/telrad-relay | grep -E '^native_(actions|install|ipc|update)'
+                  ! GOOS=windows go list -tags relay_container -deps ./cmd/telrad-relay | grep -F github.com/Microsoft/go-winio
+
             - name: Build container
               run: |
                   set -euo pipefail
                   default_pairing_url='https://ingest.app.telrad.com.au/v1/relay/pairing-enrollments'
                   docker build --build-arg VERSION=0.0.0-ci.1 --tag telrad-relay:ci-current .
                   docker build --build-arg VERSION=0.0.0-ci.2 --tag telrad-relay:ci-next .
-                  [[ "$(docker run --rm telrad-relay:ci-current version)" == "0.0.0-ci.1" ]]
+                  [[ "$(docker run --rm --read-only --cap-drop ALL --security-opt no-new-privileges telrad-relay:ci-current version)" == "0.0.0-ci.1" ]]
                   [[ "$(docker run --rm telrad-relay:ci-next version)" == "0.0.0-ci.2" ]]
-                  [[ "$(docker run --rm telrad-relay:ci-current version)" == "0.0.0-ci.1" ]]
                   [[ "$(docker image inspect --format '{{.Config.User}}' telrad-relay:ci-current)" == "10001:10001" ]]
                   [[ "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.licenses"}}' telrad-relay:ci-current)" == "Apache-2.0" ]]
                   docker image inspect --format '{{json .Config.Healthcheck.Test}}' telrad-relay:ci-current | grep -F 'ready'
@@ -219,73 +241,15 @@ jobs:
                   TELRAD_RELAY_REPORT_DESTINATION_HOST='report.example.invalid' \
                       docker compose -f packaging/compose.yml config --quiet
 
+    # Keep the existing required status name. Native Linux checks and their
+    # process coverage now run in the test job before its coverage gate.
     linux-installer:
         name: Clean install and upgrade on Linux
+        needs: test
         runs-on: ubuntu-24.04
         steps:
-            - name: Check out repository
-              uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
-              with:
-                  persist-credentials: false
-
-            - name: Set up Go
-              uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
-              with:
-                  go-version: ${{ env.GO_VERSION }}
-                  cache-dependency-path: go.sum
-
-            - name: Exercise clean install, upgrade, and repair
-              run: |
-                  set -euo pipefail
-                  fixture="$(mktemp -d "$RUNNER_TEMP/linux-installer.XXXXXX")"
-                  fake_bin="$fixture/bin"
-                  systemctl_log="$fixture/systemctl.log"
-                  active_marker="$fixture/service-active"
-                  mkdir -p "$fake_bin"
-                  : > "$systemctl_log"
-                  printf '%s\n' \
-                      '#!/bin/sh' \
-                      'printf "%s\n" "$*" >> "$TELRAD_RELAY_SYSTEMCTL_LOG"' \
-                      'if [ "$1" = "is-active" ]; then' \
-                      '    [ -f "$TELRAD_RELAY_ACTIVE_MARKER" ]' \
-                      '    exit' \
-                      'fi' \
-                      'exit 0' > "$fake_bin/systemctl"
-                  chmod +x "$fake_bin/systemctl"
-                  go build -ldflags "-X main.version=0.0.0-ci.1" -o "$fixture/telrad-relay" ./cmd/telrad-relay
-                  cp packaging/relay.example.json packaging/telrad-relay.service packaging/install.sh "$fixture/"
-                  printf '%s\n' '{"schemaVersion":1,"channel":"stable","manifestUrl":"https://example.invalid/stable.json","publicKey":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}' > "$fixture/update-trust.json"
-                  scripts/build-release.sh 0.0.0-ci.1
-                  cp dist/0.0.0-ci.1/installation-manifest.json "$fixture/"
-                  clean_output="$(
-                      cd "$fixture"
-                      sudo env \
-                          PATH="$fake_bin:$PATH" \
-                          TELRAD_RELAY_SYSTEMCTL_LOG="$systemctl_log" \
-                          TELRAD_RELAY_ACTIVE_MARKER="$active_marker" \
-                          ./install.sh
-                  )"
-                  [[ "$clean_output" == *"Telrad Relay 0.0.0-ci.1 installed."* ]]
-                  [[ "$clean_output" == *"Run 'telrad' to authenticate this host and start the service."* ]]
-                  ! grep -Fqx 'restart telrad-relay.service' "$systemctl_log"
-                  sudo sed -i 's/"reportPort": 2576/"reportPort": 32576/' /etc/telrad-relay/relay.json
-                  : > "$systemctl_log"
-                  touch "$active_marker"
-                  upgrade_output="$(
-                      cd "$fixture"
-                      sudo env \
-                          PATH="$fake_bin:$PATH" \
-                          TELRAD_RELAY_SYSTEMCTL_LOG="$systemctl_log" \
-                          TELRAD_RELAY_ACTIVE_MARKER="$active_marker" \
-                          ./install.sh
-                  )"
-                  [[ "$upgrade_output" == *"Existing configuration preserved."* ]]
-                  [[ "$upgrade_output" == *"Service restarted successfully."* ]]
-                  [[ "$upgrade_output" == *"Relay is running."* ]]
-                  grep -Fqx 'restart telrad-relay.service' "$systemctl_log"
-                  sudo grep -F '"reportPort": 32576' /etc/telrad-relay/relay.json
-                  sudo cmp "$fixture/installation-manifest.json" /etc/telrad-relay/installation.json
-                  sudo cmp "$fixture/update-trust.json" /usr/local/lib/telrad-relay/update-trust.json
+            - name: Confirm native Linux validation
+              run: echo 'Native systemd installation and lifecycle checks passed in Test and build.'
 
     windows-installer:
         name: Verify Windows installer trust checks
@@ -310,3 +274,9 @@ jobs:
             - name: Run relay tests on Windows
               shell: pwsh
               run: go test -race ./...
+
+            - name: Exercise real Windows service installation and ACL boundaries
+              shell: pwsh
+              env:
+                  TELRAD_NATIVE_INSTALL_TEST: "1"
+              run: ./packaging/install-native.Tests.ps1

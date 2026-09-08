@@ -194,7 +194,7 @@ func printRuntimeStatus(status relayRuntimeStatus) {
 }
 
 func readRuntimeStatus(configPath string) (relayRuntimeStatus, error) {
-	data, err := os.ReadFile(runtimeStatusPath(configPath))
+	data, err := safeReadFile(runtimeStatusPath(configPath), maxCloudResponseBytes)
 	if err != nil {
 		return relayRuntimeStatus{}, err
 	}

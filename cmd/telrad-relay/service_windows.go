@@ -8,10 +8,54 @@ import (
 	"io"
 	"log/slog"
 	"strings"
+	"time"
 
+	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/eventlog"
+	"golang.org/x/sys/windows/svc/mgr"
 )
+
+// sc.exe returns when SCM accepts the request. Replacement and rollback must
+// wait until the service process has actually stopped and released its files.
+func waitPlatformServiceControl(args []string) error {
+	if len(args) < 2 || args[1] != windowsServiceName || args[0] != "start" && args[0] != "stop" {
+		return nil
+	}
+	scm, err := windows.OpenSCManager(nil, nil, windows.SC_MANAGER_CONNECT)
+	if err != nil {
+		return err
+	}
+	defer windows.CloseServiceHandle(scm)
+	name, _ := windows.UTF16PtrFromString(windowsServiceName)
+	handle, err := windows.OpenService(scm, name, windows.SERVICE_QUERY_STATUS)
+	if err != nil {
+		return err
+	}
+	defer windows.CloseServiceHandle(handle)
+	service := mgr.Service{Name: windowsServiceName, Handle: handle}
+	want := svc.Stopped
+	if args[0] == "start" {
+		want = svc.Running
+	}
+	deadline := time.Now().Add(serviceDrainTimeout + 10*time.Second)
+	for {
+		state, err := service.Query()
+		if err != nil {
+			return err
+		}
+		if state.State == want {
+			return nil
+		}
+		if want == svc.Running && state.State == svc.Stopped {
+			return fmt.Errorf("Relay service stopped during startup (exit %d)", state.Win32ExitCode)
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("Relay service did not finish %s", args[0])
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
 
 var (
 	runWindowsForeground = run

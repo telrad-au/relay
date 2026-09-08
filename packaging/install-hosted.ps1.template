@@ -5,6 +5,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$OutputEncoding = New-Object System.Text.UTF8Encoding($false)
 $ArtifactBaseUrl = "@@ARTIFACT_BASE_URL@@"
 $UpdateManifestUrl = "@@UPDATE_MANIFEST_URL@@"
 $PairingUrl = "@@ENROLLMENT_URL@@"
@@ -27,29 +28,6 @@ function Add-TelradCurrentProcessPath {
         "$Path;$processPath"
     }
     [Environment]::SetEnvironmentVariable("Path", $updatedProcessPath, "Process")
-}
-
-function Set-TelradDirectoryAcl {
-    param(
-        [Parameter(Mandatory = $true)][string]$Path,
-        [Parameter(Mandatory = $true)][string]$ServiceAccess
-    )
-
-    & icacls.exe $Path /inheritance:r | Out-Null
-    & icacls.exe $Path /grant:r "SYSTEM:(OI)(CI)F" "BUILTIN\Administrators:(OI)(CI)F" "${ServiceIdentity}:(OI)(CI)$ServiceAccess" | Out-Null
-    if ($LASTEXITCODE -ne 0) {
-        throw "Could not secure $Path for the relay service account."
-    }
-}
-
-function Set-TelradFirewallRule {
-    param(
-        [Parameter(Mandatory = $true)][string]$Name,
-        [Parameter(Mandatory = $true)][int]$Port
-    )
-
-    Remove-NetFirewallRule -DisplayName $Name -ErrorAction SilentlyContinue
-    New-NetFirewallRule -DisplayName $Name -Direction Inbound -Action Allow -Protocol TCP -LocalPort $Port -RemoteAddress $ClinicRemoteAddress -Profile Domain,Private | Out-Null
 }
 
 function Assert-TelradReleaseAuthenticity {
@@ -105,70 +83,22 @@ if ([Runtime.InteropServices.RuntimeInformation]::OSArchitecture -ne [Runtime.In
     throw "This release supports Windows x64 only."
 }
 
-$target = Join-Path $env:ProgramFiles "Telrad Relay"
-$configDir = Join-Path $env:ProgramData "Telrad\Relay"
-$binary = Join-Path $target "telrad.exe"
-$hadConfig = Test-Path (Join-Path $configDir "relay.json")
-$hadEnrollment = $false
-$migrationRequired = $false
-if ($hadConfig) {
-    $existingSchema = (Get-Content -Raw (Join-Path $configDir "relay.json") | ConvertFrom-Json).schemaVersion
-    if ($existingSchema -eq 3 -or $existingSchema -eq 4) {
-        $hadEnrollment = Test-Path (Join-Path $configDir "relay-credential.json")
-    } elseif ($existingSchema -eq 2) {
-        $migrationRequired = $true
-    } else {
-        throw "The installed Relay configuration schema is unsupported."
-    }
-}
-
-$temporary = Join-Path $env:TEMP ("telrad-relay-" + [Guid]::NewGuid().ToString("N"))
+$temporary = Join-Path ([IO.Path]::GetTempPath()) ("telrad-relay-" + [Guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Path $temporary | Out-Null
-$committed = $false
-$backups = @{}
 try {
     $download = Join-Path $temporary "telrad-relay.exe"
     Invoke-WebRequest "$ArtifactBaseUrl/telrad-relay-windows-amd64.exe" -OutFile $download
     $expected = [string](Invoke-RestMethod "$ArtifactBaseUrl/telrad-relay-windows-amd64.exe.sha256")
     Assert-TelradReleaseAuthenticity -ArtifactPath $download -ExpectedDigest $expected
-
-    New-Item -ItemType Directory -Force -Path $target, $configDir | Out-Null
-    $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
-    if (($machinePath -split ";") -notcontains $target) {
-        [Environment]::SetEnvironmentVariable("Path", ($machinePath.TrimEnd(";") + ";" + $target), "Machine")
-    }
-
-    $existing = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
-    if ($existing) { Stop-Service $ServiceName -Force -ErrorAction SilentlyContinue }
-    foreach ($path in @(
-        $binary,
-        (Join-Path $target "update-trust.json"),
-        (Join-Path $configDir "relay.json"),
-        (Join-Path $configDir "relay.crt"),
-        (Join-Path $configDir "relay.key"),
-        (Join-Path $configDir "ca.crt"),
-        (Join-Path $configDir "update-public-key.pem"),
-        (Join-Path $configDir "installation.json")
-    )) {
-        if (Test-Path -LiteralPath $path) {
-            $backup = Join-Path $temporary ([Guid]::NewGuid().ToString("N"))
-            Copy-Item -LiteralPath $path -Destination $backup
-            $backups[$path] = $backup
-        } else {
-            $backups[$path] = $null
-        }
-    }
-    Copy-Item $download $binary -Force
-
-    if (-not $hadConfig) {
-        $config = @{
+    $inputData = @{
+        config = @{
             schemaVersion = 4
             pairingUrl = $PairingUrl
             controlUrl = ""
             dicomUrl = ""
             hl7Url = ""
             relayId = ""
-            credentialPath = (Join-Path $configDir "relay-credential.json")
+            credentialPath = "relay-credential.json"
             listenAddress = "0.0.0.0"
             dicomPort = 11112
             hl7Port = 2575
@@ -186,73 +116,15 @@ try {
             hl7LifetimeSeconds = 0
             hl7MaxBytes = 1048576
         }
-        $config | ConvertTo-Json | Set-Content -Encoding UTF8 (Join-Path $configDir "relay.json")
+        trust = @{schemaVersion=1; channel="stable"; manifestUrl=$UpdateManifestUrl; publicKey=$TrustedUpdatePublicKey}
+        installation = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($InstallationManifestBase64)) | ConvertFrom-Json
+        clinicRemoteAddress = $ClinicRemoteAddress
     }
-    if ($migrationRequired) {
-        & $binary `
-            --config (Join-Path $configDir "relay.json") `
-            --migration-pairing-url $PairingUrl `
-            --migration-update-manifest-url $UpdateManifestUrl `
-            --migration-update-public-key $TrustedUpdatePublicKey `
-            migrate-config
-        if ($LASTEXITCODE -ne 0) { throw "Relay configuration migration failed." }
-    }
-    if ($hadConfig -and $existingSchema -eq 3) {
-        & $binary --config (Join-Path $configDir "relay.json") migrate-config
-        if ($LASTEXITCODE -ne 0) { throw "Relay polling configuration upgrade failed." }
-    }
-    $updateTrust = [ordered]@{
-        schemaVersion = 1
-        channel = "stable"
-        manifestUrl = $UpdateManifestUrl
-        publicKey = $TrustedUpdatePublicKey
-    } | ConvertTo-Json
-    [IO.File]::WriteAllText(
-        (Join-Path $target "update-trust.json"),
-        $updateTrust,
-        [Text.UTF8Encoding]::new($false)
-    )
-    $serviceCommand = '"' + $binary + '" run'
-    $startMode = if ($hadEnrollment) { "auto" } else { "demand" }
-    if ($existing) {
-        sc.exe config $ServiceName binPath= $serviceCommand start= $startMode obj= $ServiceIdentity password= "" | Out-Null
-    } else {
-        sc.exe create $ServiceName binPath= $serviceCommand start= $startMode obj= $ServiceIdentity password= "" DisplayName= "Telrad Relay" | Out-Null
-        sc.exe failure $ServiceName reset= 86400 actions= restart/5000/restart/5000/restart/5000 | Out-Null
-    }
-    sc.exe sidtype $ServiceName unrestricted | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "Could not enable the relay service SID." }
-
-    Set-TelradDirectoryAcl -Path $target -ServiceAccess "RX"
-    Set-TelradDirectoryAcl -Path $configDir -ServiceAccess "M"
-    Set-TelradFirewallRule -Name "Telrad Relay DICOM" -Port 11112
-    Set-TelradFirewallRule -Name "Telrad Relay HL7" -Port 2575
-    if (-not [Diagnostics.EventLog]::SourceExists($ServiceName)) {
-        New-EventLog -LogName Application -Source $ServiceName
-    }
-    [IO.File]::WriteAllBytes((Join-Path $configDir "installation.json"), [Convert]::FromBase64String($InstallationManifestBase64))
-    if ($hadEnrollment) {
-        Start-Service $ServiceName
-        Write-Host "Telrad Relay updated and restarted."
-    } else {
-        Write-Host "Telrad Relay installed. Run 'telrad' to authenticate and start it."
-    }
+    # Targets, ACLs, configuration migration, and rollback are handled by the verified binary.
+    $inputData | ConvertTo-Json -Depth 20 -Compress | & $download install-native
+    if ($LASTEXITCODE -ne 0) { throw "Relay native installation failed." }
+    $target = Join-Path ([Environment]::GetFolderPath('ProgramFiles')) "Telrad Relay"
     Add-TelradCurrentProcessPath -Path $target
-    $committed = $true
-} catch {
-    if (-not $committed) {
-        foreach ($path in $backups.Keys) {
-            if ($null -eq $backups[$path]) {
-                Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
-            } else {
-                Copy-Item -LiteralPath $backups[$path] -Destination $path -Force
-            }
-        }
-        if ($hadEnrollment -and (Test-Path -LiteralPath $binary)) {
-            Start-Service $ServiceName -ErrorAction SilentlyContinue
-        }
-    }
-    throw
 } finally {
     Remove-Item -Recurse -Force $temporary -ErrorAction SilentlyContinue
 }

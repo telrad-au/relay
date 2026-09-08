@@ -7,11 +7,28 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 )
+
+// macOS supplies a symlinked /var temporary directory. Fixtures deliberately use
+// its real location so strict production path checks are exercised unchanged.
+func TestMain(m *testing.M) {
+	if runtime.GOOS == "darwin" {
+		path, err := filepath.EvalSymlinks(os.TempDir())
+		if err != nil {
+			panic(err)
+		}
+		if err := os.Setenv("TMPDIR", path); err != nil {
+			panic(err)
+		}
+	}
+	os.Exit(m.Run())
+}
 
 func TestProtocolClientRejectsRedirectsAndUpdateClientFollows(t *testing.T) {
 	target := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) { writer.WriteHeader(http.StatusNoContent) }))

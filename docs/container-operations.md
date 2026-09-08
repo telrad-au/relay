@@ -3,7 +3,11 @@
 The Compose deployment runs an immutable image with a read-only root filesystem,
 no additional Linux capabilities, and a named volume for schema-v4 configuration
 and its bearer credential record. The
-container does not update its own image.
+container does not update its own image. Native privilege helpers and management
+IPC are excluded from the image build. `auth`, `enroll`, `rotate-credential`, `doctor`,
+`status`, and `ready` operate directly as UID `10001`, without sudo or systemd.
+Read-only checks do not perform configuration migration or transaction recovery.
+Start and stop the service through the container runtime.
 
 ## First pairing
 
