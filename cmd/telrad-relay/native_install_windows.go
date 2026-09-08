@@ -24,25 +24,7 @@ import (
 func prepareNativeInstallation() error {
 	data, programs := platformManagedDirectories()
 	for _, path := range []string{programs, filepath.Dir(data), data} {
-		parent, err := openSafeDirectory(filepath.Dir(path))
-		if err != nil {
-			return err
-		}
-		err = parent.root.Mkdir(filepath.Base(path), 0700)
-		parent.Close()
-		if err != nil && !errors.Is(err, os.ErrExist) {
-			return err
-		}
-		d, err := openSafeDirectory(path)
-		if err != nil {
-			return err
-		}
-		// Existing service data is intentionally writable by its virtual account.
-		if path != data {
-			err = validateAdministratorHandle(d.file)
-		}
-		d.Close()
-		if err != nil {
+		if err := prepareNativeDirectory(path, path == data); err != nil {
 			return err
 		}
 	}
@@ -199,7 +181,9 @@ if($env:TELRAD_INSTALL_MODE -eq 'snapshot') {
  $existing=@(Get-NetFirewallRule -PolicyStore PersistentStore)
  foreach($rule in $rules) {
   if(-not ($existing | Where-Object {$_.DisplayName -eq $rule.Display -or $_.Name -eq $rule.Name})) {
-   New-NetFirewallRule -Name $rule.Name -DisplayName $rule.Display -Direction Inbound -Action Allow -Protocol TCP -LocalPort $rule.Port -RemoteAddress $env:TELRAD_INSTALL_FIREWALL_SCOPE -Profile Domain,Private | Out-Null
+   try {
+    New-NetFirewallRule -Name $rule.Name -DisplayName $rule.Display -Direction Inbound -Action Allow -Protocol TCP -LocalPort $rule.Port -RemoteAddress $env:TELRAD_INSTALL_FIREWALL_SCOPE -Profile Domain,Private | Out-Null
+   } catch {throw "Relay firewall configuration failed: $($_.Exception.Message)"}
   }
  }
  if(($path -split ';') -notcontains $target) {[Environment]::SetEnvironmentVariable('Path',($path.TrimEnd(';')+';'+$target),'Machine')}

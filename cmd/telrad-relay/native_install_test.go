@@ -13,6 +13,27 @@ import (
 	"testing"
 )
 
+func TestNativeInstallationCIPreparesProtectedPaths(t *testing.T) {
+	data, err := os.ReadFile("../../.github/workflows/ci.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	remaining := string(data)
+	for _, step := range []string{
+		"name: Exercise native Linux installation and collect process coverage",
+		"sudo chown root:root /usr/local/bin",
+		"sudo chmod 0755 /usr/local/bin",
+		"scripts/check-native-installation.sh",
+		"name: Enforce combined Go coverage",
+	} {
+		_, after, found := strings.Cut(remaining, step)
+		if !found {
+			t.Fatalf("native CI missing ordered step %q", step)
+		}
+		remaining = after
+	}
+}
+
 func isolatedInstallation(t *testing.T) (managedPaths, nativeInstallInput, nativeInstallOperations, *[]string) {
 	t.Helper()
 	root := t.TempDir()

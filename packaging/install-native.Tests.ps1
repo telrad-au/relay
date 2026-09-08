@@ -12,8 +12,12 @@ try {
     # Fail after SCM creation to verify a fresh installation removes its new
     # service and executable when later firewall configuration fails.
     $failed = $false
-    try { & (Join-Path $fixture 'install.ps1') -ClinicRemoteAddress 'invalid-review-scope' } catch { $failed = $true }
+    $failureLog = Join-Path $fixture 'firewall-failure.log'
+    try { & (Join-Path $fixture 'install.ps1') -ClinicRemoteAddress 'invalid-review-scope' *> $failureLog } catch { $failed = $true }
     if (-not $failed) { throw 'Invalid firewall scope was accepted.' }
+    if ((Get-Content -Raw $failureLog) -notmatch 'Relay firewall configuration failed:') {
+        throw "Installation failed before exercising firewall rollback: $(Get-Content -Raw $failureLog)"
+    }
     if (Get-Service TelradRelay -ErrorAction SilentlyContinue) { throw 'Failed installation left an SCM service.' }
     $failedBinary = Join-Path ([Environment]::GetFolderPath('ProgramFiles')) 'Telrad Relay\telrad.exe'
     if (Test-Path $failedBinary) { throw 'Failed installation left an executable.' }

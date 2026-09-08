@@ -6,6 +6,18 @@ import (
 	"testing"
 )
 
+func TestWindowsNativeRollbackRequiresFirewallFailure(t *testing.T) {
+	data, err := os.ReadFile("../../packaging/install-native.Tests.ps1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{"*> $failureLog", "-notmatch 'Relay firewall configuration failed:'", "Installation failed before exercising firewall rollback"} {
+		if !strings.Contains(string(data), required) {
+			t.Errorf("native rollback check missing %q", required)
+		}
+	}
+}
+
 func TestWindowsInstallersDelegateProtectedMutations(t *testing.T) {
 	for _, name := range []string{"install.ps1", "install-hosted.ps1.template"} {
 		data, err := os.ReadFile("../../packaging/" + name)

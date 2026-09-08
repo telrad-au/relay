@@ -51,6 +51,9 @@ func TestWindowsJunctionCannotRedirectFileOperations(t *testing.T) {
 		if err := safeAtomicWrite(target, []byte("changed"), 0600); err == nil {
 			t.Fatal("write followed junction")
 		}
+		if err := prepareNativeDirectory(filepath.Dir(target), true); err == nil {
+			t.Fatal("native directory preparation accepted a junction")
+		}
 		if data, _ := os.ReadFile(sentinel); string(data) != "keep" {
 			t.Fatal("junction target changed")
 		}

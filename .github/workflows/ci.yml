@@ -50,6 +50,10 @@ jobs:
                   TELRAD_NATIVE_INSTALL_TEST: "1"
                   RELAY_NATIVE_COVERAGE_DIR: ${{ runner.temp }}/relay-native-coverage
               run: |
+                  # The hosted image makes this directory world-writable for npm.
+                  # Restore normal permissions only on this disposable test host.
+                  sudo chown root:root /usr/local/bin
+                  sudo chmod 0755 /usr/local/bin
                   scripts/check-native-installation.sh
                   mkdir -p "$RUNNER_TEMP/relay-combined-coverage"
                   go tool covdata merge -pcombine -i "$RUNNER_TEMP/relay-unit-coverage,$RELAY_NATIVE_COVERAGE_DIR" -o "$RUNNER_TEMP/relay-combined-coverage"

@@ -141,6 +141,9 @@ operations, unpaired management startup, and independent signature verification 
 the update privilege boundary. Windows adds Known Folder environment isolation,
 ancestor-junction rejection, private backup creation ACLs, replacement while the
 original CLI image remains running, and identification-only named-pipe client tests.
+Fresh Windows directory tests use a parent with inherited public write access and
+verify that managed directories are protected at creation; existing unsafe
+installation directories and junctions remain rejected without permission changes.
 
 CI uses `scripts/check-native-installation.sh` on its disposable Linux runner and
 `packaging/install-native.Tests.ps1` on its disposable Windows runner. These install
@@ -152,7 +155,11 @@ and enrollment preservation when a signed candidate reports the wrong version.
 The failing update must finish rollback before returning a nonzero result. Native
 tests also exercise service-setting/link restoration and fresh Windows installation
 rollback after firewall setup fails.
-Its temporary CA is confined to the disposable host and removed after the test.
+The Windows rollback check requires the firewall-specific error so an earlier
+installation failure cannot pass it. The disposable Ubuntu CI runner restores
+root ownership and mode `0755` on `/usr/local/bin`, which its image makes
+world-writable for npm. The production installer still rejects writable paths.
+The lifecycle test's temporary CA stays on the disposable host and is removed afterward.
 They require `TELRAD_NATIVE_INSTALL_TEST=1`; do not run them on a clinic host.
 Cross-compilation alone does not validate SCM, UAC, Windows ACLs, or systemd.
 
