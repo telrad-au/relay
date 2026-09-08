@@ -181,7 +181,7 @@ func TestOrthancDICOMPayloadIntegrity(t *testing.T) {
 	port := listener.Addr().(*net.TCPAddr).Port
 	sender := startOrthancContainer(t, testContext, "sender", map[string]any{
 		"relay": map[string]any{
-			"AET":              "TELRAD",
+			"AET":              "CLINIC_ARCHIVE",
 			"Host":             "host.docker.internal",
 			"Port":             port,
 			"AllowStore":       true,
