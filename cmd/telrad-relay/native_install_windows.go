@@ -200,6 +200,15 @@ if($env:TELRAD_INSTALL_MODE -eq 'snapshot') {
 `
 
 func windowsIntegration(mode, remote string, previous []byte) ([]byte, error) {
+	command, err := windowsIntegrationCommand(mode, remote, previous)
+	if err != nil {
+		return nil, err
+	}
+	command.Stderr = os.Stderr
+	return command.Output()
+}
+
+func windowsIntegrationCommand(mode, remote string, previous []byte) (*exec.Cmd, error) {
 	system, err := windows.GetSystemDirectory()
 	if err != nil {
 		return nil, err
@@ -209,10 +218,11 @@ func windowsIntegration(mode, remote string, previous []byte) ([]byte, error) {
 	for i, v := range words {
 		binary.LittleEndian.PutUint16(encoded[2*i:], v)
 	}
-	command := exec.Command(filepath.Join(system, `WindowsPowerShell\v1.0\powershell.exe`), "-NoProfile", "-NonInteractive", "-EncodedCommand", base64.StdEncoding.EncodeToString(encoded))
+	// Relay forwards stderr as text. EncodedCommand otherwise emits CLIXML,
+	// which an outer PowerShell cannot parse once Relay appends its own error.
+	command := exec.Command(filepath.Join(system, `WindowsPowerShell\v1.0\powershell.exe`), "-NoProfile", "-NonInteractive", "-OutputFormat", "Text", "-EncodedCommand", base64.StdEncoding.EncodeToString(encoded))
 	command.Env = append(serviceCommandEnvironment(), "TELRAD_INSTALL_MODE="+mode, "TELRAD_INSTALL_FIREWALL_SCOPE="+remote, "TELRAD_INSTALL_PREVIOUS="+string(previous))
-	command.Stderr = os.Stderr
-	return command.Output()
+	return command, nil
 }
 
 func snapshotNativeSystem() (func() error, error) {

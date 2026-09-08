@@ -147,6 +147,8 @@ original CLI image remains running, and identification-only named-pipe client te
 Fresh Windows directory tests use a parent with inherited public write access and
 verify that managed directories are protected at creation; existing unsafe
 installation directories and junctions remain rejected without permission changes.
+A real PowerShell subprocess test verifies that nested installation errors remain
+plain text so an outer PowerShell installer can capture the failure.
 
 CI uses `scripts/check-native-installation.sh` on its disposable Linux runner and
 `packaging/install-native.Tests.ps1` on its disposable Windows runner. These install
