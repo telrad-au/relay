@@ -98,14 +98,7 @@ func TestRetrievalReferralSourceMappingAndPermanentScope(t *testing.T) {
 		}
 	}
 	for name, mutate := range map[string]func([]byte) []byte{
-		"sender": func(b []byte) []byte { return bytes.Replace(b, []byte("SYNTHETIC"), []byte("UNAPPROVED"), 1) },
-		"patient authority": func(b []byte) []byte {
-			return bytes.Replace(b, []byte("PATIENT^^^CLINIC"), []byte("PATIENT^^^OTHER"), 1)
-		},
-		"missing authority": func(b []byte) []byte { return bytes.Replace(b, []byte("PATIENT^^^CLINIC"), []byte("PATIENT"), 1) },
-		"ambiguous patient": func(b []byte) []byte {
-			return bytes.Replace(b, []byte("PATIENT^^^CLINIC"), []byte("PATIENT^^^CLINIC~OTHER^^^CLINIC"), 1)
-		},
+		"sender":             func(b []byte) []byte { return bytes.Replace(b, []byte("SYNTHETIC"), []byte("UNAPPROVED"), 1) },
 		"unapproved trigger": func(b []byte) []byte { return bytes.Replace(b, []byte("ORC|NW"), []byte("ORC|SC"), 1) },
 		"wildcard accession": func(b []byte) []byte { return bytes.ReplaceAll(b, []byte("ACC"), []byte("AC*")) },
 	} {
@@ -129,8 +122,8 @@ func TestRetrievalReferralSourceMappingAndPermanentScope(t *testing.T) {
 		t.Fatal(e)
 	}
 	p, _, e := authorizeRetrieval(cfg, permits[0])
-	if e != nil || p.Patient.IssuerSource != "local" {
-		t.Fatal("explicit local namespace failed")
+	if e != nil || p.Patient != nil {
+		t.Fatal("new permit retained patient binding")
 	}
 	cfg.Retrieval.Policies[0].AccessionSource = "OBR-3"
 	permits, _, e = signReferrals(cfg, peer, retrievalTestHL7("XO", 1))
@@ -154,7 +147,9 @@ func TestRetrievalRejectsScopeChangesAndKeyReplacement(t *testing.T) {
 		t.Fatal(e)
 	}
 	defer zeroBytes(key)
-	for name, edit := range map[string]func(*retrieval.Permit){"company": func(p *retrieval.Permit) { p.CompanyID = "other" }, "connector": func(p *retrieval.Permit) { p.ConnectorID = "other" }, "PACS": func(p *retrieval.Permit) { p.PACSID = "other" }, "policy": func(p *retrieval.Permit) { p.SourcePolicyID = "other" }, "patient namespace": func(p *retrieval.Permit) { p.Patient.Issuer = "OTHER" }, "accession namespace": func(p *retrieval.Permit) { p.Examination.Issuer = "OTHER" }} {
+	for name, edit := range map[string]func(*retrieval.Permit){"company": func(p *retrieval.Permit) { p.CompanyID = "other" }, "connector": func(p *retrieval.Permit) { p.ConnectorID = "other" }, "PACS": func(p *retrieval.Permit) { p.PACSID = "other" }, "policy": func(p *retrieval.Permit) { p.SourcePolicyID = "other" }, "patient namespace": func(p *retrieval.Permit) {
+		p.Patient = &retrieval.Patient{ID: "PATIENT", Issuer: "OTHER", IssuerSource: "hl7"}
+	}, "accession namespace": func(p *retrieval.Permit) { p.Examination.Issuer = "OTHER" }} {
 		t.Run(name, func(t *testing.T) {
 			copy := p
 			edit(&copy)
@@ -358,7 +353,7 @@ func TestRetrievalRequeriesAfterRestartAndReplaysCommittedSubmissions(t *testing
 		snapshot := append([]string{}, studies...)
 		mu.Unlock()
 		if r.URL.Path == "/dicom-web/studies" {
-			if r.URL.Query().Get("00100020") != "PATIENT" || r.URL.Query().Get("00080050") != "ACC" || r.URL.Query().Get("00080051.00400031") != "CLINIC" {
+			if r.URL.Query().Has("00100020") || r.URL.Query().Has("00100021") || r.URL.Query().Get("00080050") != "ACC" || r.URL.Query().Get("00080051.00400031") != "CLINIC" {
 				t.Error("query not scoped")
 			}
 			mu.Lock()
@@ -366,14 +361,14 @@ func TestRetrievalRequeriesAfterRestartAndReplaysCommittedSubmissions(t *testing
 			mu.Unlock()
 			values := []any{}
 			for _, s := range snapshot {
-				values = append(values, retrievalTestQIDO(s, "PATIENT"))
+				values = append(values, retrievalTestQIDO(s, "OTHER"))
 			}
 			w.Header().Set("Content-Type", "application/dicom+json")
 			json.NewEncoder(w).Encode(values)
 			return
 		}
 		study := strings.TrimPrefix(r.URL.Path, "/dicom-web/studies/")
-		object := retrievalTestDICOM(study, study+".1.1", "PATIENT")
+		object := retrievalTestDICOM(study, study+".1.1", "")
 		writeRetrievalMultipart(w, [][]byte{object, object}, false)
 	}))
 	defer pacs.Close()
@@ -483,12 +478,14 @@ func TestRetrievalQueryAndTransferFailures(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
+	conflict := retrievalTestQIDO("1.2.3", "PATIENT")
+	conflict["00080050"] = map[string]any{"vr": "SH", "Value": []string{"OTHER"}}
 	for _, test := range []struct {
 		name    string
 		objects []any
 		warning bool
 		want    string
-	}{{"none", []any{}, false, "not_found"}, {"conflict", []any{retrievalTestQIDO("1.2.3", "OTHER")}, false, "identity_mismatch"}, {"duplicate", []any{retrievalTestQIDO("1.2.3", "PATIENT"), retrievalTestQIDO("1.2.3", "PATIENT")}, false, "ambiguous_identity"}, {"truncated", []any{retrievalTestQIDO("1.2.3", "PATIENT")}, true, "local_policy_rejected"}} {
+	}{{"none", []any{}, false, "not_found"}, {"conflict", []any{conflict}, false, "identity_mismatch"}, {"duplicate", []any{retrievalTestQIDO("1.2.3", "PATIENT"), retrievalTestQIDO("1.2.3", "PATIENT")}, false, "ambiguous_identity"}, {"truncated", []any{retrievalTestQIDO("1.2.3", "PATIENT")}, true, "local_policy_rejected"}} {
 		t.Run(test.name, func(t *testing.T) {
 			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/dicom+json")
@@ -525,7 +522,11 @@ func TestRetrievalQueryAndTransferFailures(t *testing.T) {
 			}))
 			defer cloud.Close()
 			pacs := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				writeRetrievalMultipart(w, [][]byte{retrievalTestDICOM("1.2.3", "1.2.3.4", test.patient)}, test.truncate)
+				object := retrievalTestDICOM("1.2.3", "1.2.3.4", test.patient)
+				if test.name == "identity" {
+					object = bytes.Replace(object, []byte("ACC "), []byte("BAD "), 1)
+				}
+				writeRetrievalMultipart(w, [][]byte{object}, test.truncate)
 			}))
 			defer pacs.Close()
 			local := cfg.Retrieval.PACS[0]
@@ -662,5 +663,22 @@ func TestRetrievalRoutingUsesExplicitDiscoveryAndNeverFailureFallback(t *testing
 				t.Fatalf("raw=%d error=%v", raw, e)
 			}
 		})
+	}
+}
+
+func TestAccessionReferralDoesNotRequirePatient(t *testing.T) {
+	cfg := retrievalTestConfig(t)
+	cfg.Retrieval.PACS[0].PatientIssuer = ""
+	saveRetrievalTestConfig(t, cfg)
+	for _, patient := range []string{"", "PATIENT", "OTHER^^^OTHER", "ONE^^^A~TWO^^^B"} {
+		message := bytes.Replace(retrievalTestHL7("NW", 1), []byte("PATIENT^^^CLINIC"), []byte(patient), 1)
+		permits, qualifies, err := signReferrals(cfg, &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 12000}, message)
+		if err != nil || !qualifies || len(permits) != 1 {
+			t.Fatal("patient-independent signing failed", err)
+		}
+		p, _, err := authorizeRetrieval(cfg, permits[0])
+		if err != nil || p.Patient != nil || p.Examination.Accession != "ACC" {
+			t.Fatal("incorrect accession scope", err)
+		}
 	}
 }

@@ -11,7 +11,7 @@ import (
 )
 
 func fixturePermit() Permit {
-	return Permit{Version: 2, Purpose: "pacs-retrieval", Kind: "accession", CompanyID: "company", ConnectorID: "connector", PACSID: "pacs", SourcePolicyID: "policy", Patient: Patient{"PATIENT", "CLINIC", "hl7"}, Examination: Examination{"ACC", "CLINIC", "OBR-18"}, Procedure: Procedure{1, "1"}, HL7SHA256: strings.Repeat("a", 64), IssuedAt: "2000-01-01T00:00:00.000Z"}
+	return Permit{Version: 2, Purpose: "pacs-retrieval", Kind: "accession", CompanyID: "company", ConnectorID: "connector", PACSID: "pacs", SourcePolicyID: "policy", Patient: &Patient{"PATIENT", "CLINIC", "hl7"}, Examination: Examination{"ACC", "CLINIC", "OBR-18"}, Procedure: Procedure{1, "1"}, HL7SHA256: strings.Repeat("a", 64), IssuedAt: "2000-01-01T00:00:00.000Z"}
 }
 func TestSharedSigningVectors(t *testing.T) {
 	b, e := os.ReadFile("testdata/vectors.json")
@@ -127,6 +127,28 @@ func TestStrictJSONUnicodeAndDepth(t *testing.T) {
 		var v any
 		if StrictJSON([]byte(s), &v) == nil {
 			t.Fatal("malformed JSON accepted")
+		}
+	}
+}
+
+func TestAccessionPermitWithoutPatient(t *testing.T) {
+	pub, key, _ := ed25519.GenerateKey(rand.Reader)
+	p := fixturePermit()
+	p.Patient = nil
+	envelope, err := Sign(p, "key", key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verified, _, err := Verify(envelope, map[string]ed25519.PublicKey{"key": pub})
+	if err != nil || verified.Patient != nil {
+		t.Fatal("accession permit failed", err)
+	}
+	raw, _ := json.Marshal(p)
+	header := `{"alg":"Ed25519","typ":"telrad-pacs-permit-v2","kid":"key"}`
+	for _, patient := range []string{`null`, `{}`, `{"id":"PATIENT"}`} {
+		bad := strings.Replace(string(raw), `"version":2`, `"version":2,"patient":`+patient, 1)
+		if _, _, err := Verify(signedRaw(header, bad, key), map[string]ed25519.PublicKey{"key": pub}); err == nil {
+			t.Fatal("accepted incomplete patient predicate")
 		}
 	}
 }

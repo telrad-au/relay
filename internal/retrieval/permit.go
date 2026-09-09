@@ -62,7 +62,7 @@ type Permit struct {
 	ConnectorID     string      `json:"connectorId"`
 	PACSID          string      `json:"pacsId"`
 	SourcePolicyID  string      `json:"sourcePolicyId"`
-	Patient         Patient     `json:"patient"`
+	Patient         *Patient    `json:"patient,omitempty"`
 	Examination     Examination `json:"examination"`
 	Procedure       Procedure   `json:"procedure"`
 	HL7SHA256       string      `json:"hl7Sha256"`
@@ -86,12 +86,12 @@ func (p Permit) Validate() error {
 			return ErrPermit
 		}
 	}
-	for _, s := range []string{p.Patient.ID, p.Patient.Issuer, p.Examination.Accession, p.Examination.Issuer, p.Procedure.SourceSetID} {
+	for _, s := range []string{p.Examination.Accession, p.Examination.Issuer, p.Procedure.SourceSetID} {
 		if !Identifier(s) {
 			return ErrPermit
 		}
 	}
-	if p.Patient.IssuerSource != "hl7" && p.Patient.IssuerSource != "local" {
+	if p.Patient != nil && (!Identifier(p.Patient.ID) || !Identifier(p.Patient.Issuer) || (p.Patient.IssuerSource != "hl7" && p.Patient.IssuerSource != "local")) {
 		return ErrPermit
 	}
 	if !AccessionSource(p.Examination.AccessionSource) || p.Procedure.Sequence < 1 || p.Procedure.Sequence > 64 || !digest.MatchString(p.HL7SHA256) {
@@ -276,15 +276,18 @@ func Verify(envelope string, trusted map[string]ed25519.PublicKey) (Permit, stri
 	if !ed25519.Verify(key, []byte(parts[0]+"."+parts[1]), sig) {
 		return p, header.KeyID, ErrPermit
 	}
-	if exactObject(b, []string{"version", "purpose", "kind", "companyId", "connectorId", "pacsId", "sourcePolicyId", "patient", "examination", "procedure", "hl7Sha256", "issuedAt"}, "clinicCompleted") != nil {
+	if exactObject(b, []string{"version", "purpose", "kind", "companyId", "connectorId", "pacsId", "sourcePolicyId", "examination", "procedure", "hl7Sha256", "issuedAt"}, "clinicCompleted", "patient") != nil {
 		return p, header.KeyID, ErrPermit
 	}
 	var fields map[string]json.RawMessage
 	_ = json.Unmarshal(b, &fields)
-	for name, keys := range map[string][]string{"patient": {"id", "issuer", "issuerSource"}, "examination": {"accession", "issuer", "accessionSource"}, "procedure": {"sequence", "sourceSetId"}} {
+	for name, keys := range map[string][]string{"examination": {"accession", "issuer", "accessionSource"}, "procedure": {"sequence", "sourceSetId"}} {
 		if exactObject(fields[name], keys) != nil {
 			return p, header.KeyID, ErrPermit
 		}
+	}
+	if patient, ok := fields["patient"]; ok && exactObject(patient, []string{"id", "issuer", "issuerSource"}) != nil {
+		return p, header.KeyID, ErrPermit
 	}
 	if StrictJSON(b, &p) != nil || p.Validate() != nil {
 		return Permit{}, header.KeyID, ErrPermit

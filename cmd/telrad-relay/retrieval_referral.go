@@ -131,31 +131,13 @@ func signReferrals(cfg *config, peer net.Addr, message []byte) ([]string, bool, 
 	}
 	// The cloud applies whole-order cancellation. Mixed control messages cannot
 	// accidentally cancel some procedures and authorize others.
-	if len(controls) != 1 || pid == nil {
+	if len(controls) != 1 {
 		return nil, true, retrieval.ErrPolicy
 	}
 	if controls["CA"] || controls["DC"] {
 		return []string{}, true, nil
 	}
 	if len(obrs) == 0 || len(obrs) > 64 {
-		return nil, true, retrieval.ErrPolicy
-	}
-	var patient retrieval.Patient
-	matches = 0
-	for _, repeat := range strings.Split(field(pid, 3), "~") {
-		parts := strings.Split(repeat, "^")
-		issuer := field(parts, 3)
-		source := "hl7"
-		if issuer == "" && policy.AllowMissingPatientIssuer {
-			issuer = pacs.PatientIssuer
-			source = "local"
-		}
-		if issuer == pacs.PatientIssuer {
-			patient = retrieval.Patient{ID: field(parts, 0), Issuer: issuer, IssuerSource: source}
-			matches++
-		}
-	}
-	if matches != 1 {
 		return nil, true, retrieval.ErrPolicy
 	}
 	key, e := readPermitSigningKey(cfg)
@@ -184,7 +166,7 @@ func signReferrals(cfg *config, peer net.Addr, message []byte) ([]string, bool, 
 		if setID == "" {
 			setID = strconv.Itoa(i + 1)
 		}
-		p := retrieval.Permit{Version: 2, Purpose: "pacs-retrieval", Kind: "accession", CompanyID: cfg.Retrieval.CompanyID, ConnectorID: cfg.Retrieval.ConnectorID, PACSID: pacs.ID, SourcePolicyID: policy.ID, Patient: patient, Examination: retrieval.Examination{Accession: accession, Issuer: pacs.AccessionIssuer, AccessionSource: policy.AccessionSource}, Procedure: retrieval.Procedure{Sequence: i + 1, SourceSetID: setID}, HL7SHA256: hex.EncodeToString(sum[:]), IssuedAt: time.Now().UTC().Format("2006-01-02T15:04:05.000Z")}
+		p := retrieval.Permit{Version: 2, Purpose: "pacs-retrieval", Kind: "accession", CompanyID: cfg.Retrieval.CompanyID, ConnectorID: cfg.Retrieval.ConnectorID, PACSID: pacs.ID, SourcePolicyID: policy.ID, Examination: retrieval.Examination{Accession: accession, Issuer: pacs.AccessionIssuer, AccessionSource: policy.AccessionSource}, Procedure: retrieval.Procedure{Sequence: i + 1, SourceSetID: setID}, HL7SHA256: hex.EncodeToString(sum[:]), IssuedAt: time.Now().UTC().Format("2006-01-02T15:04:05.000Z")}
 		envelope, e := retrieval.Sign(p, cfg.Retrieval.SigningKeyID, key)
 		if e != nil {
 			return nil, true, e

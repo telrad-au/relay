@@ -10,8 +10,8 @@ receipt pipeline to pass qualification together.
 ## Authority and storage
 
 A locally approved ORM O01 referral grants permanent access to every study under
-its exact patient, patient issuer, accession and accession issuer on one local
-PACS. Each OBR gets one permit with its ordinal and source-set ID. ZDS does not
+its exact accession and accession issuer on one local PACS. Patient identity is
+not required and does not narrow newly signed permits. Each OBR gets one permit with its ordinal and source-set ID. ZDS does not
 narrow that grant. An old permit may discover later studies and images, including
 after successful retrieval and a Relay restart. `issuedAt` is metadata, not a
 freshness check. Retiring its locally trusted key stops further use.
@@ -25,6 +25,17 @@ or background PACS scheduler. Runtime diagnostics contain only operational state
 Company selection, registration of a public key and unsigned claim metadata do
 not establish local authority. The cloud cannot choose a PACS URL, provision a
 company identity, change namespaces or install a trusted verification key.
+
+Existing signed permits containing `patient` remain patient-bound: Relay and the
+cloud retain their patient checks. Removing that field requires a fresh clinic
+signature and creates a separate scope; old permits/jobs are never rewritten.
+`patientIssuer` and `allowMissingPatientIssuer` are optional compatibility settings
+used only when executing those legacy permits. New configurations need neither.
+
+The configured RIS/PACS accession namespace must uniquely identify orders over
+the grant lifetime. If accessions are reused, rotate the approved namespace/PACS
+identity and retire affected trust before retrieval; patient metadata is not a
+collision check for new permits.
 
 ## Provisioning and migration
 
@@ -76,7 +87,6 @@ Add this object to a paired schema-v5 configuration after replacing placeholders
     "pacs": [{
       "id": "clinic-pacs-1",
       "dicomwebUrl": "https://pacs.example.invalid/dicom-web",
-      "patientIssuer": "CLINIC",
       "accessionIssuer": "CLINIC",
       "adapter": "dicomweb-qido-wado-v1",
       "maxStudyBytes": 1073741824,
@@ -91,8 +101,7 @@ Add this object to a paired schema-v5 configuration after replacing placeholders
       "sendingApplication": "RIS",
       "sendingFacility": "CLINIC",
       "orderControls": ["NW", "XO", "CA", "DC"],
-      "accessionSource": "OBR-18",
-      "allowMissingPatientIssuer": false
+      "accessionSource": "OBR-18"
     }]
   }
 }
@@ -118,12 +127,12 @@ Cloud report delivery never invokes the signer. For opted-in clinics, report
 return accepts only ORU R01 and rejects embedded messages/framing, preventing a
 cloud-origin ORM from being returned through the RIS referral feed.
 
-PID-3 must identify exactly one patient in the approved assigning authority.
-Missing authority needs `allowMissingPatientIssuer: true` and the explicit PACS
-namespace. OBR-18 is the default accession mapping. OBR-3, ORC-3, OBR-2 and ORC-2
+PID-3 may be blank, absent, repeated or use another patient namespace. It remains
+in the original HL7 for clinical processing, but is omitted from new permits.
+OBR-18 is the default accession mapping. OBR-3, ORC-3, OBR-2 and ORC-2
 require explicit matching clinic/cloud mappings; this profile accepts their local
 EI identifier/namespace components, rejecting unsupported compound issuers.
-Mixed ORC controls and ambiguous PID repetitions are rejected. CA/DC sign zero
+Mixed ORC controls and multiple PID segments are rejected. CA/DC sign zero
 new permits. A whole-message error must not silently drop one OBR.
 
 The coordinated cloud addition is:
@@ -154,7 +163,7 @@ environment proxy. This profile expects a clinic endpoint that requires no
 additional HTTP authentication. Other PACS authentication/profile requirements
 need separate qualification; never put credentials in the URL.
 
-QIDO must support exact Patient ID, Issuer of Patient ID, Accession Number and
+QIDO must support exact Accession Number and
 Issuer of Accession Number Sequence (`00080051.00400031`), and return all those
 identity values plus Study Instance UID. The accession issuer uses exactly one
 Local Namespace Entity ID item. Missing/conflicting identity is rejected. The

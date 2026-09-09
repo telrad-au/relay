@@ -187,7 +187,7 @@ func TestRetrievalOrthancBinaryRestart(t *testing.T) {
 		if run == 1 {
 			conn := waitRetrievalMLLP(t, ctx, cfg.HL7Port)
 			conn.SetDeadline(time.Now().Add(10 * time.Second))
-			message := retrievalTestHL7("NW", 1)
+			message := bytes.Replace(retrievalTestHL7("NW", 1), []byte("PATIENT^^^CLINIC"), nil, 1)
 			conn.Write(append(append([]byte{mllpStart}, message...), mllpEnd, mllpCR))
 			frame, e := readMLLPFrame(conn, 65536)
 			conn.Close()
