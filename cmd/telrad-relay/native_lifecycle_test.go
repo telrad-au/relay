@@ -36,6 +36,7 @@ func TestNativeInstalledLifecycle(t *testing.T) {
 		t.Fatal("native fixture setup requires an administrator")
 	}
 	p := nativePaths()
+	measure := measureNativeLifecycle(t, p)
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Minute)
 	defer cancel()
 	run := func(input io.Reader, args ...string) ([]byte, error) {
@@ -101,6 +102,7 @@ func TestNativeInstalledLifecycle(t *testing.T) {
 	if err := secureNativeState(); err != nil {
 		t.Fatal(err)
 	}
+	startupStarted := time.Now()
 	mustRun("auth")
 	waitReady := func(want string) {
 		t.Helper()
@@ -115,6 +117,13 @@ func TestNativeInstalledLifecycle(t *testing.T) {
 		t.Fatalf("installed service did not become ready at %s", want)
 	}
 	waitReady("0.0.0-ci.1")
+	measure("startup-and-pairing", startupStarted)
+	if os.Getenv("TELRAD_PERF_LIFECYCLE_OUT") != "" {
+		started := time.Now()
+		mustRun("native-action", "restart")
+		waitReady("0.0.0-ci.1")
+		measure("restart", started)
+	}
 	mustRun("rotate-credential")
 	select {
 	case <-rotated:
@@ -161,11 +170,14 @@ func TestNativeInstalledLifecycle(t *testing.T) {
 		}
 		return run(payload, "native-action", "update", candidate)
 	}
+	updateStarted := time.Now()
 	if output, err := approve("0.0.0-ci.2"); err != nil {
 		t.Fatalf("signed native update: %v\n%s", err, output)
 	}
 	waitReady("0.0.0-ci.2")
+	measure("signed-update", updateStarted)
 	// A failed approved update must finish rollback before the command returns.
+	rollbackStarted := time.Now()
 	if output, err := approve("0.0.0-ci.3"); err == nil || !bytes.Contains(output, []byte("previous Relay was restored")) {
 		t.Fatalf("failed update did not return its rollback result: %v %s", err, output)
 	}
@@ -176,6 +188,7 @@ func TestNativeInstalledLifecycle(t *testing.T) {
 		t.Fatal("failed update did not restore the previous executable before returning")
 	}
 	waitReady("0.0.0-ci.2")
+	measure("automatic-rollback", rollbackStarted)
 	// Recreate the persistent evidence an interrupted updater leaves. Neither
 	// update refusal nor reviewed reinstallation may use its nominated target.
 	sentinel := filepath.Join(t.TempDir(), "outside")

@@ -1,0 +1,17 @@
+{
+  "name": "relay-perf-aws",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test stack.test.mjs",
+    "synth": "node stack.mjs"
+  },
+  "dependencies": {
+    "aws-cdk-lib": "2.268.0",
+    "constructs": "10.8.1"
+  }
+}

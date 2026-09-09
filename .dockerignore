@@ -4,3 +4,6 @@ dist
 telrad-relay
 telrad-relay.exe
 *.test
+**/node_modules
+**/cdk.out
+**/__pycache__
