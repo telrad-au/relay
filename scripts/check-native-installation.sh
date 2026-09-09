@@ -67,9 +67,9 @@ next_binary="$fixture/telrad-next"
 if [[ -n "$coverage_directory" ]]; then
     go build -cover -covermode=atomic -ldflags '-X main.version=0.0.0-ci.2' -o "$next_binary" ./cmd/telrad-relay
 else
-    go build -ldflags '-X main.version=0.0.0-ci.2' -o "$next_binary" ./cmd/telrad-relay
+    CGO_ENABLED=0 go build -trimpath -ldflags '-s -w -X main.version=0.0.0-ci.2' -o "$next_binary" ./cmd/telrad-relay
 fi
 go test -c -o "$fixture/native-lifecycle.test" ./cmd/telrad-relay
-sudo env TELRAD_NATIVE_LIFECYCLE_TEST=1 TELRAD_NATIVE_NEXT_BINARY="$next_binary" GOCOVERDIR="$coverage_directory" \
+sudo env TELRAD_NATIVE_LIFECYCLE_TEST=1 TELRAD_NATIVE_NEXT_BINARY="$next_binary" GOCOVERDIR="$coverage_directory" TELRAD_PERF_LIFECYCLE_OUT="${TELRAD_PERF_LIFECYCLE_OUT:-}" \
     "$fixture/native-lifecycle.test" -test.run '^TestNative(InstalledLifecycle|SystemRollback)$' -test.v -test.timeout=5m
 echo 'Native Linux installation and privilege boundary checks passed.'

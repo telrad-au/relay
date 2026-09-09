@@ -118,26 +118,33 @@ var benchmarkHL7String string
 var benchmarkHL7Code string
 
 func BenchmarkReadMLLPFrame(b *testing.B) {
-	for _, size := range []int{1024, 64 * 1024, 1024 * 1024, 8 * 1024 * 1024} {
-		b.Run(benchmarkSizeName(size), func(b *testing.B) {
-			payload := bytes.Repeat([]byte{'x'}, size)
-			frame := append([]byte{mllpStart}, payload...)
-			frame = append(frame, mllpEnd, mllpCR)
-			var source bytes.Reader
-			reader := bufio.NewReaderSize(&source, 32*1024)
-			b.ReportAllocs()
-			b.SetBytes(int64(size))
-			b.ResetTimer()
-			for range b.N {
-				source.Reset(frame)
-				reader.Reset(&source)
-				result, err := readMLLPFrameFrom(reader, int64(size))
-				if err != nil {
-					b.Fatal(err)
-				}
-				benchmarkHL7Frame = result
+	for _, limit := range []int{1024 * 1024, 8 * 1024 * 1024} {
+		for _, size := range []int{1024, 64 * 1024, 1024 * 1024, 8 * 1024 * 1024} {
+			if size > limit {
+				continue
 			}
-		})
+			b.Run(benchmarkSizeName(size)+"/limit="+benchmarkSizeName(limit), func(b *testing.B) {
+				frame := append(append([]byte{mllpStart}, bytes.Repeat([]byte{'x'}, size)...), mllpEnd, mllpCR)
+				var source bytes.Reader
+				reader := bufio.NewReaderSize(&source, 32*1024)
+				b.ReportAllocs()
+				b.SetBytes(int64(size))
+				b.ResetTimer()
+				capacity := 0
+				for range b.N {
+					source.Reset(frame)
+					reader.Reset(&source)
+					result, err := readMLLPFrameFrom(reader, int64(limit))
+					if err != nil {
+						b.Fatal(err)
+					}
+					capacity = cap(result)
+					benchmarkHL7Frame = result
+				}
+				b.ReportMetric(float64(capacity), "frame-cap-B")
+				b.ReportMetric(float64(reader.Size()), "reader-B/conn")
+			})
+		}
 	}
 }
 

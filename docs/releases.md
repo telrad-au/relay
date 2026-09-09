@@ -484,3 +484,12 @@ Qualify Linux systemd installation and Windows SCM/ACL/UAC behavior on disposabl
 hosts before promoting a release. Existing custom managed credential paths and
 malformed recovery journals fail closed and need administrator repair. A build or
 successful cross-compilation does not replace these native qualification checks.
+
+## Performance evidence
+
+Reuse the selected profile and measurement procedure in
+[performance qualification](performance.md) for release validation. A CI smoke
+pass is correctness evidence only. Retain the exact image/source identity and
+resolved workload with repeated native Linux/Windows measurements before updating
+a published minimum tested configuration. Unresolved fault recovery or missing
+native evidence blocks that claim, without changing release trust boundaries.

@@ -22,6 +22,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/telrad-au/relay/internal/synthetic"
 )
 
 const (
@@ -556,108 +558,13 @@ func createOrthancFixtures(t *testing.T, ctx context.Context, sender *orthancTes
 // buildSyntheticDICOM generates the complete fixture from fixed tags and a
 // deterministic pixel formula; it never reads patient data or an external file.
 func buildSyntheticDICOM(instanceUID, seriesUID string) []byte {
-	text := func(value string, padding byte) []byte {
-		data := []byte(value)
-		if len(data)%2 != 0 {
-			data = append(data, padding)
-		}
-		return data
-	}
-	ui := func(value string) []byte { return text(value, 0) }
-	us := func(value uint16) []byte {
-		data := make([]byte, 2)
-		binary.LittleEndian.PutUint16(data, value)
-		return data
-	}
-
-	var metadata []byte
-	metadata = appendDICOMExplicitElement(metadata, 0x0002, 0x0001, "OB", []byte{0, 1})
-	metadata = appendDICOMExplicitElement(metadata, 0x0002, 0x0002, "UI", ui(secondaryCaptureSOPClassUID))
-	metadata = appendDICOMExplicitElement(metadata, 0x0002, 0x0003, "UI", ui(instanceUID))
-	metadata = appendDICOMExplicitElement(metadata, 0x0002, 0x0010, "UI", ui(explicitVRLittleEndianUID))
-	metadata = appendDICOMExplicitElement(metadata, 0x0002, 0x0012, "UI", ui("1.2.826.0.1.3680043.10.543.89"))
-
-	groupLength := make([]byte, 4)
-	binary.LittleEndian.PutUint32(groupLength, uint32(len(metadata)))
-	var data []byte
-	data = append(data, make([]byte, 128)...)
-	data = append(data, "DICM"...)
-	data = appendDICOMExplicitElement(data, 0x0002, 0x0000, "UL", groupLength)
-	data = append(data, metadata...)
-
-	data = appendDICOMExplicitElement(data, 0x0008, 0x0008, "CS", text("DERIVED\\SECONDARY", ' '))
-	data = appendDICOMExplicitElement(data, 0x0008, 0x0016, "UI", ui(secondaryCaptureSOPClassUID))
-	data = appendDICOMExplicitElement(data, 0x0008, 0x0018, "UI", ui(instanceUID))
-	data = appendDICOMExplicitElement(data, 0x0008, 0x001c, "CS", text("YES", ' '))
-	data = appendDICOMExplicitElement(data, 0x0008, 0x0020, "DA", text("20260101", ' '))
-	data = appendDICOMExplicitElement(data, 0x0008, 0x0023, "DA", text("20260101", ' '))
-	data = appendDICOMExplicitElement(data, 0x0008, 0x0030, "TM", text("120000", ' '))
-	data = appendDICOMExplicitElement(data, 0x0008, 0x0033, "TM", text("120000", ' '))
-	data = appendDICOMExplicitElement(data, 0x0008, 0x0050, "SH", text("SYNTH0001", ' '))
-	data = appendDICOMExplicitElement(data, 0x0008, 0x0060, "CS", text("OT", ' '))
-	data = appendDICOMExplicitElement(data, 0x0008, 0x0064, "CS", text("SYN", ' '))
-	data = appendDICOMExplicitElement(data, 0x0008, 0x0070, "LO", text("Telrad test fixture", ' '))
-	data = appendDICOMExplicitElement(data, 0x0008, 0x0090, "PN", nil)
-	data = appendDICOMExplicitElement(data, 0x0008, 0x1030, "LO", text("Synthetic Relay interoperability", ' '))
-	data = appendDICOMExplicitElement(data, 0x0008, 0x103e, "LO", text("Deterministic payload integrity", ' '))
-	data = appendDICOMExplicitElement(data, 0x0010, 0x0010, "PN", text("SYNTHETIC^RELAY", ' '))
-	data = appendDICOMExplicitElement(data, 0x0010, 0x0020, "LO", text("RELAY-INTEROP", ' '))
-	data = appendDICOMExplicitElement(data, 0x0010, 0x0030, "DA", text("19800101", ' '))
-	data = appendDICOMExplicitElement(data, 0x0010, 0x0040, "CS", text("O", ' '))
-	data = appendDICOMExplicitElement(data, 0x0020, 0x000d, "UI", ui("1.2.826.0.1.3680043.10.543.82.1"))
-	data = appendDICOMExplicitElement(data, 0x0020, 0x000e, "UI", ui(seriesUID))
-	data = appendDICOMExplicitElement(data, 0x0020, 0x0010, "SH", text("SYNTHETIC", ' '))
-	data = appendDICOMExplicitElement(data, 0x0020, 0x0011, "IS", text("1", ' '))
-	data = appendDICOMExplicitElement(data, 0x0020, 0x0013, "IS", text("1", ' '))
-	data = appendDICOMExplicitElement(data, 0x0020, 0x0020, "CS", nil)
-	data = appendDICOMExplicitElement(data, 0x0028, 0x0002, "US", us(1))
-	data = appendDICOMExplicitElement(data, 0x0028, 0x0004, "CS", text("MONOCHROME2", ' '))
-	data = appendDICOMExplicitElement(data, 0x0028, 0x0010, "US", us(512))
-	data = appendDICOMExplicitElement(data, 0x0028, 0x0011, "US", us(512))
-	data = appendDICOMExplicitElement(data, 0x0028, 0x0100, "US", us(8))
-	data = appendDICOMExplicitElement(data, 0x0028, 0x0101, "US", us(8))
-	data = appendDICOMExplicitElement(data, 0x0028, 0x0102, "US", us(7))
-	data = appendDICOMExplicitElement(data, 0x0028, 0x0103, "US", us(0))
-
-	return appendDICOMExplicitElement(data, 0x7fe0, 0x0010, "OB", syntheticPixelData())
+	return synthetic.DICOM(instanceUID, seriesUID, 512, 512)
 }
-
-func syntheticPixelData() []byte {
-	pixels := make([]byte, 512*512)
-	for row := 0; row < 512; row++ {
-		for column := 0; column < 512; column++ {
-			pixels[row*512+column] = byte((row*17 + column*31 + (row*column)%251) % 256)
-		}
-	}
-	return pixels
+func syntheticPixelData() []byte { return synthetic.Pixels(512, 512) }
+func appendDICOMExplicitElement(dst []byte, group, element uint16, vr string, value []byte) []byte {
+	return synthetic.Element(dst, group, element, vr, value)
 }
-
-func appendDICOMExplicitElement(destination []byte, group, element uint16, vr string, value []byte) []byte {
-	headerBytes := 8
-	if dicomLongVR(vr) {
-		headerBytes = 12
-	}
-	header := make([]byte, headerBytes)
-	binary.LittleEndian.PutUint16(header[0:2], group)
-	binary.LittleEndian.PutUint16(header[2:4], element)
-	copy(header[4:6], vr)
-	if headerBytes == 12 {
-		binary.LittleEndian.PutUint32(header[8:12], uint32(len(value)))
-	} else {
-		binary.LittleEndian.PutUint16(header[6:8], uint16(len(value)))
-	}
-	destination = append(destination, header...)
-	return append(destination, value...)
-}
-
-func dicomLongVR(vr string) bool {
-	switch vr {
-	case "OB", "OD", "OF", "OL", "OV", "OW", "SQ", "SV", "UC", "UN", "UR", "UT", "UV":
-		return true
-	default:
-		return false
-	}
-}
+func dicomLongVR(vr string) bool { return synthetic.LongVR(vr) }
 
 func dicomPixelDataValue(dataset []byte) ([]byte, error) {
 	marker := []byte{0xe0, 0x7f, 0x10, 0x00}

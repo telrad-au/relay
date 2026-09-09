@@ -55,8 +55,37 @@ jobs:
                   sudo chown root:root /usr/local/bin
                   sudo chmod 0755 /usr/local/bin
                   scripts/check-native-installation.sh
+
+            - name: Smoke benchmarks
+              run: |
+                  go test ./cmd/telrad-relay -run '^$' \
+                    -bench '^(BenchmarkReadMLLPFrame|BenchmarkDICOMParsing|BenchmarkDICOMStream|BenchmarkHL7PersistentMixed|BenchmarkHL7Stream)$' \
+                    -benchtime=1x -benchmem
+
+            - name: Check constrained release container
+              timeout-minutes: 12
+              env:
+                  RELAY_PERF_COVERAGE_DIR: ${{ runner.temp }}/relay-perf-coverage
+                  GOCOVERDIR: ${{ runner.temp }}/relay-perf-coverage
+              run: |
+                  mkdir -p "$RELAY_PERF_COVERAGE_DIR"
+                  # Coverage is confined to the test helpers. Relay is built by
+                  # its normal release Dockerfile without instrumentation.
+                  go run -cover -covermode=atomic ./tools/relay-perf smoke \
+                    --duration 5s --cpus 1 --memory 256MiB --out dist/performance-ci
+
+            - name: Collect performance evidence
+              if: always()
+              uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
+              with:
+                  name: performance-correctness
+                  path: dist/performance-ci
+                  if-no-files-found: ignore
+
+            - name: Combine unit and process coverage
+              run: |
                   mkdir -p "$RUNNER_TEMP/relay-combined-coverage"
-                  go tool covdata merge -pcombine -i "$RUNNER_TEMP/relay-unit-coverage,$RELAY_NATIVE_COVERAGE_DIR" -o "$RUNNER_TEMP/relay-combined-coverage"
+                  go tool covdata merge -pcombine -i "$RUNNER_TEMP/relay-unit-coverage,$RUNNER_TEMP/relay-native-coverage,$RUNNER_TEMP/relay-perf-coverage" -o "$RUNNER_TEMP/relay-combined-coverage"
                   go tool covdata textfmt -i "$RUNNER_TEMP/relay-combined-coverage" -o coverage.out
 
             - name: Enforce combined Go coverage

@@ -4,7 +4,7 @@ if ($env:TELRAD_NATIVE_INSTALL_TEST -ne '1') { throw 'Native installation tests 
 $fixture = Join-Path ([IO.Path]::GetTempPath()) ('relay-native-' + [guid]::NewGuid())
 New-Item -ItemType Directory -Path $fixture | Out-Null
 try {
-    go build -ldflags '-X main.version=0.0.0-ci.1' -o (Join-Path $fixture 'telrad-relay.exe') ./cmd/telrad-relay
+    go build -trimpath -ldflags '-s -w -X main.version=0.0.0-ci.1' -o (Join-Path $fixture 'telrad-relay.exe') ./cmd/telrad-relay
     if ($LASTEXITCODE -ne 0) { throw 'Build failed.' }
     Copy-Item packaging/install.ps1, packaging/relay.example.json $fixture
     '{"schemaVersion":1,"channel":"stable","manifestUrl":"https://example.invalid/stable.json","publicKey":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}' | Set-Content -Encoding Ascii (Join-Path $fixture 'update-trust.json')
@@ -67,7 +67,7 @@ try {
         Move-Item ($config + '.saved') $config
     }
     $env:TELRAD_NATIVE_NEXT_BINARY = Join-Path $fixture 'telrad-next.exe'
-    go build -ldflags '-X main.version=0.0.0-ci.2' -o $env:TELRAD_NATIVE_NEXT_BINARY ./cmd/telrad-relay
+    go build -trimpath -ldflags '-s -w -X main.version=0.0.0-ci.2' -o $env:TELRAD_NATIVE_NEXT_BINARY ./cmd/telrad-relay
     if ($LASTEXITCODE -ne 0) { throw 'Candidate build failed.' }
     $env:TELRAD_NATIVE_LIFECYCLE_TEST = '1'
     go test ./cmd/telrad-relay -run '^TestNative(InstalledLifecycle|SystemRollback)$' -v -count=1 -timeout=5m

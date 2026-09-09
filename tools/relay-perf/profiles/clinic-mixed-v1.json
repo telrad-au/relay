@@ -1,0 +1,278 @@
+{
+  "name": "clinic-mixed-v1",
+  "hl7PerSecond": 0.03333333333333333,
+  "reportsPerSecond": 0.03333333333333333,
+  "dicomConnections": 4,
+  "hl7Connections": 4,
+  "idleHl7Connections": 16,
+  "hl7Bytes": 1024,
+  "reportBytes": 4096,
+  "hl7Limit": 1048576,
+  "pduBytes": 65536,
+  "syntax": "1.2.840.10008.1.2.1",
+  "bandwidthMbit": 100,
+  "cloudRttMillis": 40,
+  "receiptMillis": 100,
+  "bodyBytesPerSecond": 0,
+  "risAckMillis": 50,
+  "idleSeconds": 10,
+  "nominalSeconds": 480,
+  "headroomSeconds": 96,
+  "recoverySeconds": 180,
+  "headroomFactor": 1.25,
+  "repetitions": 1,
+  "dicomP99Millis": 2000,
+  "hl7P99Millis": 1000,
+  "reportP99Millis": 5000,
+  "studyMaxMillis": 30000,
+  "studiesPerSecond": 0.03333333333333333,
+  "transferMargin": 2,
+  "modalityMix": [
+    {
+      "modality": "US",
+      "weight": 40,
+      "variants": [
+        {
+          "name": "small",
+          "weight": 20,
+          "groups": [
+            {
+              "modality": "US",
+              "rows": 512,
+              "columns": 512,
+              "bitsAllocated": 8,
+              "samplesPerPixel": 1,
+              "frames": 1,
+              "instances": 40,
+              "instancesPerSeries": 40
+            },
+            {
+              "modality": "US",
+              "rows": 512,
+              "columns": 512,
+              "bitsAllocated": 8,
+              "samplesPerPixel": 1,
+              "frames": 40,
+              "instances": 1,
+              "instancesPerSeries": 1
+            }
+          ]
+        },
+        {
+          "name": "medium",
+          "weight": 60,
+          "groups": [
+            {
+              "modality": "US",
+              "rows": 512,
+              "columns": 512,
+              "bitsAllocated": 8,
+              "samplesPerPixel": 3,
+              "frames": 1,
+              "instances": 40,
+              "instancesPerSeries": 40
+            },
+            {
+              "modality": "US",
+              "rows": 512,
+              "columns": 512,
+              "bitsAllocated": 8,
+              "samplesPerPixel": 3,
+              "frames": 48,
+              "instances": 2,
+              "instancesPerSeries": 2
+            }
+          ]
+        },
+        {
+          "name": "large",
+          "weight": 20,
+          "groups": [
+            {
+              "modality": "US",
+              "rows": 768,
+              "columns": 1024,
+              "bitsAllocated": 8,
+              "samplesPerPixel": 3,
+              "frames": 1,
+              "instances": 40,
+              "instancesPerSeries": 40
+            },
+            {
+              "modality": "US",
+              "rows": 768,
+              "columns": 1024,
+              "bitsAllocated": 8,
+              "samplesPerPixel": 3,
+              "frames": 30,
+              "instances": 6,
+              "instancesPerSeries": 6
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "modality": "DX",
+      "weight": 35,
+      "variants": [
+        {
+          "name": "small",
+          "weight": 20,
+          "groups": [
+            {
+              "modality": "DX",
+              "rows": 2048,
+              "columns": 2048,
+              "bitsAllocated": 16,
+              "samplesPerPixel": 1,
+              "frames": 1,
+              "instances": 1,
+              "instancesPerSeries": 1
+            }
+          ]
+        },
+        {
+          "name": "medium",
+          "weight": 60,
+          "groups": [
+            {
+              "modality": "DX",
+              "rows": 2048,
+              "columns": 2048,
+              "bitsAllocated": 16,
+              "samplesPerPixel": 1,
+              "frames": 1,
+              "instances": 4,
+              "instancesPerSeries": 4
+            }
+          ]
+        },
+        {
+          "name": "large",
+          "weight": 20,
+          "groups": [
+            {
+              "modality": "DX",
+              "rows": 2048,
+              "columns": 4096,
+              "bitsAllocated": 16,
+              "samplesPerPixel": 1,
+              "frames": 1,
+              "instances": 6,
+              "instancesPerSeries": 6
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "modality": "CT",
+      "weight": 20,
+      "variants": [
+        {
+          "name": "small",
+          "weight": 20,
+          "groups": [
+            {
+              "modality": "CT",
+              "rows": 512,
+              "columns": 512,
+              "bitsAllocated": 16,
+              "samplesPerPixel": 1,
+              "frames": 1,
+              "instances": 200,
+              "instancesPerSeries": 100
+            }
+          ]
+        },
+        {
+          "name": "medium",
+          "weight": 60,
+          "groups": [
+            {
+              "modality": "CT",
+              "rows": 512,
+              "columns": 512,
+              "bitsAllocated": 16,
+              "samplesPerPixel": 1,
+              "frames": 1,
+              "instances": 800,
+              "instancesPerSeries": 100
+            }
+          ]
+        },
+        {
+          "name": "large",
+          "weight": 20,
+          "groups": [
+            {
+              "modality": "CT",
+              "rows": 512,
+              "columns": 512,
+              "bitsAllocated": 16,
+              "samplesPerPixel": 1,
+              "frames": 1,
+              "instances": 2400,
+              "instancesPerSeries": 200
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "modality": "MR",
+      "weight": 5,
+      "variants": [
+        {
+          "name": "small",
+          "weight": 20,
+          "groups": [
+            {
+              "modality": "MR",
+              "rows": 256,
+              "columns": 256,
+              "bitsAllocated": 16,
+              "samplesPerPixel": 1,
+              "frames": 1,
+              "instances": 400,
+              "instancesPerSeries": 100
+            }
+          ]
+        },
+        {
+          "name": "medium",
+          "weight": 60,
+          "groups": [
+            {
+              "modality": "MR",
+              "rows": 512,
+              "columns": 512,
+              "bitsAllocated": 16,
+              "samplesPerPixel": 1,
+              "frames": 1,
+              "instances": 400,
+              "instancesPerSeries": 100
+            }
+          ]
+        },
+        {
+          "name": "large",
+          "weight": 20,
+          "groups": [
+            {
+              "modality": "MR",
+              "rows": 512,
+              "columns": 512,
+              "bitsAllocated": 16,
+              "samplesPerPixel": 1,
+              "frames": 1,
+              "instances": 1600,
+              "instancesPerSeries": 200
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
