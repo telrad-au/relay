@@ -41,7 +41,7 @@ func retrievalTestConfig(t *testing.T) *config {
 	if e := json.Unmarshal(raw, &key); e != nil {
 		t.Fatal(e)
 	}
-	cfg.Retrieval = &retrievalConfig{Enabled: true, CompanyID: "company", ConnectorID: cfg.RelayID, SigningKeyID: key.KeyID, TrustedPublicKeys: []string{key.PublicKey}, PACS: []retrievalPACS{{ID: "pacs", DICOMwebURL: "https://pacs.example.invalid/dicom-web", PatientIssuer: "CLINIC", AccessionIssuer: "CLINIC", MaxStudyBytes: 16 * 1024 * 1024, MaxInstanceBytes: 8 * 1024 * 1024, MaxInstances: 100, RequestTimeoutSeconds: 5, Adapter: "dicomweb-qido-wado-v1"}}, Policies: []referralPolicy{{ID: "policy", PACSID: "pacs", SourceAddresses: []string{"127.0.0.1"}, SendingApplication: "SYNTHETIC", SendingFacility: "CLINIC", OrderControls: []string{"NW", "XO", "CA", "DC"}, AccessionSource: "OBR-18"}}}
+	cfg.Retrieval = &retrievalConfig{Enabled: true, CompanyID: "company", ConnectorID: cfg.RelayID, SigningKeyID: key.KeyID, TrustedPublicKeys: []string{key.PublicKey}, PACS: []retrievalPACS{{ID: "pacs", DICOMwebURL: "https://pacs.example.invalid/dicom-web", AccessionIssuer: "CLINIC", MaxStudyBytes: 16 * 1024 * 1024, MaxInstanceBytes: 8 * 1024 * 1024, MaxInstances: 100, RequestTimeoutSeconds: 5, Adapter: "dicomweb-qido-wado-v1"}}, Policies: []referralPolicy{{ID: "policy", PACSID: "pacs", SourceAddresses: []string{"127.0.0.1"}, SendingApplication: "SYNTHETIC", SendingFacility: "CLINIC", OrderControls: []string{"NW", "XO", "CA", "DC"}, AccessionSource: "OBR-18"}}}
 	saveRetrievalTestConfig(t, cfg)
 	return cfg
 }
@@ -115,14 +115,13 @@ func TestRetrievalReferralSourceMappingAndPermanentScope(t *testing.T) {
 	if permits, q, e := signReferrals(cfg, peer, report); e != nil || q || len(permits) != 0 {
 		t.Fatal("report entered signing path")
 	}
-	cfg.Retrieval.Policies[0].AllowMissingPatientIssuer = true
 	missing := bytes.Replace(retrievalTestHL7("NW", 1), []byte("PATIENT^^^CLINIC"), []byte("PATIENT"), 1)
 	permits, _, e := signReferrals(cfg, peer, missing)
 	if e != nil {
 		t.Fatal(e)
 	}
 	p, _, e := authorizeRetrieval(cfg, permits[0])
-	if e != nil || p.Patient != nil {
+	if e != nil {
 		t.Fatal("new permit retained patient binding")
 	}
 	cfg.Retrieval.Policies[0].AccessionSource = "OBR-3"
@@ -147,9 +146,7 @@ func TestRetrievalRejectsScopeChangesAndKeyReplacement(t *testing.T) {
 		t.Fatal(e)
 	}
 	defer zeroBytes(key)
-	for name, edit := range map[string]func(*retrieval.Permit){"company": func(p *retrieval.Permit) { p.CompanyID = "other" }, "connector": func(p *retrieval.Permit) { p.ConnectorID = "other" }, "PACS": func(p *retrieval.Permit) { p.PACSID = "other" }, "policy": func(p *retrieval.Permit) { p.SourcePolicyID = "other" }, "patient namespace": func(p *retrieval.Permit) {
-		p.Patient = &retrieval.Patient{ID: "PATIENT", Issuer: "OTHER", IssuerSource: "hl7"}
-	}, "accession namespace": func(p *retrieval.Permit) { p.Examination.Issuer = "OTHER" }} {
+	for name, edit := range map[string]func(*retrieval.Permit){"company": func(p *retrieval.Permit) { p.CompanyID = "other" }, "connector": func(p *retrieval.Permit) { p.ConnectorID = "other" }, "PACS": func(p *retrieval.Permit) { p.PACSID = "other" }, "policy": func(p *retrieval.Permit) { p.SourcePolicyID = "other" }, "accession namespace": func(p *retrieval.Permit) { p.Examination.Issuer = "OTHER" }} {
 		t.Run(name, func(t *testing.T) {
 			copy := p
 			edit(&copy)
@@ -668,7 +665,6 @@ func TestRetrievalRoutingUsesExplicitDiscoveryAndNeverFailureFallback(t *testing
 
 func TestAccessionReferralDoesNotRequirePatient(t *testing.T) {
 	cfg := retrievalTestConfig(t)
-	cfg.Retrieval.PACS[0].PatientIssuer = ""
 	saveRetrievalTestConfig(t, cfg)
 	for _, patient := range []string{"", "PATIENT", "OTHER^^^OTHER", "ONE^^^A~TWO^^^B"} {
 		message := bytes.Replace(retrievalTestHL7("NW", 1), []byte("PATIENT^^^CLINIC"), []byte(patient), 1)
@@ -677,7 +673,7 @@ func TestAccessionReferralDoesNotRequirePatient(t *testing.T) {
 			t.Fatal("patient-independent signing failed", err)
 		}
 		p, _, err := authorizeRetrieval(cfg, permits[0])
-		if err != nil || p.Patient != nil || p.Examination.Accession != "ACC" {
+		if err != nil || p.Examination.Accession != "ACC" {
 			t.Fatal("incorrect accession scope", err)
 		}
 	}

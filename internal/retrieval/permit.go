@@ -40,11 +40,6 @@ func Identifier(s string) bool {
 	return true
 }
 
-type Patient struct {
-	ID           string `json:"id"`
-	Issuer       string `json:"issuer"`
-	IssuerSource string `json:"issuerSource"`
-}
 type Examination struct {
 	Accession       string `json:"accession"`
 	Issuer          string `json:"issuer"`
@@ -62,7 +57,6 @@ type Permit struct {
 	ConnectorID     string      `json:"connectorId"`
 	PACSID          string      `json:"pacsId"`
 	SourcePolicyID  string      `json:"sourcePolicyId"`
-	Patient         *Patient    `json:"patient,omitempty"`
 	Examination     Examination `json:"examination"`
 	Procedure       Procedure   `json:"procedure"`
 	HL7SHA256       string      `json:"hl7Sha256"`
@@ -90,9 +84,6 @@ func (p Permit) Validate() error {
 		if !Identifier(s) {
 			return ErrPermit
 		}
-	}
-	if p.Patient != nil && (!Identifier(p.Patient.ID) || !Identifier(p.Patient.Issuer) || (p.Patient.IssuerSource != "hl7" && p.Patient.IssuerSource != "local")) {
-		return ErrPermit
 	}
 	if !AccessionSource(p.Examination.AccessionSource) || p.Procedure.Sequence < 1 || p.Procedure.Sequence > 64 || !digest.MatchString(p.HL7SHA256) {
 		return ErrPermit
@@ -276,7 +267,7 @@ func Verify(envelope string, trusted map[string]ed25519.PublicKey) (Permit, stri
 	if !ed25519.Verify(key, []byte(parts[0]+"."+parts[1]), sig) {
 		return p, header.KeyID, ErrPermit
 	}
-	if exactObject(b, []string{"version", "purpose", "kind", "companyId", "connectorId", "pacsId", "sourcePolicyId", "examination", "procedure", "hl7Sha256", "issuedAt"}, "clinicCompleted", "patient") != nil {
+	if exactObject(b, []string{"version", "purpose", "kind", "companyId", "connectorId", "pacsId", "sourcePolicyId", "examination", "procedure", "hl7Sha256", "issuedAt"}, "clinicCompleted") != nil {
 		return p, header.KeyID, ErrPermit
 	}
 	var fields map[string]json.RawMessage
@@ -285,9 +276,6 @@ func Verify(envelope string, trusted map[string]ed25519.PublicKey) (Permit, stri
 		if exactObject(fields[name], keys) != nil {
 			return p, header.KeyID, ErrPermit
 		}
-	}
-	if patient, ok := fields["patient"]; ok && exactObject(patient, []string{"id", "issuer", "issuerSource"}) != nil {
-		return p, header.KeyID, ErrPermit
 	}
 	if StrictJSON(b, &p) != nil || p.Validate() != nil {
 		return Permit{}, header.KeyID, ErrPermit

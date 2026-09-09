@@ -26,11 +26,8 @@ Company selection, registration of a public key and unsigned claim metadata do
 not establish local authority. The cloud cannot choose a PACS URL, provision a
 company identity, change namespaces or install a trusted verification key.
 
-Existing signed permits containing `patient` remain patient-bound: Relay and the
-cloud retain their patient checks. Removing that field requires a fresh clinic
-signature and creates a separate scope; old permits/jobs are never rewritten.
-`patientIssuer` and `allowMissingPatientIssuer` are optional compatibility settings
-used only when executing those legacy permits. New configurations need neither.
+The unreleased v2 contract is accession-only. Permits containing a `patient`
+field are rejected; there is no patient-bound compatibility mode.
 
 The configured RIS/PACS accession namespace must uniquely identify orders over
 the grant lifetime. If accessions are reused, rotate the approved namespace/PACS

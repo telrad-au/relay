@@ -91,7 +91,7 @@ func OpenDICOM(r io.Reader, p Permit, study string, limit int64) (*DICOMStream, 
 			return nil, ErrPolicy
 		}
 	}
-	if d.last != 0x0020000d || d.values[0x0020000d] != study || (p.Patient != nil && (d.values[0x00100020] != p.Patient.ID || d.values[0x00100021] != p.Patient.Issuer)) || d.values[0x00080050] != p.Examination.Accession || d.values[0x00400031] != p.Examination.Issuer {
+	if d.last != 0x0020000d || d.values[0x0020000d] != study || d.values[0x00080050] != p.Examination.Accession || d.values[0x00400031] != p.Examination.Issuer {
 		return nil, ErrIdentity
 	}
 	if d.values[0x00080016] != d.metaClass || d.values[0x00080018] != d.metaSOP {

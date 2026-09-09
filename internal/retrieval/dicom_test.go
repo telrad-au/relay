@@ -112,7 +112,6 @@ func TestDICOMRejectsMalformedAndForeignObjects(t *testing.T) {
 		"missing issuer":        syntheticDICOM("1.2.840.10008.1.2.1", nil, 16),
 		"multiple issuers":      syntheticDICOM("1.2.840.10008.1.2.1", append(syntheticIssuer(), syntheticIssuer()...), 16),
 		"conflicting issuer":    mutate([]byte("CLINIC"), []byte("OTHERX")),
-		"conflicting patient":   mutate([]byte("PATIENT"), []byte("ANOTHER")),
 		"conflicting accession": mutate([]byte("ACC"), []byte("BAD")),
 		"meta SOP mismatch":     mutate([]byte("1.2.3.4"), []byte("1.2.3.5")),
 		"duplicate identity":    append(bytes.Clone(good), dicomElement(0x00100020, "LO", []byte("PATIENT"))...),

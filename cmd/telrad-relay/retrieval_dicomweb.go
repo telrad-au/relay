@@ -39,10 +39,6 @@ func dicomJSONString(obj dicomJSON, tag, vr string) (string, error) {
 }
 func dicomJSONIdentity(obj dicomJSON, p retrieval.Permit) (string, error) {
 	expectedTags := map[string]string{"00080050": p.Examination.Accession}
-	if p.Patient != nil {
-		expectedTags["00100020"] = p.Patient.ID
-		expectedTags["00100021"] = p.Patient.Issuer
-	}
 	for tag, expected := range expectedTags {
 		vr := "LO"
 		if tag == "00080050" {
@@ -102,11 +98,6 @@ func queryAccession(ctx context.Context, client *http.Client, pacs retrievalPACS
 	ctx, cancel := context.WithTimeout(ctx, time.Duration(pacs.RequestTimeoutSeconds)*time.Second)
 	defer cancel()
 	q := url.Values{"00080050": {p.Examination.Accession}, "00080051.00400031": {p.Examination.Issuer}, "includefield": {"00080050", "00080051", "0020000D"}, "limit": {"65"}}
-	if p.Patient != nil {
-		q.Set("00100020", p.Patient.ID)
-		q.Set("00100021", p.Patient.Issuer)
-		q["includefield"] = append(q["includefield"], "00100020", "00100021")
-	}
 	resp, e := pacsRequest(ctx, client, pacs.DICOMwebURL+"/studies?"+q.Encode(), "application/dicom+json")
 	if e != nil {
 		return nil, e

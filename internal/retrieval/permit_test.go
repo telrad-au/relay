@@ -11,7 +11,7 @@ import (
 )
 
 func fixturePermit() Permit {
-	return Permit{Version: 2, Purpose: "pacs-retrieval", Kind: "accession", CompanyID: "company", ConnectorID: "connector", PACSID: "pacs", SourcePolicyID: "policy", Patient: &Patient{"PATIENT", "CLINIC", "hl7"}, Examination: Examination{"ACC", "CLINIC", "OBR-18"}, Procedure: Procedure{1, "1"}, HL7SHA256: strings.Repeat("a", 64), IssuedAt: "2000-01-01T00:00:00.000Z"}
+	return Permit{Version: 2, Purpose: "pacs-retrieval", Kind: "accession", CompanyID: "company", ConnectorID: "connector", PACSID: "pacs", SourcePolicyID: "policy", Examination: Examination{"ACC", "CLINIC", "OBR-18"}, Procedure: Procedure{1, "1"}, HL7SHA256: strings.Repeat("a", 64), IssuedAt: "2000-01-01T00:00:00.000Z"}
 }
 func TestSharedSigningVectors(t *testing.T) {
 	b, e := os.ReadFile("testdata/vectors.json")
@@ -61,12 +61,12 @@ func TestStrictSignedPermitNegatives(t *testing.T) {
 		"unknown":             strings.Replace(payload, `"version":2`, `"version":2,"expiry":"never"`, 1),
 		"missing":             strings.Replace(payload, `"kind":"accession",`, "", 1),
 		"null":                strings.Replace(payload, `"kind":"accession"`, `"kind":null`, 1),
-		"nested alias":        strings.Replace(payload, `"issuerSource"`, `"IssuerSource"`, 1),
-		"nested extra":        strings.Replace(payload, `"issuerSource":"hl7"`, `"issuerSource":"hl7","study":"1.2"`, 1),
-		"wildcard":            strings.Replace(payload, `"PATIENT"`, `"PAT*ENT"`, 1),
-		"surrogate":           strings.Replace(payload, `"PATIENT"`, `"\ud800"`, 1),
-		"low surrogate":       strings.Replace(payload, `"PATIENT"`, `"\udc00"`, 1),
-		"invalid UTF8":        strings.Replace(payload, "PATIENT", string([]byte{0xff}), 1),
+		"nested alias":        strings.Replace(payload, `"accessionSource"`, `"AccessionSource"`, 1),
+		"nested extra":        strings.Replace(payload, `"accessionSource":"OBR-18"`, `"accessionSource":"OBR-18","study":"1.2"`, 1),
+		"wildcard":            strings.Replace(payload, `"ACC"`, `"PAT*ENT"`, 1),
+		"surrogate":           strings.Replace(payload, `"ACC"`, `"\ud800"`, 1),
+		"low surrogate":       strings.Replace(payload, `"ACC"`, `"\udc00"`, 1),
+		"invalid UTF8":        strings.Replace(payload, "ACC", string([]byte{0xff}), 1),
 		"bad date":            strings.Replace(payload, "2000-01-01", "2000-02-30", 1),
 		"legacy scope":        strings.Replace(payload, `"kind":"accession"`, `"kind":"study"`, 1),
 		"fractional sequence": strings.Replace(payload, `"sequence":1`, `"sequence":1.5`, 1),
@@ -134,13 +134,12 @@ func TestStrictJSONUnicodeAndDepth(t *testing.T) {
 func TestAccessionPermitWithoutPatient(t *testing.T) {
 	pub, key, _ := ed25519.GenerateKey(rand.Reader)
 	p := fixturePermit()
-	p.Patient = nil
 	envelope, err := Sign(p, "key", key)
 	if err != nil {
 		t.Fatal(err)
 	}
 	verified, _, err := Verify(envelope, map[string]ed25519.PublicKey{"key": pub})
-	if err != nil || verified.Patient != nil {
+	if err != nil || verified.Examination.Accession != p.Examination.Accession {
 		t.Fatal("accession permit failed", err)
 	}
 	raw, _ := json.Marshal(p)
@@ -148,7 +147,7 @@ func TestAccessionPermitWithoutPatient(t *testing.T) {
 	for _, patient := range []string{`null`, `{}`, `{"id":"PATIENT"}`} {
 		bad := strings.Replace(string(raw), `"version":2`, `"version":2,"patient":`+patient, 1)
 		if _, _, err := Verify(signedRaw(header, bad, key), map[string]ed25519.PublicKey{"key": pub}); err == nil {
-			t.Fatal("accepted incomplete patient predicate")
+			t.Fatal("accepted unsupported patient predicate")
 		}
 	}
 }

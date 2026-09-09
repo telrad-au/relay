@@ -32,7 +32,6 @@ type retrievalConfig struct {
 type retrievalPACS struct {
 	ID                    string `json:"id"`
 	DICOMwebURL           string `json:"dicomwebUrl"`
-	PatientIssuer         string `json:"patientIssuer,omitempty"`
 	AccessionIssuer       string `json:"accessionIssuer"`
 	MaxStudyBytes         int64  `json:"maxStudyBytes"`
 	MaxInstanceBytes      int64  `json:"maxInstanceBytes"`
@@ -43,14 +42,13 @@ type retrievalPACS struct {
 	Adapter string `json:"adapter"`
 }
 type referralPolicy struct {
-	ID                        string   `json:"id"`
-	PACSID                    string   `json:"pacsId"`
-	SourceAddresses           []string `json:"sourceAddresses"`
-	SendingApplication        string   `json:"sendingApplication"`
-	SendingFacility           string   `json:"sendingFacility"`
-	OrderControls             []string `json:"orderControls"`
-	AccessionSource           string   `json:"accessionSource"`
-	AllowMissingPatientIssuer bool     `json:"allowMissingPatientIssuer,omitempty"`
+	ID                 string   `json:"id"`
+	PACSID             string   `json:"pacsId"`
+	SourceAddresses    []string `json:"sourceAddresses"`
+	SendingApplication string   `json:"sendingApplication"`
+	SendingFacility    string   `json:"sendingFacility"`
+	OrderControls      []string `json:"orderControls"`
+	AccessionSource    string   `json:"accessionSource"`
 }
 
 func permitKeyID(public ed25519.PublicKey) string {
@@ -102,7 +100,7 @@ func validateRetrievalConfig(cfg *config) error {
 	}
 	ids := map[string]bool{}
 	for _, p := range r.PACS {
-		if !retrieval.Opaque(p.ID) || ids[p.ID] || (p.PatientIssuer != "" && !retrieval.Identifier(p.PatientIssuer)) || !retrieval.Identifier(p.AccessionIssuer) {
+		if !retrieval.Opaque(p.ID) || ids[p.ID] || !retrieval.Identifier(p.AccessionIssuer) {
 			return retrieval.ErrPolicy
 		}
 		ids[p.ID] = true
@@ -158,7 +156,7 @@ func authorizeRetrieval(cfg *config, envelope string) (retrieval.Permit, retriev
 	}
 	pacs, ok := cfg.Retrieval.pacs(p.PACSID)
 	policy, approved := cfg.Retrieval.policy(p.SourcePolicyID)
-	if !ok || !approved || policy.PACSID != p.PACSID || p.CompanyID != cfg.Retrieval.CompanyID || p.ConnectorID != cfg.RelayID || p.Examination.Issuer != pacs.AccessionIssuer || p.Examination.AccessionSource != policy.AccessionSource || (p.Patient != nil && (p.Patient.Issuer != pacs.PatientIssuer || (p.Patient.IssuerSource == "local" && !policy.AllowMissingPatientIssuer))) {
+	if !ok || !approved || policy.PACSID != p.PACSID || p.CompanyID != cfg.Retrieval.CompanyID || p.ConnectorID != cfg.RelayID || p.Examination.Issuer != pacs.AccessionIssuer || p.Examination.AccessionSource != policy.AccessionSource {
 		return p, pacs, retrieval.ErrPolicy
 	}
 	return p, pacs, nil
