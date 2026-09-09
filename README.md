@@ -109,19 +109,68 @@ from that one administrator-approved origin.
 
 ## Connect your PACS or RIS
 
-Once Relay is running, point clinic systems to the Relay host's LAN address:
+Relay supports two image transfer modes: **Push** and **Retrieve** (pull).
+Push is the default. Choose the company mode in Telrad under
+**Settings → Data exchange → Image transfer**. Retrieve also requires a
+retrieval-capable Relay build, enabled cloud support and local PACS approval.
 
-- DICOM: any valid called AE title (for example `TELRAD`), TCP port `11112`;
-- HL7: MLLP, TCP port `2575`; and
-- report return: TCP port `2576` at the configured report receiver.
+| Mode | Clinic connection | When images are transferred |
+| --- | --- | --- |
+| **Push** | PACS → Relay using DICOM C-STORE | When the PACS sends or routes images to Telrad. |
+| **Retrieve (pull)** | Relay → PACS using C-FIND and C-GET | After an approved HL7 order authorizes retrieval and Telrad schedules the transfer. |
 
-Allow only the required clinic systems to reach these ports. Validate the
-route with approved test traffic before sending clinical data.
+In both modes, Relay forwards images to Telrad over outbound HTTPS on TCP `443`.
+The cloud does not connect directly to the PACS, and neither mode requires an
+inbound internet firewall rule.
 
-Report return uses HTTPS polling, with up to three seconds of idle pickup
-latency. Telrad retains the delivery queue; Relay has no local delivery ledger.
-If delivery succeeds but its confirmation is lost, the RIS may receive the
-same report and message control ID again. The receiver must handle duplicates.
+### Push mode
+
+Add Relay as a DICOM destination in your PACS:
+
+- **Host:** the Relay host's LAN address.
+- **Port:** TCP `11112` by default.
+- **Called AE title:** any valid AE title, for example `TELRAD`.
+
+Allow the PACS to reach that local port, then configure manual sending or
+automatic routing. C-ECHO checks connectivity; validate actual C-STORE transfer
+with approved test images before sending clinical data. Push mode does not
+query the PACS or fetch images in response to an order.
+
+### Retrieve mode (pull)
+
+Configure the PACS's query/retrieve host, port and called AE title in Relay,
+with a clinic-approved calling AE title and the Storage SOP classes to receive.
+Allow Relay to reach the PACS on that local port. The PACS must support Study Root
+C-FIND and C-GET and accept Relay's Storage SCP role on the C-GET association.
+
+An approved HL7 order supplies the accession. Relay searches the configured PACS
+within the approved clinic/PACS namespace and retrieves every matching study.
+Patient ID is not required for lookup or authorization. Later retrieval attempts
+query again and can discover additional studies and images under that accession.
+
+C-GET returns images over the connection Relay opened, using C-STORE
+suboperations. No separate PACS-to-Relay callback or C-MOVE destination is needed.
+Retrieve mode can also accept ordinary pushed images; keep Relay's DICOM listener
+and its local firewall rule enabled if you need both.
+
+The current retrieval profile supports native Explicit and Implicit VR Little
+Endian images and ASCII accessions up to 16 bytes. See the
+[retrieval provisioning and qualification guide](docs/pacs-retrieval.md) for local
+signing-key/source approval, PACS configuration and activation checks. Selecting
+Retrieve in Telrad alone does not configure or authorize access to the PACS.
+
+### RIS orders and report return (both modes)
+
+Point the RIS's HL7 sender to the Relay host's LAN address on MLLP TCP `2575`.
+Configure Relay to deliver returned reports to the RIS/report receiver's LAN
+address and listening port, TCP `2576` by default. The report receiver opens that
+listener; Relay connects to it. Restrict each local port to the required clinic
+systems and validate the routes with approved test traffic.
+
+Report return uses outbound HTTPS polling, with up to three seconds of idle
+pickup latency. Telrad retains the delivery queue; Relay has no local delivery
+ledger. If delivery succeeds but its confirmation is lost, the RIS may receive
+the same report and message control ID again. The receiver must handle duplicates.
 
 ## Check and manage Relay
 
