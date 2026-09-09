@@ -34,7 +34,7 @@ func serveHL7(ctx context.Context, connection net.Conn, cfg *config, client *htt
 		if err != nil {
 			return
 		}
-		ack, err := ingestHL7(ctx, cfg.HL7URL, client, provider, status, frame[1:len(frame)-2], controlID)
+		ack, err := ingestClinicHL7(ctx, cfg, connection.RemoteAddr(), client, provider, status, frame[1:len(frame)-2], controlID)
 		if err != nil {
 			return
 		}
@@ -201,6 +201,10 @@ func hl7Field(segment []byte, separator byte, wanted int) ([]byte, bool) {
 }
 
 func ingestHL7(parent context.Context, address string, client *http.Client, provider *credentialProvider, status *runtimeStatusManager, message []byte, controlID string) ([]byte, error) {
+	return ingestHL7Body(parent, address, client, provider, status, message, controlID, "application/hl7-v2")
+}
+
+func ingestHL7Body(parent context.Context, address string, client *http.Client, provider *credentialProvider, status *runtimeStatusManager, message []byte, controlID, contentType string) ([]byte, error) {
 	key, err := randomHL7IdempotencyKey()
 	if err != nil {
 		return nil, errors.New("create ingest key")
@@ -213,7 +217,7 @@ func ingestHL7(parent context.Context, address string, client *http.Client, prov
 			return nil, errors.New("create HL7 ingest request")
 		}
 		req.GetBody = nil
-		addRelayHeaders(req, provider, "application/hl7-v2", key)
+		addRelayHeaders(req, provider, contentType, key)
 		resp, requestErr := client.Do(req)
 		if requestErr != nil {
 			if attempt < 2 && waitHL7Retry(ctx, time.Duration(attempt+1)*time.Second) == nil {

@@ -715,7 +715,7 @@ type orthancTestContainer struct {
 	closed atomic.Bool
 }
 
-func startOrthancContainer(t *testing.T, ctx context.Context, role string, modalities map[string]any) *orthancTestContainer {
+func startOrthancContainer(t *testing.T, ctx context.Context, role string, modalities map[string]any, options ...map[string]any) *orthancTestContainer {
 	t.Helper()
 	if modalities == nil {
 		modalities = map[string]any{}
@@ -733,6 +733,11 @@ func startOrthancContainer(t *testing.T, ctx context.Context, role string, modal
 		"DicomAssociationCloseDelay": 0,
 		"TranscodeDicomProtocol":     false,
 		"DicomModalities":            modalities,
+	}
+	for _, option := range options {
+		for key, value := range option {
+			configuration[key] = value
+		}
 	}
 	contents, err := json.MarshalIndent(configuration, "", "  ")
 	if err != nil {

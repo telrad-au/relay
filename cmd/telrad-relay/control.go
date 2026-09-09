@@ -5,9 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
+	"reflect"
 	"time"
 )
 
@@ -50,7 +52,11 @@ func controlRequest(ctx context.Context, client *http.Client, provider *credenti
 	}
 	requestCtx, cancel := context.WithTimeout(ctx, controlRequestTimeout)
 	defer cancel()
-	req, err := http.NewRequestWithContext(requestCtx, method, address, bytes.NewReader(data))
+	var reader io.Reader = bytes.NewReader(data)
+	if method == http.MethodGet {
+		reader = nil
+	}
+	req, err := http.NewRequestWithContext(requestCtx, method, address, reader)
 	if err != nil {
 		return 0, 0, errors.New("invalid_control_url")
 	}
@@ -93,6 +99,9 @@ func controlFailure(status *runtimeStatusManager, code int) {
 
 func superviseControl(ctx, workCtx context.Context, cfg *config, client *http.Client, provider *credentialProvider, credentialChanged <-chan struct{}, work *workDrainer, status *runtimeStatusManager) {
 	sessionURL := ""
+	stopRetrieval := func() {}
+	defer func() { stopRetrieval() }()
+	sessionCredential := provider.Current()
 	backoff := time.Duration(0)
 	defer func() {
 		status.SetControlConnected(false)
@@ -103,12 +112,35 @@ func superviseControl(ctx, workCtx context.Context, cfg *config, client *http.Cl
 		}
 	}()
 	for ctx.Err() == nil {
+		if cfg.configPath != "" {
+			latest, loadErr := loadConfigMode(cfg.configPath, false)
+			if loadErr == nil && validateConfig(latest, "run") == nil && latest.RelayID == cfg.RelayID && latest.ControlURL == cfg.ControlURL && !reflect.DeepEqual(latest.Retrieval, cfg.Retrieval) {
+				stopRetrieval()
+				stopRetrieval = func() {}
+				if sessionURL != "" {
+					_, _, _ = controlRequest(ctx, client, provider, http.MethodDelete, sessionURL, nil, nil)
+				}
+				sessionURL = ""
+				copy := *cfg
+				copy.Retrieval = latest.Retrieval
+				cfg = &copy
+			}
+		}
+		if provider.Current() != sessionCredential {
+			stopRetrieval()
+			stopRetrieval = func() {}
+			sessionURL = ""
+			sessionCredential = provider.Current()
+		}
 		var code int
 		var delay time.Duration
 		var err error
 		if sessionURL == "" {
 			hostname, _ := os.Hostname()
-			hello := map[string]any{"type": "hello", "agentVersion": version, "platform": relayPlatform(), "hostname": hostname, "capabilities": map[string]bool{"dicom": true, "hl7": true, "reportDelivery": true, "httpsIngest": true}}
+			hello := map[string]any{"type": "hello", "agentVersion": version, "platform": relayPlatform(), "hostname": hostname, "capabilities": map[string]any{"dicom": !cfg.DisableDICOMListener, "hl7": true, "reportDelivery": true, "httpsIngest": true}}
+			if retrievalEnabledLocal(cfg) {
+				hello["capabilities"].(map[string]any)["pacsRetrievalV2"] = retrievalCapability(cfg)
+			}
 			var ready readyMessage
 			code, delay, err = controlRequest(ctx, client, provider, http.MethodPost, cfg.ControlURL+"/sessions", hello, &ready)
 			if err == nil {
@@ -118,6 +150,7 @@ func superviseControl(ctx, workCtx context.Context, cfg *config, client *http.Cl
 				}
 				if err == nil {
 					sessionURL = cfg.ControlURL + "/sessions/" + url.PathEscape(ready.SessionID)
+					stopRetrieval = startRetrievalSession(ctx, cfg, ready, sessionURL, client, provider, work, status)
 				}
 			}
 			if err == nil {
@@ -129,6 +162,8 @@ func superviseControl(ctx, workCtx context.Context, cfg *config, client *http.Cl
 			var report reportMessage
 			code, delay, err = controlRequest(ctx, client, provider, http.MethodPost, sessionURL+"/poll", struct{}{}, &report)
 			if code == http.StatusConflict {
+				stopRetrieval()
+				stopRetrieval = func() {}
 				sessionURL = ""
 			}
 			if err == nil && code != http.StatusOK && code != http.StatusNoContent {

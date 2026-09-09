@@ -92,7 +92,7 @@ try {
     Assert-TelradReleaseAuthenticity -ArtifactPath $download -ExpectedDigest $expected
     $inputData = @{
         config = @{
-            schemaVersion = 4
+            schemaVersion = 5
             pairingUrl = $PairingUrl
             controlUrl = ""
             dicomUrl = ""

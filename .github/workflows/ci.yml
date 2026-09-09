@@ -43,7 +43,7 @@ jobs:
               run: |
                   set -euo pipefail
                   mkdir -p "$RUNNER_TEMP/relay-unit-coverage"
-                  go test -race -covermode=atomic -cover ./... -args -test.gocoverdir="$RUNNER_TEMP/relay-unit-coverage"
+                  go test -race -covermode=atomic -coverpkg=./... -cover ./... -args -test.gocoverdir="$RUNNER_TEMP/relay-unit-coverage"
 
             - name: Exercise native Linux installation and collect process coverage
               env:
@@ -77,6 +77,11 @@ jobs:
               env:
                   TELRAD_ORTHANC_INTEROP_TEST: "1"
               run: go test -race ./cmd/telrad-relay -run '^TestOrthancDICOMPayloadIntegrity$' -count=1 -timeout=5m
+
+            - name: Test actual Relay QIDO/WADO retrieval and restart
+              env:
+                  TELRAD_RETRIEVAL_ORTHANC_TEST: "1"
+              run: go test -race ./cmd/telrad-relay -run '^TestRetrievalOrthancBinaryRestart$' -count=1 -timeout=4m
 
             - name: Validate synthetic HL7 fixtures
               run: scripts/check-hl7-fixtures.sh

@@ -230,7 +230,7 @@ func installNativeBundle(paths managedPaths, bundle nativeInstallInput, binary [
 			if err := migrateConfig(paths.Config, bundle.Config.PairingURL, bundle.Trust.ManifestURL, bundle.Trust.PublicKey); err != nil {
 				return err
 			}
-		case 3, 4:
+		case 3, 4, 5:
 			if _, err := loadConfig(paths.Config); err != nil {
 				return err
 			}

@@ -8,8 +8,25 @@ import (
 // This upgrade changes only locally derived control transport configuration.
 // In particular it never clears or replaces the enrolled credential.
 func upgradePollingConfig(path string, cfg *config) error {
+	if cfg.SchemaVersion == 4 {
+		if cfg.Retrieval != nil || cfg.DisableDICOMListener {
+			return errors.New("retrieval requires explicit schema-v5 provisioning")
+		}
+		cfg.SchemaVersion = currentConfigSchemaVersion
+		command := "enroll"
+		if cfg.RelayID != "" {
+			command = "run"
+		}
+		if err := validateConfig(cfg, command); err != nil {
+			return err
+		}
+		return atomicWriteJSON(path, cfg)
+	}
 	if cfg.SchemaVersion != 3 {
 		return nil
+	}
+	if cfg.Retrieval != nil || cfg.DisableDICOMListener {
+		return errors.New("retrieval requires explicit schema-v5 provisioning")
 	}
 	endpoints, err := deriveProtocolEndpoints(cfg.PairingURL)
 	if err != nil {

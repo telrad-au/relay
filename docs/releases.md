@@ -484,3 +484,10 @@ Qualify Linux systemd installation and Windows SCM/ACL/UAC behavior on disposabl
 hosts before promoting a release. Existing custom managed credential paths and
 malformed recovery journals fail closed and need administrator repair. A build or
 successful cross-compilation does not replace these native qualification checks.
+
+## Retrieval v2 release gate
+
+Do not publish or activate retrieval based only on unit tests, the cloud simulator,
+or the Orthanc/synthetic-cloud harness. Require the [joint qualification evidence](testing.md#retrieval-v2),
+coordinated mode discovery, schema-v5 upgrade/rollback review and clinic approval
+of the exact signed build. Keep the platform switch disabled until those gates pass.

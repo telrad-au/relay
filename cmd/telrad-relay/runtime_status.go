@@ -17,6 +17,7 @@ const (
 )
 
 type relayRuntimeStatus struct {
+	RetrievalState          string    `json:"retrievalState,omitempty"`
 	State                   string    `json:"state"`
 	UpdatedAt               time.Time `json:"updatedAt"`
 	Version                 string    `json:"version"`
@@ -190,6 +191,10 @@ func checkRuntimeReady(configPath string, now time.Time) error {
 }
 
 func printRuntimeStatus(status relayRuntimeStatus) {
+	switch status.RetrievalState {
+	case "available", "active", "local_policy_rejected", "control_unavailable":
+		fmt.Printf("retrieval: %s\n", status.RetrievalState)
+	}
 	fmt.Printf("ingest ready: %t\ncontrol connected: %t\nreport return available: %t\nauthentication attention: %t\n", status.IngestReady, status.ControlConnected, status.ReportReturnAvailable, status.AuthenticationAttention)
 }
 
@@ -207,4 +212,19 @@ func readRuntimeStatus(configPath string) (relayRuntimeStatus, error) {
 
 func runtimeStatusPath(configPath string) string {
 	return filepath.Join(filepath.Dir(configPath), "runtime-status.json")
+}
+
+func (m *runtimeStatusManager) AuthenticationRequired() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.authCloud || m.authFile
+}
+func (m *runtimeStatusManager) SetRetrievalState(s string) {
+	m.mu.Lock()
+	changed := m.status.RetrievalState != s
+	m.status.RetrievalState = s
+	m.mu.Unlock()
+	if changed {
+		_ = m.write()
+	}
 }

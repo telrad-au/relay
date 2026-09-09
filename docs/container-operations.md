@@ -1,7 +1,7 @@
 # Container operations
 
 The Compose deployment runs an immutable image with a read-only root filesystem,
-no additional Linux capabilities, and a named volume for schema-v4 configuration
+no additional Linux capabilities, and a named volume for schema-v5 configuration
 and its bearer credential record. The
 container does not update its own image. Native privilege helpers and management
 IPC are excluded from the image build. `auth`, `enroll`, `rotate-credential`, `doctor`,
@@ -108,3 +108,10 @@ not a substitute for a DICOM or HL7 delivery queue.
 and requires a new pairing, so handle that as a separate approved destructive
 operation. Never use `docker compose down -v` as an ordinary troubleshooting
 step.
+
+## Retrieval configuration
+
+Schema v4 upgrades to v5 with retrieval absent. Optional retrieval keeps only its
+permit signing key and approved configuration in the existing volume; it adds no
+clinical spool or job state. Generate the key as UID 10001 and follow the
+[PACS retrieval guide](pacs-retrieval.md) for qualification and rollback.

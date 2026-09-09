@@ -1,5 +1,5 @@
 {
-  "schemaVersion": 4,
+  "schemaVersion": 5,
   "pairingUrl": "https://ingest.app.telrad.com.au/v1/relay/pairing-enrollments",
   "controlUrl": "",
   "dicomUrl": "",

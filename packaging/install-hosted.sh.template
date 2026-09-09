@@ -41,7 +41,7 @@ chmod 0700 "$work_dir/telrad-relay"
     printf '{"config":'
     cat <<EOF
 {
-  "schemaVersion": 4,
+  "schemaVersion": 5,
   "pairingUrl": "$PAIRING_URL",
   "controlUrl": "",
   "dicomUrl": "",

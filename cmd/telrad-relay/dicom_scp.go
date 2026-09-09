@@ -618,6 +618,10 @@ func littleEndianUint32(value uint32) []byte {
 }
 
 func ingestDICOM(ctx context.Context, address string, client *http.Client, provider *credentialProvider, status *runtimeStatusManager, body *io.PipeReader, result chan<- dicomIngestResult) {
+	ingestDICOMWithAttempt(ctx, address, client, provider, status, body, result, "")
+}
+
+func ingestDICOMWithAttempt(ctx context.Context, address string, client *http.Client, provider *credentialProvider, status *runtimeStatusManager, body *io.PipeReader, result chan<- dicomIngestResult, attempt string) {
 	defer body.Close()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, address, body)
 	if err != nil {
@@ -626,6 +630,9 @@ func ingestDICOM(ctx context.Context, address string, client *http.Client, provi
 	}
 	req.GetBody = nil
 	addRelayHeaders(req, provider, "application/dicom", "")
+	if attempt != "" {
+		req.Header.Set("X-Telrad-Retrieval-Attempt", attempt)
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		result <- dicomIngestResult{status: 0xA700}

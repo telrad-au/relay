@@ -251,7 +251,7 @@ func TestReadOnlyConfigRequiresExplicitMigration(t *testing.T) {
 	var migrated config
 	newData, _ := os.ReadFile(path)
 	json.Unmarshal(newData, &migrated)
-	if migrated.SchemaVersion != 4 {
+	if migrated.SchemaVersion != currentConfigSchemaVersion {
 		t.Fatal("explicit migration did not run")
 	}
 	if _, err := safeReadFile(filepath.Join(filepath.Dir(path), "missing"), 1024); !errors.Is(err, os.ErrNotExist) {
