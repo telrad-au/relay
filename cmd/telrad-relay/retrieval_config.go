@@ -10,8 +10,6 @@ import (
 	"encoding/json"
 	"errors"
 	"net/netip"
-	"net/url"
-	"path"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -32,7 +30,6 @@ type retrievalConfig struct {
 }
 type retrievalPACS struct {
 	ID                    string   `json:"id"`
-	DICOMwebURL           string   `json:"dicomwebUrl,omitempty"`
 	Host                  string   `json:"host,omitempty"`
 	Port                  int      `json:"port,omitempty"`
 	CalledAETitle         string   `json:"calledAETitle,omitempty"`
@@ -43,7 +40,7 @@ type retrievalPACS struct {
 	MaxInstanceBytes      int64    `json:"maxInstanceBytes"`
 	MaxInstances          int      `json:"maxInstances"`
 	RequestTimeoutSeconds int      `json:"requestTimeoutSeconds"`
-	// These generic adapters have no completion API. Other PACS profiles need a
+	// This DIMSE profile has no completion API. Other PACS profiles need a
 	// qualified adapter; this is not an operator-selectable completion policy.
 	Adapter string `json:"adapter"`
 }
@@ -110,31 +107,18 @@ func validateRetrievalConfig(cfg *config) error {
 			return retrieval.ErrPolicy
 		}
 		ids[p.ID] = true
-		switch p.Adapter {
-		case "dimse-find-get-v1":
-			if p.DICOMwebURL != "" || !validRetrievalHost(p.Host) || p.Port < 1 || p.Port > 65535 || !validRetrievalAE(p.CalledAETitle) || !validRetrievalAE(p.CallingAETitle) || len(p.StorageSOPClasses) < 1 || len(p.StorageSOPClasses) > 63 {
-				return retrieval.ErrPolicy
-			}
-			classes := map[string]bool{}
-			for _, class := range p.StorageSOPClasses {
-				if !isStorageSOPClass(class) || classes[class] {
-					return retrieval.ErrPolicy
-				}
-				classes[class] = true
-			}
-		case "dicomweb-qido-wado-v1":
-			if p.Host != "" || p.Port != 0 || p.CalledAETitle != "" || p.CallingAETitle != "" || len(p.StorageSOPClasses) != 0 {
-				return retrieval.ErrPolicy
-			}
-			if validateEndpointURL("dicomwebUrl", p.DICOMwebURL, "https", "") != nil {
-				return retrieval.ErrPolicy
-			}
-			u, _ := url.Parse(p.DICOMwebURL)
-			if u.RawPath != "" || u.Path == "/" || path.Clean(u.Path) != u.Path {
-				return retrieval.ErrPolicy
-			}
-		default:
+		if p.Adapter != "dimse-find-get-v1" {
 			return retrieval.ErrPolicy
+		}
+		if !validRetrievalHost(p.Host) || p.Port < 1 || p.Port > 65535 || !validRetrievalAE(p.CalledAETitle) || !validRetrievalAE(p.CallingAETitle) || len(p.StorageSOPClasses) < 1 || len(p.StorageSOPClasses) > 63 {
+			return retrieval.ErrPolicy
+		}
+		classes := map[string]bool{}
+		for _, class := range p.StorageSOPClasses {
+			if !isStorageSOPClass(class) || classes[class] {
+				return retrieval.ErrPolicy
+			}
+			classes[class] = true
 		}
 		if p.MaxInstanceBytes < 1 || p.MaxInstanceBytes > maxDICOMRequestBytes || p.MaxStudyBytes < p.MaxInstanceBytes || p.MaxStudyBytes > 64*maxDICOMRequestBytes || p.MaxInstances < 1 || p.MaxInstances > 1000000 || p.RequestTimeoutSeconds < 1 || p.RequestTimeoutSeconds > 300 {
 			return retrieval.ErrPolicy

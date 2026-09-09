@@ -53,7 +53,7 @@ func dimseFixtureDataset(object []byte) []byte {
 	return object[offset:]
 }
 
-func dimseTestPeer(t *testing.T, syntax string, role bool, run func(*retrievalAssociation, []byte)) retrievalPACS {
+func dimseTestPeer(t *testing.T, syntax string, role bool, run func(*retrievalAssociation, []byte), repeat ...bool) retrievalPACS {
 	t.Helper()
 	listener, e := net.Listen("tcp", "127.0.0.1:0")
 	if e != nil {
@@ -62,72 +62,79 @@ func dimseTestPeer(t *testing.T, syntax string, role bool, run func(*retrievalAs
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		c, e := listener.Accept()
-		if e != nil {
-			return
-		}
-		defer c.Close()
-		c.SetDeadline(time.Now().Add(10 * time.Second))
-		kind, rq, e := readDICOMPDU(c)
-		if e != nil || kind != 1 {
-			t.Error("missing association request")
-			return
-		}
-		ac := append([]byte{}, rq[:68]...)
-		contexts := map[byte]presentationContext{}
-		var user []byte
-		e = associationItems(rq[68:], func(k byte, v []byte) error {
-			switch k {
-			case 0x10:
-				ac = append(ac, associationItem(k, v)...)
-			case 0x20:
-				pc, err := parsePresentationContext(v)
-				if err != nil {
-					return err
-				}
-				matched := false
-				_ = associationItems(v[4:], func(k byte, value []byte) error {
-					if k == 0x40 && string(value) == syntax {
-						matched = true
-					}
-					return nil
-				})
-				if !matched {
-					ac = append(ac, associationItem(0x21, []byte{pc.ID, 0, 4, 0})...)
-					return nil
-				}
-				pc.TransferSyntax = syntax
-				pc.Accepted = true
-				contexts[pc.ID] = pc
-				accepted := append([]byte{pc.ID, 0, 0, 0}, associationItem(0x40, []byte(syntax))...)
-				ac = append(ac, associationItem(0x21, accepted)...)
-			case 0x50:
-				return associationItems(v, func(k byte, value []byte) error {
-					if k == 0x54 {
-						if len(value) < 4 || value[len(value)-2] != 0 || value[len(value)-1] != 1 {
-							return errors.New("wrong storage role")
-						}
-						if role {
-							user = append(user, associationItem(k, value)...)
-						}
-					}
-					return nil
-				})
+		for {
+			c, e := listener.Accept()
+			if e != nil {
+				return
 			}
-			return nil
-		})
-		if e != nil {
-			t.Error(e)
-			return
+			func() {
+				defer c.Close()
+				c.SetDeadline(time.Now().Add(60 * time.Second))
+				kind, rq, e := readDICOMPDU(c)
+				if e != nil || kind != 1 {
+					t.Error("missing association request")
+					return
+				}
+				ac := append([]byte{}, rq[:68]...)
+				contexts := map[byte]presentationContext{}
+				var user []byte
+				e = associationItems(rq[68:], func(k byte, v []byte) error {
+					switch k {
+					case 0x10:
+						ac = append(ac, associationItem(k, v)...)
+					case 0x20:
+						pc, err := parsePresentationContext(v)
+						if err != nil {
+							return err
+						}
+						matched := false
+						_ = associationItems(v[4:], func(k byte, value []byte) error {
+							if k == 0x40 && string(value) == syntax {
+								matched = true
+							}
+							return nil
+						})
+						if !matched {
+							ac = append(ac, associationItem(0x21, []byte{pc.ID, 0, 4, 0})...)
+							return nil
+						}
+						pc.TransferSyntax = syntax
+						pc.Accepted = true
+						contexts[pc.ID] = pc
+						accepted := append([]byte{pc.ID, 0, 0, 0}, associationItem(0x40, []byte(syntax))...)
+						ac = append(ac, associationItem(0x21, accepted)...)
+					case 0x50:
+						return associationItems(v, func(k byte, value []byte) error {
+							if k == 0x54 {
+								if len(value) < 4 || value[len(value)-2] != 0 || value[len(value)-1] != 1 {
+									return errors.New("wrong storage role")
+								}
+								if role {
+									user = append(user, associationItem(k, value)...)
+								}
+							}
+							return nil
+						})
+					}
+					return nil
+				})
+				if e != nil {
+					t.Error(e)
+					return
+				}
+				user = append(user, associationItem(0x51, []byte{0, 0, 16, 0})...)
+				ac = append(ac, associationItem(0x50, user)...)
+				if e = writeDICOMPDU(c, 2, ac); e != nil {
+					t.Error(e)
+					return
+				}
+				a := &retrievalAssociation{conn: c, contexts: contexts, maxSend: 4096, stop: func() bool { return true }}
+				run(a, rq)
+			}()
+			if len(repeat) == 0 || !repeat[0] {
+				return
+			}
 		}
-		user = append(user, associationItem(0x51, []byte{0, 0, 16, 0})...)
-		ac = append(ac, associationItem(0x50, user)...)
-		if e = writeDICOMPDU(c, 2, ac); e != nil {
-			t.Error(e)
-			return
-		}
-		a := &retrievalAssociation{conn: c, contexts: contexts, maxSend: 4096, stop: func() bool { return true }}
-		run(a, rq)
 	}()
 	t.Cleanup(func() {
 		listener.Close()
@@ -189,7 +196,7 @@ func dimseTestRelease(t *testing.T, a *retrievalAssociation) {
 	}
 	writeDICOMPDU(a.conn, 6, make([]byte, 4))
 }
-func dimseStore(t *testing.T, a *retrievalAssociation, object []byte, fragment bool) {
+func dimseStore(t *testing.T, a *retrievalAssociation, object []byte, fragment bool, instance ...string) {
 	t.Helper()
 	var b bytes.Buffer
 	writeCommandUI(&b, 2, syntheticStorageClass)
@@ -197,7 +204,11 @@ func dimseStore(t *testing.T, a *retrievalAssociation, object []byte, fragment b
 	writeCommandUS(&b, 0x0110, 7)
 	writeCommandUS(&b, 0x0700, 0)
 	writeCommandUS(&b, 0x0800, 1)
-	writeCommandUI(&b, 0x1000, "1.2.3.4")
+	sop := "1.2.3.4"
+	if len(instance) > 0 {
+		sop = instance[0]
+	}
+	writeCommandUI(&b, 0x1000, sop)
 	h := make([]byte, 12)
 	binary.LittleEndian.PutUint32(h[4:], 4)
 	binary.LittleEndian.PutUint32(h[8:], uint32(b.Len()))
@@ -474,7 +485,7 @@ func TestDIMSELocalConfigurationAndIdentifierBounds(t *testing.T) {
 		t.Fatal(e)
 	}
 	original := cfg.Retrieval.PACS[0]
-	for _, edit := range []func(*retrievalPACS){func(p *retrievalPACS) { p.Host = "https://pacs" }, func(p *retrievalPACS) { p.Port = 0 }, func(p *retrievalPACS) { p.CallingAETitle = strings.Repeat("A", 17) }, func(p *retrievalPACS) { p.StorageSOPClasses = []string{studyRootFind} }, func(p *retrievalPACS) { p.DICOMwebURL = "https://pacs.invalid" }} {
+	for _, edit := range []func(*retrievalPACS){func(p *retrievalPACS) { p.Host = "https://pacs" }, func(p *retrievalPACS) { p.Port = 0 }, func(p *retrievalPACS) { p.CallingAETitle = strings.Repeat("A", 17) }, func(p *retrievalPACS) { p.StorageSOPClasses = []string{studyRootFind} }, func(p *retrievalPACS) { p.Adapter = "unsupported" }} {
 		cfg.Retrieval.PACS[0] = original
 		edit(&cfg.Retrieval.PACS[0])
 		if validateRetrievalConfig(cfg) == nil {
@@ -485,4 +496,55 @@ func TestDIMSELocalConfigurationAndIdentifierBounds(t *testing.T) {
 	if _, e := queryDIMSEAccession(context.Background(), original, p); e != retrieval.ErrPolicy {
 		t.Fatal("oversized accession initiated a query")
 	}
+}
+
+// dimseWorkflowPACS serves repeated discovery and retrieval associations so
+// orchestration tests exercise leases and restart over the actual DIMSE path.
+func dimseWorkflowPACS(t *testing.T, discover func() []string, copies int) retrievalPACS {
+	return dimseTestPeer(t, explicitLittleEndian, true, func(a *retrievalAssociation, _ []byte) {
+		if a.contexts[1].AbstractSyntax == studyRootFind {
+			data := dimseTestRequest(t, a, 0x0020)
+			if !bytes.Contains(data, []byte("ACC")) {
+				t.Error("missing accession query")
+				return
+			}
+			for _, study := range discover() {
+				identifier := retrievalElement(0x00080050, "SH", "ACC", explicitLittleEndian)
+				identifier = append(identifier, retrievalElement(0x0020000d, "UI", study, explicitLittleEndian)...)
+				a.send(1, true, dimseResponse(studyRootFind, 0x8020, 0xff00, true, 0))
+				a.send(1, false, identifier)
+			}
+			a.send(1, true, dimseResponse(studyRootFind, 0x8020, 0, false, 0))
+			dimseTestRelease(t, a)
+			return
+		}
+		data := dimseTestRequest(t, a, 0x0010)
+		var study string
+		for len(data) >= 8 {
+			n := int(binary.LittleEndian.Uint16(data[6:8]))
+			if len(data) < 8+n {
+				t.Error("truncated request")
+				return
+			}
+			if binary.LittleEndian.Uint16(data) == 0x0020 && binary.LittleEndian.Uint16(data[2:]) == 0x000d {
+				study = strings.TrimRight(string(data[8:8+n]), "\x00 ")
+			}
+			data = data[8+n:]
+		}
+		if !retrieval.UID(study) {
+			t.Error("missing selected study")
+			return
+		}
+		sop := study + ".1.1"
+		for i := 0; i < copies; i++ {
+			dimseStore(t, a, dimseFixture(explicitLittleEndian, "ACC", study, sop), false, sop)
+			_, fields, err := a.command()
+			status, ok := commandUS(fields, 0x0900)
+			if err != nil || !ok || status != 0 {
+				return
+			} // Cancellation/lease expiry aborts the association.
+		}
+		a.send(1, true, dimseResponse(studyRootGet, 0x8010, 0, false, copies))
+		dimseTestRelease(t, a)
+	}, true)
 }

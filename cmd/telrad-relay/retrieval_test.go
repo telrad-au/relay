@@ -8,11 +8,9 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"io"
-	"mime/multipart"
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"net/textproto"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -41,7 +39,7 @@ func retrievalTestConfig(t *testing.T) *config {
 	if e := json.Unmarshal(raw, &key); e != nil {
 		t.Fatal(e)
 	}
-	cfg.Retrieval = &retrievalConfig{Enabled: true, CompanyID: "company", ConnectorID: cfg.RelayID, SigningKeyID: key.KeyID, TrustedPublicKeys: []string{key.PublicKey}, PACS: []retrievalPACS{{ID: "pacs", DICOMwebURL: "https://pacs.example.invalid/dicom-web", AccessionIssuer: "CLINIC", MaxStudyBytes: 16 * 1024 * 1024, MaxInstanceBytes: 8 * 1024 * 1024, MaxInstances: 100, RequestTimeoutSeconds: 5, Adapter: "dicomweb-qido-wado-v1"}}, Policies: []referralPolicy{{ID: "policy", PACSID: "pacs", SourceAddresses: []string{"127.0.0.1"}, SendingApplication: "SYNTHETIC", SendingFacility: "CLINIC", OrderControls: []string{"NW", "XO", "CA", "DC"}, AccessionSource: "OBR-18"}}}
+	cfg.Retrieval = &retrievalConfig{Enabled: true, CompanyID: "company", ConnectorID: cfg.RelayID, SigningKeyID: key.KeyID, TrustedPublicKeys: []string{key.PublicKey}, PACS: []retrievalPACS{{ID: "pacs", Host: "pacs.example.invalid", Port: 104, CalledAETitle: "PACS", CallingAETitle: "RELAY", StorageSOPClasses: []string{syntheticStorageClass}, AccessionIssuer: "CLINIC", MaxStudyBytes: 16 * 1024 * 1024, MaxInstanceBytes: 8 * 1024 * 1024, MaxInstances: 100, RequestTimeoutSeconds: 5, Adapter: "dimse-find-get-v1"}}, Policies: []referralPolicy{{ID: "policy", PACSID: "pacs", SourceAddresses: []string{"127.0.0.1"}, SendingApplication: "SYNTHETIC", SendingFacility: "CLINIC", OrderControls: []string{"NW", "XO", "CA", "DC"}, AccessionSource: "OBR-18"}}}
 	saveRetrievalTestConfig(t, cfg)
 	return cfg
 }
@@ -315,23 +313,6 @@ func retrievalTestDICOM(study, sop, patient string) []byte {
 	}
 	return append(b, retrievalTestElement(0x7fe00010, "OW", []byte{0, 1, 2, 3})...)
 }
-func retrievalTestQIDO(study, patient string) map[string]any {
-	a := func(vr, s string) any { return map[string]any{"vr": vr, "Value": []string{s}} }
-	return map[string]any{"00100020": a("LO", patient), "00100021": a("LO", "CLINIC"), "00080050": a("SH", "ACC"), "0020000D": a("UI", study), "00080051": map[string]any{"vr": "SQ", "Value": []any{map[string]any{"00400031": a("UT", "CLINIC")}}}}
-}
-func writeRetrievalMultipart(w http.ResponseWriter, objects [][]byte, truncate bool) {
-	var body bytes.Buffer
-	parts := multipart.NewWriter(&body)
-	for _, object := range objects {
-		part, _ := parts.CreatePart(textproto.MIMEHeader{"Content-Type": []string{"application/dicom"}})
-		part.Write(object)
-	}
-	if !truncate {
-		parts.Close()
-	}
-	w.Header().Set("Content-Type", `multipart/related; type="application/dicom"; boundary=`+parts.Boundary())
-	w.Write(body.Bytes())
-}
 func TestRetrievalRequeriesAfterRestartAndReplaysCommittedSubmissions(t *testing.T) {
 	cfg := retrievalTestConfig(t)
 	provider := testProvider(t, testCredential('A'))
@@ -342,34 +323,12 @@ func TestRetrievalRequeriesAfterRestartAndReplaysCommittedSubmissions(t *testing
 	var arrivals [][]byte
 	var selections [][]byte
 	var results [][]byte
-	pacs := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != "" {
-			t.Error("cloud bearer leaked to PACS")
-		}
+	cfg.Retrieval.PACS[0] = dimseWorkflowPACS(t, func() []string {
 		mu.Lock()
-		snapshot := append([]string{}, studies...)
-		mu.Unlock()
-		if r.URL.Path == "/dicom-web/studies" {
-			if r.URL.Query().Has("00100020") || r.URL.Query().Has("00100021") || r.URL.Query().Get("00080050") != "ACC" || r.URL.Query().Get("00080051.00400031") != "CLINIC" {
-				t.Error("query not scoped")
-			}
-			mu.Lock()
-			queryCount++
-			mu.Unlock()
-			values := []any{}
-			for _, s := range snapshot {
-				values = append(values, retrievalTestQIDO(s, "OTHER"))
-			}
-			w.Header().Set("Content-Type", "application/dicom+json")
-			json.NewEncoder(w).Encode(values)
-			return
-		}
-		study := strings.TrimPrefix(r.URL.Path, "/dicom-web/studies/")
-		object := retrievalTestDICOM(study, study+".1.1", "")
-		writeRetrievalMultipart(w, [][]byte{object, object}, false)
-	}))
-	defer pacs.Close()
-	cfg.Retrieval.PACS[0].DICOMwebURL = pacs.URL + "/dicom-web"
+		defer mu.Unlock()
+		queryCount++
+		return append([]string{}, studies...)
+	}, 2)
 	cloud := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
 		w.Header().Set("Content-Type", "application/json")
@@ -426,7 +385,7 @@ func TestRetrievalRequeriesAfterRestartAndReplaysCommittedSubmissions(t *testing
 			t.Fatal(e)
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
-		executeRetrieval(ctx, restarted, cfg.ControlURL+"/sessions/session", retrievalClaim{JobID: "job", AttemptID: attempt, Token: "claim-token", ClaimExpiresAt: time.Now().Add(8 * time.Second), Permit: envelope}, pacs.Client(), cloud.Client(), provider, status)
+		executeRetrieval(ctx, restarted, cfg.ControlURL+"/sessions/session", retrievalClaim{JobID: "job", AttemptID: attempt, Token: "claim-token", ClaimExpiresAt: time.Now().Add(8 * time.Second), Permit: envelope}, cloud.Client(), provider, status)
 		cancel()
 		mu.Lock()
 		studies = append(studies, "1.2.30")
@@ -466,78 +425,6 @@ func TestRetrievalRequeriesAfterRestartAndReplaysCommittedSubmissions(t *testing
 		if file.Name() != "relay.json" && file.Name() != permitKeyFilename && file.Name() != "runtime-status.json" {
 			t.Fatalf("unexpected persistent file %s", file.Name())
 		}
-	}
-}
-func TestRetrievalQueryAndTransferFailures(t *testing.T) {
-	cfg := retrievalTestConfig(t)
-	envelope := testSignedReferral(t, cfg)
-	p, _, e := authorizeRetrieval(cfg, envelope)
-	if e != nil {
-		t.Fatal(e)
-	}
-	conflict := retrievalTestQIDO("1.2.3", "PATIENT")
-	conflict["00080050"] = map[string]any{"vr": "SH", "Value": []string{"OTHER"}}
-	for _, test := range []struct {
-		name    string
-		objects []any
-		warning bool
-		want    string
-	}{{"none", []any{}, false, "not_found"}, {"conflict", []any{conflict}, false, "identity_mismatch"}, {"duplicate", []any{retrievalTestQIDO("1.2.3", "PATIENT"), retrievalTestQIDO("1.2.3", "PATIENT")}, false, "ambiguous_identity"}, {"truncated", []any{retrievalTestQIDO("1.2.3", "PATIENT")}, true, "local_policy_rejected"}} {
-		t.Run(test.name, func(t *testing.T) {
-			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				w.Header().Set("Content-Type", "application/dicom+json")
-				if test.warning {
-					w.Header().Set("Warning", "299 truncated")
-				}
-				json.NewEncoder(w).Encode(test.objects)
-			}))
-			defer server.Close()
-			pacs := cfg.Retrieval.PACS[0]
-			pacs.DICOMwebURL = server.URL
-			if _, e := queryAccession(context.Background(), server.Client(), pacs, p); e == nil || e.Error() != test.want {
-				t.Fatalf("error=%v", e)
-			}
-		})
-	}
-	for _, test := range []struct {
-		name              string
-		patient           string
-		truncate, receipt bool
-	}{{"identity", "OTHER", false, true}, {"multipart", "PATIENT", true, true}, {"receipt", "PATIENT", false, false}} {
-		t.Run(test.name, func(t *testing.T) {
-			uploads := 0
-			cloud := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				io.Copy(io.Discard, r.Body)
-				uploads++
-				w.Header().Set("Content-Type", "application/json")
-				if test.receipt {
-					w.WriteHeader(201)
-					io.WriteString(w, `{"status":"accepted","receiptId":"receipt"}`)
-				} else {
-					w.WriteHeader(200)
-				}
-			}))
-			defer cloud.Close()
-			pacs := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				object := retrievalTestDICOM("1.2.3", "1.2.3.4", test.patient)
-				if test.name == "identity" {
-					object = bytes.Replace(object, []byte("ACC "), []byte("BAD "), 1)
-				}
-				writeRetrievalMultipart(w, [][]byte{object}, test.truncate)
-			}))
-			defer pacs.Close()
-			local := cfg.Retrieval.PACS[0]
-			local.DICOMwebURL = pacs.URL
-			candidate := *cfg
-			candidate.DicomURL = cloud.URL
-			_, e := retrieveWADO(context.Background(), pacs.Client(), cloud.Client(), &candidate, testProvider(t, testCredential('A')), newRuntimeStatus(cfg.configPath), local, p, "1.2.3", "attempt", func() error { return nil })
-			if e == nil {
-				t.Fatal("failed transfer reported complete")
-			}
-			if test.patient == "OTHER" && uploads != 0 {
-				t.Fatal("foreign identity forwarded")
-			}
-		})
 	}
 }
 func TestRetrievalDICOMIntegrityAndBounds(t *testing.T) {

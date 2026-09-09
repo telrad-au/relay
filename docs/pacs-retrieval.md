@@ -83,9 +83,13 @@ Add this object to a paired schema-v5 configuration after replacing placeholders
     "trustedPublicKeys": ["LOCAL_PUBLIC_KEY_BASE64URL"],
     "pacs": [{
       "id": "clinic-pacs-1",
-      "dicomwebUrl": "https://pacs.example.invalid/dicom-web",
+      "host": "pacs.example.invalid",
+      "port": 104,
+      "calledAETitle": "PACS",
+      "callingAETitle": "RELAY",
+      "storageSopClasses": ["1.2.840.10008.5.1.4.1.1.2", "1.2.840.10008.5.1.4.1.1.4"],
       "accessionIssuer": "CLINIC",
-      "adapter": "dicomweb-qido-wado-v1",
+      "adapter": "dimse-find-get-v1",
       "maxStudyBytes": 1073741824,
       "maxInstanceBytes": 268435456,
       "maxInstances": 10000,
@@ -151,36 +155,11 @@ The exact correlated AA/AE/AR is returned after cloud processing, without waitin
 for images. AE/AR remain negative application acknowledgements. A mode change
 can reject in-flight signed work; sender retry/reconciliation is required.
 
-## Draft adapter profiles
-
-The `dicomweb-qido-wado-v1` adapter uses study-level QIDO-RS and complete-study
-WADO-RS over a locally configured HTTPS base URL, with system certificate verification and no
-redirects. PACS requests use a separate direct transport with no cloud bearer or
-environment proxy. This profile expects a clinic endpoint that requires no
-additional HTTP authentication. Other PACS authentication/profile requirements
-need separate qualification; never put credentials in the URL.
-
-QIDO must support exact Accession Number and
-Issuer of Accession Number Sequence (`00080051.00400031`), and return all those
-identity values plus Study Instance UID. The accession issuer uses exactly one
-Local Namespace Entity ID item. Missing/conflicting identity is rejected. The
-server must honor `limit=65` and signal truncation with Warning; Relay rejects
-warnings, pagination links, duplicate study rows, and more than 64 studies. It
-never silently truncates. All current selected UIDs must be confirmed by the
-cloud before WADO starts; later attempts query again.
-
-WADO must return a complete `multipart/related` response containing Part 10
-objects. The parser supports Explicit and Implicit VR Little Endian and the existing listed
-encapsulated transfer syntaxes encoded with explicit little-endian elements.
-Big Endian and deflated datasets require a separately qualified
-parser and are rejected by this adapter. Dataset elements must be ordered;
-identity metadata is bounded to 1 MiB. Namespaces use ASCII or UTF-8 (Latin-1
-declarations require ASCII identity values) and must be present in the object itself. No byte conversion or transfer-syntax negotiation
-that requests transcoding is performed.
+## Draft DIMSE profile
 
 The `dimse-find-get-v1` profile uses Study Root C-FIND by accession, confirms
 all matching Study Instance UIDs with the cloud, and retrieves each study with
-C-GET. Its local PACS entry replaces `dicomwebUrl` with `host`, `port`,
+C-GET. Its local PACS entry specifies `host`, `port`,
 `calledAETitle`, `callingAETitle`, and `storageSopClasses` (1–63 distinct Storage
 SOP Class UIDs). For example, CT Image Storage is `1.2.840.10008.5.1.4.1.1.2`
 and MR Image Storage is `1.2.840.10008.5.1.4.1.1.4`. The existing namespace,
@@ -203,19 +182,19 @@ and failed final responses. Partial datasets, rejected storage roles, warning or
 failed C-GET results, inconsistent suboperation counters and failed cloud receipts
 cannot report successful retrieval. Cancellation closes the association and upload.
 
-Neither adapter has a standardized acquisition-completion query: each reports
+The profile has no standardized acquisition-completion query and reports
 `not_provided` and uses the signed order under the fixed PACS-or-order rule.
 This is an adapter limitation, not a configurable readiness policy. It does not
 interpret Orthanc stability timers, retired status tags or instance counts as
 completion. A PACS with a vendor completion API or expected SOP inventory needs
 an adapter that queries and preserves that evidence before qualification. Failed
-QIDO/WADO or DIMSE responses never become successful order fallback.
+DIMSE responses never become successful order fallback.
 
 Every object gets a separate HTTPS upload and a fresh valid HTTP 201 receipt,
 including retransmissions. Only retrieval uploads carry the active attempt ID.
 Successful results cover all selected studies with positive distinct SOP counts,
 sorted-unique LF-joined SHA-256 inventories and zero outstanding uploads. A bad
-object, truncated multipart/HTTP response, unconfirmed receipt or failed study
+object, truncated DIMSE dataset, unconfirmed receipt or failed study
 prevents whole-attempt success. One serial worker, explicit size/count/time limits,
 cloud backpressure, renewable leases and cancellation bound resource use.
 

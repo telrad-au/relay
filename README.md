@@ -123,13 +123,6 @@ latency. Telrad retains the delivery queue; Relay has no local delivery ledger.
 If delivery succeeds but its confirmation is lost, the RIS may receive the
 same report and message control ID again. The receiver must handle duplicates.
 
-## Optional PACS retrieval
-
-Schema v5 adds opt-in, clinic-authorized accession retrieval through QIDO-RS and
-WADO-RS. It keeps ordinary DICOM push and report return available. See the
-[retrieval provisioning and qualification guide](docs/pacs-retrieval.md) before
-enabling it; rollout requires the coordinated cloud mode-discovery endpoint.
-
 ## Check and manage Relay
 
 ```text

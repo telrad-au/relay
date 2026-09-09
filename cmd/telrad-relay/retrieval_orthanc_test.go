@@ -11,8 +11,6 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"net/http/httputil"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -29,11 +27,6 @@ import (
 // This is actual binary/PACS interoperability evidence, with a synthetic cloud.
 // The separate platform qualification must reconcile receipts using the real API.
 func TestRetrievalOrthancBinaryRestart(t *testing.T) {
-	for _, adapter := range []string{"dicomweb-qido-wado-v1", "dimse-find-get-v1"} {
-		t.Run(adapter, func(t *testing.T) { testRetrievalOrthancRestart(t, adapter) })
-	}
-}
-func testRetrievalOrthancRestart(t *testing.T, adapter string) {
 	if os.Getenv("TELRAD_RETRIEVAL_ORTHANC_TEST") != "1" {
 		t.Skip("set TELRAD_RETRIEVAL_ORTHANC_TEST=1 for disposable actual-binary PACS retrieval qualification")
 	}
@@ -42,16 +35,12 @@ func testRetrievalOrthancRestart(t *testing.T, adapter string) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 	defer cancel()
-	orthanc := startOrthancContainer(t, ctx, "retrieval", nil, map[string]any{"Plugins": []string{"/usr/local/share/orthanc/plugins/libOrthancDicomWeb.so"}, "DicomWeb": map[string]any{"Enable": true, "Root": "/dicom-web/", "StudiesMetadata": "Full", "SeriesMetadata": "Full"}, "DicomServerEnabled": adapter == "dimse-find-get-v1", "DicomAet": "ORTHANC", "DicomPort": 4242, "DicomAlwaysAllowFind": true, "DicomAlwaysAllowGet": true})
-	target, _ := url.Parse(orthanc.url)
-	pacs := httptest.NewTLSServer(httputil.NewSingleHostReverseProxy(target))
-	defer pacs.Close()
+	orthanc := startOrthancContainer(t, ctx, "retrieval", nil, map[string]any{"DicomServerEnabled": true, "DicomAet": "ORTHANC", "DicomPort": 4242, "DicomAlwaysAllowFind": true, "DicomAlwaysAllowGet": true})
 	cfg := retrievalTestConfig(t)
 	cfg.ListenAddress = "127.0.0.1"
 	cfg.DisableDICOMListener = true
-	cfg.Retrieval.PACS[0].DICOMwebURL = pacs.URL + "/dicom-web"
 	cfg.Retrieval.PACS[0].RequestTimeoutSeconds = 30
-	if adapter == "dimse-find-get-v1" {
+	{
 		output, err := exec.CommandContext(ctx, "docker", "port", orthanc.name, "4242/tcp").Output()
 		if err != nil {
 			t.Fatal(err)
@@ -60,13 +49,12 @@ func testRetrievalOrthancRestart(t *testing.T, adapter string) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		cfg.Retrieval.PACS[0].DICOMwebURL = ""
 		cfg.Retrieval.PACS[0].Host = host
 		cfg.Retrieval.PACS[0].Port, _ = strconv.Atoi(port)
 		cfg.Retrieval.PACS[0].CalledAETitle = "ORTHANC"
 		cfg.Retrieval.PACS[0].CallingAETitle = "TELRAD"
 		cfg.Retrieval.PACS[0].StorageSOPClasses = []string{"1.2.840.10008.5.1.4.1.1.7"}
-		cfg.Retrieval.PACS[0].Adapter = adapter
+		cfg.Retrieval.PACS[0].Adapter = "dimse-find-get-v1"
 	}
 	cfg.HL7Port = reserveRetrievalPort(t)
 	bound, e := net.Listen("tcp", "127.0.0.1:0")
@@ -172,7 +160,6 @@ func testRetrievalOrthancRestart(t *testing.T, adapter string) {
 	saveRetrievalTestConfig(t, cfg)
 	ca := filepath.Join(t.TempDir(), "roots.pem")
 	roots := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cloud.Certificate().Raw})
-	roots = append(roots, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: pacs.Certificate().Raw})...)
 	if e := os.WriteFile(ca, roots, 0600); e != nil {
 		t.Fatal(e)
 	}
@@ -181,16 +168,13 @@ func testRetrievalOrthancRestart(t *testing.T, adapter string) {
 	if out, e := build.CombinedOutput(); e != nil {
 		t.Fatalf("build actual Relay: %v: %s", e, out)
 	}
-	t.Logf("Relay source build; Go %s; PACS %s; adapter %s, completion unsupported", runtime.Version(), orthancInteropImage, adapter)
+	t.Logf("Relay source build; Go %s; PACS %s; adapter %s, completion unsupported", runtime.Version(), orthancInteropImage, "dimse-find-get-v1")
 	for run := 1; run <= 2; run++ {
-		object := retrievalTestDICOM(fmt.Sprintf("1.2.826.0.1.3680043.10.543.99.%d", run), fmt.Sprintf("1.2.826.0.1.3680043.10.543.99.%d.1", run), "PATIENT")
-		if adapter == "dimse-find-get-v1" {
-			syntax := explicitLittleEndian
-			if run == 2 {
-				syntax = implicitLittleEndian
-			}
-			object = dimseFixture(syntax, "ACC", fmt.Sprintf("1.2.826.0.1.3680043.10.543.99.%d", run), fmt.Sprintf("1.2.826.0.1.3680043.10.543.99.%d.1", run))
+		syntax := explicitLittleEndian
+		if run == 2 {
+			syntax = implicitLittleEndian
 		}
+		object := dimseFixture(syntax, "ACC", fmt.Sprintf("1.2.826.0.1.3680043.10.543.99.%d", run), fmt.Sprintf("1.2.826.0.1.3680043.10.543.99.%d.1", run))
 		orthanc.importInstance(t, ctx, object)
 		mu.Lock()
 		phase = run
@@ -232,7 +216,7 @@ func testRetrievalOrthancRestart(t *testing.T, adapter string) {
 		select {
 		case result := <-results:
 			stop()
-			if result.Outcome != "uploaded" || len(result.Studies) != run || (adapter == "dimse-find-get-v1" && result.RetrievalMethod != "C_GET") {
+			if result.Outcome != "uploaded" || len(result.Studies) != run || result.RetrievalMethod != "C_GET" {
 				t.Fatalf("binary outcome=%s studies=%d; %s", result.Outcome, len(result.Studies), output.String())
 			}
 		case <-ctx.Done():

@@ -52,11 +52,8 @@ func startRetrievalSession(ctx context.Context, cfg *config, ready readyMessage,
 	return func() { cancel(); <-done }
 }
 func pollRetrievals(ctx context.Context, cfg *config, sessionURL string, client *http.Client, provider *credentialProvider, work *workDrainer, status *runtimeStatusManager) {
-	// Dedicated transport: no cloud Authorization or redirect following can leak
-	// onto a PACS connection. One serial worker bounds retrieval concurrency.
-	pacsClients := newProtocolClients(cfg)
-	pacsClients.transport.Proxy = nil
-	defer pacsClients.transport.CloseIdleConnections()
+	// One serial worker bounds retrieval concurrency. PACS associations use
+	// locally approved DIMSE destinations independently of the cloud client.
 	credential := provider.Current()
 	for ctx.Err() == nil {
 		if provider.Current() != credential || status.AuthenticationRequired() {
@@ -79,7 +76,7 @@ func pollRetrievals(ctx context.Context, cfg *config, sessionURL string, client 
 			status.SetRetrievalState("active")
 			func() {
 				defer work.Done()
-				executeRetrieval(ctx, cfg, sessionURL, claim, pacsClients.secure, client, provider, status)
+				executeRetrieval(ctx, cfg, sessionURL, claim, client, provider, status)
 			}()
 			status.SetRetrievalState("available")
 			continue
@@ -136,7 +133,7 @@ func retrievalSubmission(ctx context.Context, client *http.Client, provider *cre
 	}
 	return errors.New("lease_lost")
 }
-func executeRetrieval(parent context.Context, cfg *config, sessionURL string, claim retrievalClaim, pacsClient, cloudClient *http.Client, provider *credentialProvider, status *runtimeStatusManager) {
+func executeRetrieval(parent context.Context, cfg *config, sessionURL string, claim retrievalClaim, cloudClient *http.Client, provider *credentialProvider, status *runtimeStatusManager) {
 	ctx, cancel := context.WithCancel(parent)
 	defer cancel()
 	leaseTimer := time.AfterFunc(time.Until(claim.ClaimExpiresAt), cancel)
@@ -225,11 +222,7 @@ func executeRetrieval(parent context.Context, cfg *config, sessionURL string, cl
 		}
 		var selected []string
 		if err == nil {
-			if originalPACS.Adapter == "dimse-find-get-v1" {
-				selected, err = queryDIMSEAccession(ctx, originalPACS, p)
-			} else {
-				selected, err = queryAccession(ctx, pacsClient, originalPACS, p)
-			}
+			selected, err = queryDIMSEAccession(ctx, originalPACS, p)
 		}
 		if err == nil {
 			body := claim.body()
@@ -247,11 +240,7 @@ func executeRetrieval(parent context.Context, cfg *config, sessionURL string, cl
 		if err == nil {
 			for _, study := range selected {
 				var transferred retrievalStudyResult
-				if originalPACS.Adapter == "dimse-find-get-v1" {
-					transferred, err = retrieveCGET(ctx, cloudClient, cfg, provider, status, originalPACS, p, study, claim.AttemptID, recheck, &progress)
-				} else {
-					transferred, err = retrieveWADO(ctx, pacsClient, cloudClient, cfg, provider, status, originalPACS, p, study, claim.AttemptID, recheck, &progress)
-				}
+				transferred, err = retrieveCGET(ctx, cloudClient, cfg, provider, status, originalPACS, p, study, claim.AttemptID, recheck, &progress)
 				if err != nil {
 					progress.failed.Add(1)
 					break
@@ -269,10 +258,7 @@ func executeRetrieval(parent context.Context, cfg *config, sessionURL string, cl
 		} else {
 			zero := 0
 			result.Outcome = "uploaded"
-			result.RetrievalMethod = "WADO_RS"
-			if originalPACS.Adapter == "dimse-find-get-v1" {
-				result.RetrievalMethod = "C_GET"
-			}
+			result.RetrievalMethod = "C_GET"
 			result.OutstandingUploads = &zero
 		}
 	}

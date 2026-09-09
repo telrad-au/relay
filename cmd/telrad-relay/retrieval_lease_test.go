@@ -39,16 +39,7 @@ func TestRetrievalLeaseLossCancelsBlockedUpload(t *testing.T) {
 		}
 	}))
 	defer cloud.Close()
-	pacs := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/dicom-web/studies" {
-			w.Header().Set("Content-Type", "application/dicom+json")
-			json.NewEncoder(w).Encode([]any{retrievalTestQIDO("1.2.3", "PATIENT")})
-		} else {
-			writeRetrievalMultipart(w, [][]byte{retrievalTestDICOM("1.2.3", "1.2.3.4", "PATIENT")}, false)
-		}
-	}))
-	defer pacs.Close()
-	cfg.Retrieval.PACS[0].DICOMwebURL = pacs.URL + "/dicom-web"
+	cfg.Retrieval.PACS[0] = dimseWorkflowPACS(t, func() []string { return []string{"1.2.3"} }, 1)
 	setRetrievalCloud(cfg, cloud.URL)
 	saveRetrievalTestConfig(t, cfg)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
@@ -56,7 +47,7 @@ func TestRetrievalLeaseLossCancelsBlockedUpload(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		executeRetrieval(ctx, cfg, cfg.ControlURL+"/sessions/owner", retrievalClaim{JobID: "job", AttemptID: "attempt", Token: "token", ClaimExpiresAt: time.Now().Add(time.Second), Permit: envelope}, pacs.Client(), cloud.Client(), provider, status)
+		executeRetrieval(ctx, cfg, cfg.ControlURL+"/sessions/owner", retrievalClaim{JobID: "job", AttemptID: "attempt", Token: "token", ClaimExpiresAt: time.Now().Add(time.Second), Permit: envelope}, cloud.Client(), provider, status)
 	}()
 	select {
 	case <-entered:
@@ -132,16 +123,7 @@ func TestRetrievalRenewsLeaseWithProgressDuringUpload(t *testing.T) {
 		}
 	}))
 	defer cloud.Close()
-	pacs := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/dicom-web/studies" {
-			w.Header().Set("Content-Type", "application/dicom+json")
-			json.NewEncoder(w).Encode([]any{retrievalTestQIDO("1.2.3", "PATIENT")})
-		} else {
-			writeRetrievalMultipart(w, [][]byte{retrievalTestDICOM("1.2.3", "1.2.3.4", "PATIENT")}, false)
-		}
-	}))
-	defer pacs.Close()
-	cfg.Retrieval.PACS[0].DICOMwebURL = pacs.URL + "/dicom-web"
+	cfg.Retrieval.PACS[0] = dimseWorkflowPACS(t, func() []string { return []string{"1.2.3"} }, 1)
 	cfg.Retrieval.PACS[0].RequestTimeoutSeconds = 45
 	setRetrievalCloud(cfg, cloud.URL)
 	saveRetrievalTestConfig(t, cfg)
@@ -152,7 +134,7 @@ func TestRetrievalRenewsLeaseWithProgressDuringUpload(t *testing.T) {
 	transport.ResponseHeaderTimeout = 40 * time.Second
 	client.Transport = transport
 	defer transport.CloseIdleConnections()
-	executeRetrieval(ctx, cfg, cfg.ControlURL+"/sessions/owner", retrievalClaim{JobID: "job", AttemptID: "attempt", Token: "token", ClaimExpiresAt: time.Now().Add(32 * time.Second), Permit: envelope}, pacs.Client(), client, provider, status)
+	executeRetrieval(ctx, cfg, cfg.ControlURL+"/sessions/owner", retrievalClaim{JobID: "job", AttemptID: "attempt", Token: "token", ClaimExpiresAt: time.Now().Add(32 * time.Second), Permit: envelope}, client, provider, status)
 	if result.Outcome != "uploaded" || len(result.Studies) != 1 {
 		t.Fatalf("renewed transfer outcome=%s", result.Outcome)
 	}
