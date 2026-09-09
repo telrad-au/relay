@@ -1,5 +1,16 @@
 # Relay testing
 
+The optional AWS runner has local tests that create no cloud resources or traffic:
+
+```bash
+npm ci --ignore-scripts --prefix tools/relay-perf/aws
+npm test --prefix tools/relay-perf/aws
+python3 -m unittest discover -s tools/relay-perf/aws -p 'test_*.py'
+```
+
+See [performance qualification](performance.md#disposable-aws-screening) for the
+explicit command that provisions, measures and removes two isolated AWS VMs.
+
 The default suite uses local loopback TLS/HTTP, MLLP, and byte-level DICOM
 fixtures. Tests contain synthetic identifiers only.
 
@@ -13,6 +24,16 @@ scripts/check-publication.sh
 
 Some managed development environments require permission for loopback sockets;
 that is an environment restriction, not a product failure.
+
+## Performance measurements
+
+[Performance qualification](performance.md) defines the frozen synthetic profile,
+benchmark commands, constrained release-container smoke, fault checks, native
+observations and the evidence required before publishing minimum requirements.
+CI includes benchmark smoke execution and a bounded constrained-resource check;
+long qualification is explicit and has no shared-runner throughput gate. The
+shared HL7 fixtures live in `internal/synthetic/hl7` and remain independently
+validated with HAPI.
 
 ## Contract coverage
 
@@ -170,8 +191,8 @@ The lifecycle test's temporary CA stays on the disposable host and is removed af
 They require `TELRAD_NATIVE_INSTALL_TEST=1`; do not run them on a clinic host.
 Cross-compilation alone does not validate SCM, UAC, Windows ACLs, or systemd.
 
-The Linux coverage gate combines race-enabled unit and installed-process coverage
-using Go's `covdata merge -pcombine` command. Both collect binary coverage data;
+The Linux coverage gate combines race-enabled unit, installed-process and
+performance-helper coverage using Go's `covdata merge -pcombine` command. All collect binary coverage data;
 the existing 69% total threshold still applies.
 
 Container builds use `-tags relay_container`. CI checks the dependency exclusion,

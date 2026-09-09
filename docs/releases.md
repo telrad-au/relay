@@ -491,3 +491,12 @@ Do not publish or activate retrieval based only on unit tests, the cloud simulat
 or the Orthanc/synthetic-cloud harness. Require the [joint qualification evidence](testing.md#retrieval-v2),
 coordinated mode discovery, schema-v5 upgrade/rollback review and clinic approval
 of the exact signed build. Keep the platform switch disabled until those gates pass.
+
+## Performance evidence
+
+Reuse the selected profile and measurement procedure in
+[performance qualification](performance.md) for release validation. A CI smoke
+pass is correctness evidence only. Retain the exact image/source identity and
+resolved workload with repeated native Linux/Windows measurements before updating
+a published minimum tested configuration. Unresolved fault recovery or missing
+native evidence blocks that claim, without changing release trust boundaries.

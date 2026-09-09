@@ -15,6 +15,12 @@ Native installation is the simplest option. After installation, `telrad`
 prints a link that an authorized clinic administrator uses to approve the
 host.
 
+### System requirements
+
+**Tested size:** Linux x64 VM with 2 vCPUs, 512 MiB RAM and 8 GiB disk (AWS `t3a.nano`).
+**Estimated capacity:** approximately **200 mixed studies/hour** at 100 Mbit/s with
+four DICOM connections.
+
 ### Linux service
 
 ```bash

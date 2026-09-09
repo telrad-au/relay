@@ -21,7 +21,7 @@ import java.util.Set;
 
 public final class ValidateFixtures {
     private static final Path SOURCE_ROOT = Path.of("../..").toAbsolutePath().normalize();
-    private static final Path FIXTURE_ROOT = SOURCE_ROOT.resolve("cmd/telrad-relay/testdata/hl7");
+    private static final Path FIXTURE_ROOT = SOURCE_ROOT.resolve("internal/synthetic/hl7");
     private static final Path PROFILE_ROOT = Path.of("src/main/resources").toAbsolutePath().normalize();
 
     private ValidateFixtures() {
