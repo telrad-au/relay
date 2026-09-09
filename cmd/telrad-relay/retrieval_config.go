@@ -11,6 +11,7 @@ import (
 	"errors"
 	"net/netip"
 	"net/url"
+	"path"
 	"path/filepath"
 	"runtime"
 	"slices"
@@ -109,7 +110,7 @@ func validateRetrievalConfig(cfg *config) error {
 			return retrieval.ErrPolicy
 		}
 		u, _ := url.Parse(p.DICOMwebURL)
-		if u.RawPath != "" || u.Path == "/" || filepath.Clean(u.Path) != u.Path {
+		if u.RawPath != "" || u.Path == "/" || path.Clean(u.Path) != u.Path {
 			return retrieval.ErrPolicy
 		}
 		if p.Adapter != "dicomweb-qido-wado-v1" || p.MaxInstanceBytes < 1 || p.MaxInstanceBytes > maxDICOMRequestBytes || p.MaxStudyBytes < p.MaxInstanceBytes || p.MaxStudyBytes > 64*maxDICOMRequestBytes || p.MaxInstances < 1 || p.MaxInstances > 1000000 || p.RequestTimeoutSeconds < 1 || p.RequestTimeoutSeconds > 300 {
