@@ -78,7 +78,7 @@ jobs:
                   TELRAD_ORTHANC_INTEROP_TEST: "1"
               run: go test -race ./cmd/telrad-relay -run '^TestOrthancDICOMPayloadIntegrity$' -count=1 -timeout=5m
 
-            - name: Test actual Relay QIDO/WADO retrieval and restart
+            - name: Test actual Relay DICOMweb and DIMSE retrieval and restart
               env:
                   TELRAD_RETRIEVAL_ORTHANC_TEST: "1"
               run: go test -race ./cmd/telrad-relay -run '^TestRetrievalOrthancBinaryRestart$' -count=1 -timeout=4m

@@ -225,7 +225,11 @@ func executeRetrieval(parent context.Context, cfg *config, sessionURL string, cl
 		}
 		var selected []string
 		if err == nil {
-			selected, err = queryAccession(ctx, pacsClient, originalPACS, p)
+			if originalPACS.Adapter == "dimse-find-get-v1" {
+				selected, err = queryDIMSEAccession(ctx, originalPACS, p)
+			} else {
+				selected, err = queryAccession(ctx, pacsClient, originalPACS, p)
+			}
 		}
 		if err == nil {
 			body := claim.body()
@@ -243,7 +247,11 @@ func executeRetrieval(parent context.Context, cfg *config, sessionURL string, cl
 		if err == nil {
 			for _, study := range selected {
 				var transferred retrievalStudyResult
-				transferred, err = retrieveWADO(ctx, pacsClient, cloudClient, cfg, provider, status, originalPACS, p, study, claim.AttemptID, recheck, &progress)
+				if originalPACS.Adapter == "dimse-find-get-v1" {
+					transferred, err = retrieveCGET(ctx, cloudClient, cfg, provider, status, originalPACS, p, study, claim.AttemptID, recheck, &progress)
+				} else {
+					transferred, err = retrieveWADO(ctx, pacsClient, cloudClient, cfg, provider, status, originalPACS, p, study, claim.AttemptID, recheck, &progress)
+				}
 				if err != nil {
 					progress.failed.Add(1)
 					break
@@ -262,6 +270,9 @@ func executeRetrieval(parent context.Context, cfg *config, sessionURL string, cl
 			zero := 0
 			result.Outcome = "uploaded"
 			result.RetrievalMethod = "WADO_RS"
+			if originalPACS.Adapter == "dimse-find-get-v1" {
+				result.RetrievalMethod = "C_GET"
+			}
 			result.OutstandingUploads = &zero
 		}
 	}

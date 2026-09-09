@@ -151,10 +151,10 @@ The exact correlated AA/AE/AR is returned after cloud processing, without waitin
 for images. AE/AR remain negative application acknowledgements. A mode change
 can reject in-flight signed work; sender retry/reconciliation is required.
 
-## Qualified adapter profile
+## Draft adapter profiles
 
-The initial adapter uses study-level QIDO-RS and complete-study WADO-RS over a
-locally configured HTTPS base URL, with system certificate verification and no
+The `dicomweb-qido-wado-v1` adapter uses study-level QIDO-RS and complete-study
+WADO-RS over a locally configured HTTPS base URL, with system certificate verification and no
 redirects. PACS requests use a separate direct transport with no cloud bearer or
 environment proxy. This profile expects a clinic endpoint that requires no
 additional HTTP authentication. Other PACS authentication/profile requirements
@@ -170,21 +170,46 @@ never silently truncates. All current selected UIDs must be confirmed by the
 cloud before WADO starts; later attempts query again.
 
 WADO must return a complete `multipart/related` response containing Part 10
-objects. The parser supports Explicit VR Little Endian and the existing listed
+objects. The parser supports Explicit and Implicit VR Little Endian and the existing listed
 encapsulated transfer syntaxes encoded with explicit little-endian elements.
-Implicit VR, Big Endian and deflated datasets require a separately qualified
+Big Endian and deflated datasets require a separately qualified
 parser and are rejected by this adapter. Dataset elements must be ordered;
-identity metadata is bounded to 1 MiB. Namespaces use ASCII or UTF-8 and must be
-present in the object itself. No byte conversion or transfer-syntax negotiation
+identity metadata is bounded to 1 MiB. Namespaces use ASCII or UTF-8 (Latin-1
+declarations require ASCII identity values) and must be present in the object itself. No byte conversion or transfer-syntax negotiation
 that requests transcoding is performed.
 
-The adapter has no standardized acquisition-completion query: it reports
+The `dimse-find-get-v1` profile uses Study Root C-FIND by accession, confirms
+all matching Study Instance UIDs with the cloud, and retrieves each study with
+C-GET. Its local PACS entry replaces `dicomwebUrl` with `host`, `port`,
+`calledAETitle`, `callingAETitle`, and `storageSopClasses` (1–63 distinct Storage
+SOP Class UIDs). For example, CT Image Storage is `1.2.840.10008.5.1.4.1.1.2`
+and MR Image Storage is `1.2.840.10008.5.1.4.1.1.4`. The existing namespace,
+size/count and timeout limits still apply. The host and both AE titles are
+locally approved; cloud jobs cannot supply network destinations.
+
+This basic DIMSE profile accepts ASCII accessions up to 16 bytes and negotiates
+separate Explicit and Implicit VR Little Endian storage contexts. The PACS must
+accept Relay's Storage SCP role on the outbound C-GET association; no inbound
+Relay listener or C-MOVE destination is needed. Compressed, Big Endian and
+deflated storage are outside this profile. Configure the PACS to preserve the
+stored transfer syntax; Relay never transcodes. Dataset bytes are streamed
+unchanged with a generated Part 10 header describing the negotiated syntax.
+Each C-STORE success waits for its own fresh cloud HTTP 201 receipt.
+
+No patient identifier is queried or required. A missing/empty optional accession
+issuer uses the approved clinic/PACS namespace; a supplied conflicting local
+issuer is rejected. Discovery rejects duplicate studies, more than 64 results,
+and failed final responses. Partial datasets, rejected storage roles, warning or
+failed C-GET results, inconsistent suboperation counters and failed cloud receipts
+cannot report successful retrieval. Cancellation closes the association and upload.
+
+Neither adapter has a standardized acquisition-completion query: each reports
 `not_provided` and uses the signed order under the fixed PACS-or-order rule.
 This is an adapter limitation, not a configurable readiness policy. It does not
 interpret Orthanc stability timers, retired status tags or instance counts as
 completion. A PACS with a vendor completion API or expected SOP inventory needs
 an adapter that queries and preserves that evidence before qualification. Failed
-QIDO/WADO responses never become successful order fallback.
+QIDO/WADO or DIMSE responses never become successful order fallback.
 
 Every object gets a separate HTTPS upload and a fresh valid HTTP 201 receipt,
 including retransmissions. Only retrieval uploads carry the active attempt ID.

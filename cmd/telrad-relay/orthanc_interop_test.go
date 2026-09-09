@@ -757,8 +757,11 @@ func startOrthancContainer(t *testing.T, ctx context.Context, role string, modal
 		"--add-host", "host.docker.internal:host-gateway",
 		"--publish", "127.0.0.1::8042",
 		"--mount", "type=bind,source=" + realConfigPath + ",target=/etc/orthanc/orthanc.json,readonly",
-		orthancInteropImage,
 	}
+	if enabled, _ := configuration["DicomServerEnabled"].(bool); enabled {
+		arguments = append(arguments, "--publish", "127.0.0.1::4242")
+	}
+	arguments = append(arguments, orthancInteropImage)
 	if output, err := exec.CommandContext(ctx, "docker", arguments...).CombinedOutput(); err != nil {
 		t.Fatalf("start Orthanc %s: %v\n%s", role, err, output)
 	}

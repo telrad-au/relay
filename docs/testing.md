@@ -196,12 +196,14 @@ TELRAD_RETRIEVAL_ORTHANC_TEST=1 go test -race ./cmd/telrad-relay \
 ```
 
 This builds and starts the actual Relay process, runs real Orthanc QIDO/WADO
-through a loopback TLS endpoint, sends an MLLP referral, receives the ACK, observes
+through a loopback TLS endpoint and C-FIND/C-GET over loopback DICOM associations, sends an MLLP referral, receives the ACK, observes
 study selection and uploads, stops Relay, adds another matching study, and repeats
 using the original permit. Relay's inbound DICOM port is deliberately unavailable;
 the listener is disabled. Only credentials, configuration, key and nonclinical
 runtime status survive. The container uses the pinned Orthanc image documented
-above with the DICOMweb plugin, full study metadata and no inbound DICOM service.
+above with the DICOMweb plugin and full study metadata. The DIMSE subtest enables
+Orthanc DICOM on a dynamically published loopback port and retrieves both native
+little-endian transfer syntaxes without patient or issuer tags.
 All fixture containers are removed. This test uses a synthetic cloud HTTP server.
 
 **Activation gate:** passing this harness and the real cloud conformance suite
@@ -211,8 +213,8 @@ pipeline and this PACS profile, including restart and late studies. Verify cloud
 readiness, not merely an uploaded result. Record the exact source commit, binary
 version/digest, PACS version/configuration, study/inventory outcomes and recovery
 review. Qualify vendor completion evidence, in-progress/error states and expected
-SOP mismatch on any adapter that provides that information; the initial generic
-DICOMweb adapter supports only completion-unavailable/order fallback.
+SOP mismatch on any adapter that provides that information; the generic
+DICOMweb and DIMSE adapters support only completion-unavailable/order fallback.
 
 The native Linux/Windows install-and-rollback jobs and container build remain
 required before release. Cross-builds and simulated installer tests do not prove

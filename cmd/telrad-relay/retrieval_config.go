@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strings"
 
 	"github.com/telrad-au/relay/internal/retrieval"
 )
@@ -30,14 +31,19 @@ type retrievalConfig struct {
 	Policies          []referralPolicy `json:"policies"`
 }
 type retrievalPACS struct {
-	ID                    string `json:"id"`
-	DICOMwebURL           string `json:"dicomwebUrl"`
-	AccessionIssuer       string `json:"accessionIssuer"`
-	MaxStudyBytes         int64  `json:"maxStudyBytes"`
-	MaxInstanceBytes      int64  `json:"maxInstanceBytes"`
-	MaxInstances          int    `json:"maxInstances"`
-	RequestTimeoutSeconds int    `json:"requestTimeoutSeconds"`
-	// This first adapter has no completion API. Other PACS profiles need a
+	ID                    string   `json:"id"`
+	DICOMwebURL           string   `json:"dicomwebUrl,omitempty"`
+	Host                  string   `json:"host,omitempty"`
+	Port                  int      `json:"port,omitempty"`
+	CalledAETitle         string   `json:"calledAETitle,omitempty"`
+	CallingAETitle        string   `json:"callingAETitle,omitempty"`
+	StorageSOPClasses     []string `json:"storageSopClasses,omitempty"`
+	AccessionIssuer       string   `json:"accessionIssuer"`
+	MaxStudyBytes         int64    `json:"maxStudyBytes"`
+	MaxInstanceBytes      int64    `json:"maxInstanceBytes"`
+	MaxInstances          int      `json:"maxInstances"`
+	RequestTimeoutSeconds int      `json:"requestTimeoutSeconds"`
+	// These generic adapters have no completion API. Other PACS profiles need a
 	// qualified adapter; this is not an operator-selectable completion policy.
 	Adapter string `json:"adapter"`
 }
@@ -104,16 +110,36 @@ func validateRetrievalConfig(cfg *config) error {
 			return retrieval.ErrPolicy
 		}
 		ids[p.ID] = true
-		if validateEndpointURL("dicomwebUrl", p.DICOMwebURL, "https", "") != nil {
+		switch p.Adapter {
+		case "dimse-find-get-v1":
+			if p.DICOMwebURL != "" || !validRetrievalHost(p.Host) || p.Port < 1 || p.Port > 65535 || !validRetrievalAE(p.CalledAETitle) || !validRetrievalAE(p.CallingAETitle) || len(p.StorageSOPClasses) < 1 || len(p.StorageSOPClasses) > 63 {
+				return retrieval.ErrPolicy
+			}
+			classes := map[string]bool{}
+			for _, class := range p.StorageSOPClasses {
+				if !isStorageSOPClass(class) || classes[class] {
+					return retrieval.ErrPolicy
+				}
+				classes[class] = true
+			}
+		case "dicomweb-qido-wado-v1":
+			if p.Host != "" || p.Port != 0 || p.CalledAETitle != "" || p.CallingAETitle != "" || len(p.StorageSOPClasses) != 0 {
+				return retrieval.ErrPolicy
+			}
+			if validateEndpointURL("dicomwebUrl", p.DICOMwebURL, "https", "") != nil {
+				return retrieval.ErrPolicy
+			}
+			u, _ := url.Parse(p.DICOMwebURL)
+			if u.RawPath != "" || u.Path == "/" || path.Clean(u.Path) != u.Path {
+				return retrieval.ErrPolicy
+			}
+		default:
 			return retrieval.ErrPolicy
 		}
-		u, _ := url.Parse(p.DICOMwebURL)
-		if u.RawPath != "" || u.Path == "/" || path.Clean(u.Path) != u.Path {
+		if p.MaxInstanceBytes < 1 || p.MaxInstanceBytes > maxDICOMRequestBytes || p.MaxStudyBytes < p.MaxInstanceBytes || p.MaxStudyBytes > 64*maxDICOMRequestBytes || p.MaxInstances < 1 || p.MaxInstances > 1000000 || p.RequestTimeoutSeconds < 1 || p.RequestTimeoutSeconds > 300 {
 			return retrieval.ErrPolicy
 		}
-		if p.Adapter != "dicomweb-qido-wado-v1" || p.MaxInstanceBytes < 1 || p.MaxInstanceBytes > maxDICOMRequestBytes || p.MaxStudyBytes < p.MaxInstanceBytes || p.MaxStudyBytes > 64*maxDICOMRequestBytes || p.MaxInstances < 1 || p.MaxInstances > 1000000 || p.RequestTimeoutSeconds < 1 || p.RequestTimeoutSeconds > 300 {
-			return retrieval.ErrPolicy
-		}
+
 	}
 	ids = map[string]bool{}
 	for _, p := range r.Policies {
@@ -256,4 +282,31 @@ func readPermitSigningKey(cfg *config) (ed25519.PrivateKey, error) {
 		return nil, retrieval.ErrTrust
 	}
 	return key, nil
+}
+
+func validRetrievalAE(s string) bool {
+	return len(s) <= 16 && validAETitle([]byte(s)) && strings.TrimSpace(s) == s
+}
+
+func validRetrievalHost(s string) bool {
+	if s == "" || strings.TrimSpace(s) != s {
+		return false
+	}
+	if a, e := netip.ParseAddr(s); e == nil {
+		return !a.IsUnspecified() && !a.IsMulticast() && a.Zone() == ""
+	}
+	if len(s) > 253 {
+		return false
+	}
+	for _, label := range strings.Split(s, ".") {
+		if len(label) < 1 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return false
+		}
+		for _, c := range label {
+			if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-') {
+				return false
+			}
+		}
+	}
+	return true
 }

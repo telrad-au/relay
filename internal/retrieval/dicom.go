@@ -12,25 +12,36 @@ import (
 var ErrIdentity = errors.New("identity_mismatch")
 var ErrPartial = errors.New("partial_transfer")
 
-// DICOMStream qualifies Explicit VR Little Endian datasets, including
+// DICOMStream qualifies native little-endian datasets, including
 // encapsulated pixel data. It buffers only the identity prefix (at most 1 MiB),
 // then validates/copies the remainder with cloud backpressure. No transcoding.
 // Other transfer syntaxes require their own qualified parser, not a guess.
 type DICOMStream struct {
-	reader    *bufio.Reader
-	prefix    bytes.Buffer
-	writer    io.Writer
-	values    map[uint32]string
-	last      uint32
-	bytes     int64
-	limit     int64
-	SOP       string
-	metaSOP   string
-	metaClass string
+	reader      *bufio.Reader
+	prefix      bytes.Buffer
+	writer      io.Writer
+	values      map[uint32]string
+	last        uint32
+	bytes       int64
+	limit       int64
+	SOP         string
+	metaSOP     string
+	metaClass   string
+	implicit    bool
+	localIssuer bool
 }
 
 func OpenDICOM(r io.Reader, p Permit, study string, limit int64) (*DICOMStream, error) {
-	d := &DICOMStream{reader: bufio.NewReaderSize(r, 32768), values: map[uint32]string{}, limit: limit}
+	return openDICOM(r, p, study, limit, false)
+}
+
+// OpenDIMSEDICOM uses the locally approved accession namespace when basic PACS
+// omit the optional issuer sequence. A supplied conflicting issuer still fails.
+func OpenDIMSEDICOM(r io.Reader, p Permit, study string, limit int64) (*DICOMStream, error) {
+	return openDICOM(r, p, study, limit, true)
+}
+func openDICOM(r io.Reader, p Permit, study string, limit int64, localIssuer bool) (*DICOMStream, error) {
+	d := &DICOMStream{reader: bufio.NewReaderSize(r, 32768), values: map[uint32]string{}, limit: limit, localIssuer: localIssuer}
 	d.writer = &d.prefix
 	header := make([]byte, 132)
 	if d.read(header) != nil || string(header[128:]) != "DICM" {
@@ -74,7 +85,7 @@ func OpenDICOM(r io.Reader, p Permit, study string, limit int64) (*DICOMStream, 
 			d.metaSOP = value
 		case 0x00020010:
 			// Native explicit little endian or registered encapsulated syntaxes.
-			if value != "1.2.840.10008.1.2.1" && value != "1.2.840.10008.1.2.5" && !supportedEncapsulated(value) {
+			if value != "1.2.840.10008.1.2" && value != "1.2.840.10008.1.2.1" && value != "1.2.840.10008.1.2.5" && !supportedEncapsulated(value) {
 				return nil, ErrPolicy
 			}
 			d.values[tag] = value
@@ -83,6 +94,7 @@ func OpenDICOM(r io.Reader, p Permit, study string, limit int64) (*DICOMStream, 
 	if metaEnd != d.bytes || d.metaSOP == "" || !strings.HasPrefix(d.metaClass, "1.2.840.10008.5.1.4.1.1.") || d.values[0x00020010] == "" {
 		return nil, ErrPartial
 	}
+	d.implicit = d.values[0x00020010] == "1.2.840.10008.1.2"
 	for d.last < 0x0020000d {
 		if e := d.topElement(); e != nil {
 			return nil, e
@@ -91,13 +103,13 @@ func OpenDICOM(r io.Reader, p Permit, study string, limit int64) (*DICOMStream, 
 			return nil, ErrPolicy
 		}
 	}
-	if d.last != 0x0020000d || d.values[0x0020000d] != study || d.values[0x00080050] != p.Examination.Accession || d.values[0x00400031] != p.Examination.Issuer {
+	if d.last != 0x0020000d || d.values[0x0020000d] != study || d.values[0x00080050] != p.Examination.Accession || !d.matchesIssuer(p.Examination.Issuer) {
 		return nil, ErrIdentity
 	}
 	if d.values[0x00080016] != d.metaClass || d.values[0x00080018] != d.metaSOP {
 		return nil, ErrIdentity
 	}
-	if charset := d.values[0x00080005]; charset != "" && charset != "ISO_IR 6" && charset != "ISO_IR 192" {
+	if charset := d.values[0x00080005]; charset != "" && charset != "ISO_IR 6" && charset != "ISO_IR 192" && !(charset == "ISO_IR 100" && asciiIdentity(d.values)) {
 		return nil, ErrPolicy
 	}
 	d.SOP = d.metaSOP
@@ -143,6 +155,19 @@ func (d *DICOMStream) element() (uint32, string, uint32, error) {
 	tag := uint32(binary.LittleEndian.Uint16(h[:2]))<<16 | uint32(binary.LittleEndian.Uint16(h[2:4]))
 	if tag>>16 == 0xfffe {
 		return tag, "", binary.LittleEndian.Uint32(h[4:]), nil
+	}
+	if d.implicit {
+		n := binary.LittleEndian.Uint32(h[4:])
+		if n != 0xffffffff && n%2 != 0 {
+			return 0, "", 0, ErrPartial
+		}
+		vr := map[uint32]string{0x00080005: "CS", 0x00080016: "UI", 0x00080018: "UI", 0x00080050: "SH", 0x00080051: "SQ", 0x00080052: "CS", 0x00100020: "LO", 0x00100021: "LO", 0x0020000d: "UI", 0x00400031: "UT"}[tag]
+		// Unknown defined-length values can be copied unchanged. Undefined-length
+		// implicit values must be item-encoded sequences (pixel data is separate).
+		if vr == "" && n == 0xffffffff && tag != 0x7fe00010 {
+			vr = "SQ"
+		}
+		return tag, vr, n, nil
 	}
 	vr := string(h[4:6])
 	var n uint32
@@ -191,9 +216,9 @@ func (d *DICOMStream) topElement() error {
 		return d.fragments()
 	}
 	switch tag {
-	case 0x00080005, 0x00080016, 0x00080018, 0x00080050, 0x00100020, 0x00100021, 0x0020000d:
+	case 0x00080005, 0x00080016, 0x00080018, 0x00080050, 0x00080052, 0x00100020, 0x00100021, 0x0020000d:
 
-		expectedVR := map[uint32]string{0x00080005: "CS", 0x00080016: "UI", 0x00080018: "UI", 0x00080050: "SH", 0x00100020: "LO", 0x00100021: "LO", 0x0020000d: "UI"}
+		expectedVR := map[uint32]string{0x00080005: "CS", 0x00080016: "UI", 0x00080018: "UI", 0x00080050: "SH", 0x00080052: "CS", 0x00100020: "LO", 0x00100021: "LO", 0x0020000d: "UI"}
 		if vr != expectedVR[tag] {
 			return ErrPartial
 		}
@@ -225,7 +250,7 @@ func (d *DICOMStream) sequence(n uint32, depth int, issuer bool) error {
 			if n != 0xffffffff || length != 0 {
 				return ErrPartial
 			}
-			if issuer && items != 1 {
+			if issuer && items != 1 && !(d.localIssuer && items == 0) {
 				return ErrIdentity
 			}
 			return nil
@@ -283,7 +308,7 @@ func (d *DICOMStream) sequence(n uint32, depth int, issuer bool) error {
 	if d.bytes != end {
 		return ErrPartial
 	}
-	if issuer && items != 1 {
+	if issuer && items != 1 && !(d.localIssuer && items == 0) {
 		return ErrIdentity
 	}
 	return nil
@@ -329,3 +354,48 @@ func (d *DICOMStream) WriteTo(w io.Writer) (int64, error) {
 }
 
 func (d *DICOMStream) TransferSyntax() string { return d.values[0x00020010] }
+
+func (d *DICOMStream) matchesIssuer(expected string) bool {
+	return d.values[0x00400031] == expected || (d.localIssuer && d.values[0x00400031] == "")
+}
+
+// StudyIdentifier validates a bounded C-FIND response in its negotiated syntax.
+func StudyIdentifier(data []byte, syntax string, p Permit) (string, error) {
+	if syntax != "1.2.840.10008.1.2" && syntax != "1.2.840.10008.1.2.1" {
+		return "", ErrPolicy
+	}
+	d := &DICOMStream{reader: bufio.NewReader(bytes.NewReader(data)), writer: io.Discard, values: map[uint32]string{}, limit: 1024 * 1024, implicit: syntax == "1.2.840.10008.1.2", localIssuer: true}
+	for {
+		_, e := d.reader.Peek(1)
+		if e == io.EOF {
+			break
+		}
+		if e != nil {
+			return "", ErrPartial
+		}
+		if e = d.topElement(); e != nil {
+			return "", e
+		}
+	}
+	if !UID(d.values[0x0020000d]) || d.values[0x00080050] != p.Examination.Accession || !d.matchesIssuer(p.Examination.Issuer) {
+		return "", ErrIdentity
+	}
+	if level := d.values[0x00080052]; level != "" && level != "STUDY" {
+		return "", ErrIdentity
+	}
+	if cs := d.values[0x00080005]; cs != "" && cs != "ISO_IR 6" && cs != "ISO_IR 192" && !(cs == "ISO_IR 100" && asciiIdentity(d.values)) {
+		return "", ErrPolicy
+	}
+	return d.values[0x0020000d], nil
+}
+
+func asciiIdentity(values map[uint32]string) bool {
+	for _, tag := range []uint32{0x00080050, 0x00400031, 0x0020000d, 0x00080016, 0x00080018} {
+		for _, c := range values[tag] {
+			if c > 127 {
+				return false
+			}
+		}
+	}
+	return true
+}

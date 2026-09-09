@@ -171,3 +171,38 @@ func TestDICOMStopsOnBackpressureFailure(t *testing.T) {
 		t.Fatal("writer failure lost")
 	}
 }
+
+func TestDIMSEIssuerAndCharacterSet(t *testing.T) {
+	for _, tc := range []struct {
+		name, charset, accession string
+		issuer                   []byte
+		want                     error
+	}{
+		{"empty issuer", "", "ACC", nil, nil},
+		{"matching issuer", "ISO_IR 100", "ACC", syntheticIssuer(), nil},
+		{"foreign issuer", "", "ACC", dicomItem(0xfffee000, dicomElement(0x00400031, "UT", []byte("OTHER"))), ErrIdentity},
+		{"latin1 non-ascii identity", "ISO_IR 100", "Aé", nil, ErrPolicy},
+		{"unsupported charset", "ISO 2022 IR 87", "ACC", nil, ErrPolicy},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := fixturePermit()
+			p.Examination.Accession = tc.accession
+			data := dicomElement(0x00080005, "CS", []byte(tc.charset))
+			data = append(data, dicomElement(0x00080050, "SH", []byte(tc.accession))...)
+			data = append(data, dicomElement(0x00080051, "SQ", tc.issuer)...)
+			data = append(data, dicomElement(0x00080052, "CS", []byte("STUDY"))...)
+			data = append(data, dicomElement(0x0020000d, "UI", []byte("1.2.3"))...)
+			uid, err := StudyIdentifier(data, "1.2.840.10008.1.2.1", p)
+			if !errors.Is(err, tc.want) || (err == nil && uid != "1.2.3") {
+				t.Fatalf("discovery identity: %v", err)
+			}
+			object := syntheticDICOM("1.2.840.10008.1.2.1", tc.issuer, 4)
+			if tc.accession == "ACC" && tc.charset == "" {
+				_, err = OpenDIMSEDICOM(bytes.NewReader(object), p, "1.2.3", int64(len(object)))
+				if !errors.Is(err, tc.want) {
+					t.Fatalf("object identity: %v", err)
+				}
+			}
+		})
+	}
+}
