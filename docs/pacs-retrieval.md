@@ -7,6 +7,27 @@ Retrieve also accepts ordinary pushed DICOM. Do not publish a release or enable
 requires the actual Relay build, clinic source feed, PACS profile and cloud
 receipt pipeline to pass qualification together.
 
+## Choosing the PACS connection mode
+
+See [Connect your PACS or RIS](../README.md#connect-your-pacs-or-ris) for the
+connection overview and default ports.
+
+- **Push:** the PACS opens a local DICOM connection to Relay and sends images
+  using C-STORE. It is the default and does not query the PACS after an order.
+- **Retrieve:** an approved HL7 order authorizes an accession; Relay opens the
+  PACS connection, finds matching studies and requests their images. Ordinary
+  C-STORE push can remain enabled alongside retrieval.
+
+The intended clinic adapter uses C-FIND and C-GET. C-GET returns C-STORE operations
+on the Relay-initiated association, without a callback connection or C-MOVE.
+**That adapter is not implemented yet.** The configuration below describes the
+current DICOMweb QIDO-RS/WADO-RS draft and cannot be used to connect a DIMSE-only
+PACS. Retrieval must remain disabled until the clinic's adapter and the cloud
+receipt pipeline have been qualified together.
+
+Both modes forward images to Telrad over outbound HTTPS. RIS order delivery and
+report return use the same local HL7 connections in either mode.
+
 ## Authority and storage
 
 A locally approved ORM O01 referral grants permanent access to every study under

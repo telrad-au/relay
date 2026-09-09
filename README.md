@@ -103,26 +103,68 @@ from that one administrator-approved origin.
 
 ## Connect your PACS or RIS
 
-Once Relay is running, point clinic systems to the Relay host's LAN address:
+There are two PACS connection modes: **Push** and **Retrieve**. Push is the
+available default. Retrieve is in development; the intended clinic workflow uses
+C-FIND and C-GET, as described below.
 
-- DICOM: any valid called AE title (for example `TELRAD`), TCP port `11112`;
-- HL7: MLLP, TCP port `2575`; and
-- report return: TCP port `2576` at the configured report receiver.
+| Mode | How studies reach Relay | Who opens the clinic connection? | When images are transferred |
+| --- | --- | --- | --- |
+| **Push** | The PACS sends images using DICOM C-STORE. | PACS → Relay | When the PACS sends or routes a study to Telrad. |
+| **Retrieve** (in development) | Relay finds studies by accession with C-FIND, then requests them with C-GET. | Relay → PACS | After an approved HL7 order authorizes retrieval and Telrad schedules the transfer. |
 
-Allow only the required clinic systems to reach these ports. Validate the
-route with approved test traffic before sending clinical data.
+In both modes, Relay forwards images to Telrad over outbound HTTPS on TCP `443`.
+Neither mode requires an inbound internet firewall rule or direct cloud access
+to the PACS.
 
-Report return uses HTTPS polling, with up to three seconds of idle pickup
-latency. Telrad retains the delivery queue; Relay has no local delivery ledger.
-If delivery succeeds but its confirmation is lost, the RIS may receive the
-same report and message control ID again. The receiver must handle duplicates.
+### Push mode
 
-## Optional PACS retrieval
+Add Relay as a DICOM destination in your PACS:
 
-Schema v5 adds opt-in, clinic-authorized accession retrieval through QIDO-RS and
-WADO-RS. It keeps ordinary DICOM push and report return available. See the
-[retrieval provisioning and qualification guide](docs/pacs-retrieval.md) before
-enabling it; rollout requires the coordinated cloud mode-discovery endpoint.
+- **Host:** the Relay host's LAN address.
+- **Port:** TCP `11112` by default.
+- **Called AE title:** any valid AE title, for example `TELRAD`.
+
+Allow the PACS to connect to Relay on that local port, then configure manual
+sending or automatic routing in the PACS. C-ECHO checks connectivity; validate
+actual C-STORE transfer with approved test images before sending clinical data.
+Push mode does not query the PACS or fetch images in response to an order.
+
+### Retrieve mode (in development)
+
+The planned DICOM connection uses the PACS's query/retrieve address, port and
+called AE title, with a clinic-approved calling AE title for Relay. The PACS must
+allow Relay to perform C-FIND and C-GET. Allow Relay to reach that PACS port on the
+clinic network.
+
+An approved HL7 order supplies the accession. Relay searches the configured PACS
+within the approved accession namespace and retrieves every matching study.
+Patient ID is not required for the lookup or authorization. Later retrievals can
+find additional studies and images under the same accession.
+
+C-GET returns images as C-STORE operations over the association Relay opened.
+It does not require a separate PACS-to-Relay callback connection or C-MOVE
+configuration. Retrieve mode can also accept ordinary pushed images; keep
+Relay's DICOM listener and its local firewall rule enabled if you need both.
+
+**Implementation status:** the current draft adapter uses DICOMweb QIDO-RS and
+WADO-RS. C-FIND/C-GET is not implemented yet, so this draft is not ready for a
+PACS that supports only those basic DICOM protocols. Retrieve remains opt-in and
+requires coordinated cloud support, local authorization configuration and joint
+qualification before activation. See the [retrieval provisioning guide](docs/pacs-retrieval.md)
+for the current draft's configuration and limitations.
+
+### RIS orders and report return (both modes)
+
+Point the RIS's HL7 sender to the Relay host's LAN address on MLLP TCP `2575`.
+Configure Relay to deliver returned reports to the RIS/report receiver's LAN
+address and listening port, TCP `2576` by default. The report receiver opens that
+listener; Relay connects to it. Restrict each local port to the required clinic
+systems and validate the routes with approved test traffic.
+
+Report return uses outbound HTTPS polling, with up to three seconds of idle
+pickup latency. Telrad retains the delivery queue; Relay has no local delivery
+ledger. If delivery succeeds but its confirmation is lost, the RIS may receive
+the same report and message control ID again. The receiver must handle duplicates.
 
 ## Check and manage Relay
 
