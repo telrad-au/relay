@@ -197,3 +197,45 @@ the existing 69% total threshold still applies.
 
 Container builds use `-tags relay_container`. CI checks the dependency exclusion,
 non-root UID, read-only root filesystem, and absence of native-service assumptions.
+
+## Retrieval v2
+
+The default race suite exercises the real strict Go verifier with the shared
+synthetic v2 vectors, independently signed malformed data, trust retirement,
+source-IP restrictions, multiple OBRs, cancellation, exact MLLP ACKs, immutable
+transport retries, per-attempt study confirmation, DIMSE/object validation,
+separate duplicate uploads, failed receipts, expiry cancellation and restart
+with later matching Study UIDs. Configuration migration keeps push defaults.
+Fixtures contain synthetic public verification vectors only; private test keys
+are generated at runtime. The vector seed is intentionally excluded.
+
+Run actual-binary Orthanc interoperability on a disposable Linux Docker host:
+
+```sh
+TELRAD_RETRIEVAL_ORTHANC_TEST=1 go test -race ./cmd/telrad-relay \
+  -run '^TestRetrievalOrthancBinaryRestart$' -count=1 -timeout=4m -v
+```
+
+This builds and starts the actual Relay process, runs real Orthanc C-FIND/C-GET
+over loopback DICOM associations, sends an MLLP referral, receives the ACK, observes
+study selection and uploads, stops Relay, adds another matching study, and repeats
+using the original permit. Relay's inbound DICOM port is deliberately unavailable;
+the listener is disabled. Only credentials, configuration, key and nonclinical
+runtime status survive. The container uses the pinned Orthanc image documented
+above with DICOM on a dynamically published loopback port. It retrieves both
+native little-endian transfer syntaxes without patient or issuer tags.
+All fixture containers are removed. This test uses a synthetic cloud HTTP server.
+
+**Activation gate:** passing this harness and the real cloud conformance suite
+separately does not qualify their combined deployment. Before enabling retrieval,
+run the actual Relay against the real cloud HTTPS ingestion/definitive receipt
+pipeline and this PACS profile, including restart and late studies. Verify cloud
+readiness, not merely an uploaded result. Record the exact source commit, binary
+version/digest, PACS version/configuration, study/inventory outcomes and recovery
+review. Qualify vendor completion evidence, in-progress/error states and expected
+SOP mismatch on any adapter that provides that information; the DIMSE
+profile supports only completion-unavailable/order fallback.
+
+The native Linux/Windows install-and-rollback jobs and container build remain
+required before release. Cross-builds and simulated installer tests do not prove
+Windows SCM/ACL or installed systemd behavior on a production clinic host.

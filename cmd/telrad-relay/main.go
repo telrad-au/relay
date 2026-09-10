@@ -34,7 +34,7 @@ var (
 )
 
 const (
-	currentConfigSchemaVersion = 4
+	currentConfigSchemaVersion = 5
 	protocolVersion            = "1"
 	maxCloudResponseBytes      = 64 * 1024
 	serviceDrainTimeout        = 60 * time.Second
@@ -46,6 +46,8 @@ const (
 )
 
 type config struct {
+	Retrieval                  *retrievalConfig `json:"retrieval,omitempty"`
+	DisableDICOMListener       bool             `json:"disableDicomListener,omitempty"`
 	commandOutput              io.Writer
 	beforePairingCommit        func() error
 	SchemaVersion              int    `json:"schemaVersion"`
@@ -154,6 +156,9 @@ func execute(args []string) error {
 	if command == "version" {
 		fmt.Println(version)
 		return nil
+	}
+	if command == "retrieval-keygen" {
+		return generatePermitKey(*configPath)
 	}
 	if command == "migrate-config" {
 		if nativeManagementEnabled(*configPath) && !platformAdministrator() {
@@ -596,16 +601,23 @@ func runClinicalWithContext(ctx context.Context, cfg *config, configPath string)
 	workCtx, cancelWork := context.WithCancel(context.WithoutCancel(ctx))
 	defer cancelWork()
 	limits := newConnectionLimiter(cfg)
-	dicomListener, err := net.Listen("tcp", net.JoinHostPort(cfg.ListenAddress, strconv.Itoa(cfg.DicomPort)))
+	var dicomListener net.Listener
+	if !cfg.DisableDICOMListener {
+		dicomListener, err = net.Listen("tcp", net.JoinHostPort(cfg.ListenAddress, strconv.Itoa(cfg.DicomPort)))
+	}
 	if err != nil {
 		return fmt.Errorf("listen for DICOM: %w", err)
 	}
 	hl7Listener, err := net.Listen("tcp", net.JoinHostPort(cfg.ListenAddress, strconv.Itoa(cfg.HL7Port)))
 	if err != nil {
-		_ = dicomListener.Close()
+		if dicomListener != nil {
+			_ = dicomListener.Close()
+		}
 		return fmt.Errorf("listen for HL7: %w", err)
 	}
-	defer dicomListener.Close()
+	if dicomListener != nil {
+		defer dicomListener.Close()
+	}
 	defer hl7Listener.Close()
 	status.SetIngestReady(true)
 	errCh := make(chan error, 8)
@@ -617,7 +629,9 @@ func runClinicalWithContext(ctx context.Context, cfg *config, configPath string)
 		superviseControl(ctx, workCtx, cfg, clients.secure, provider, credentialChanged, work, status)
 	}()
 	go maintainRuntimeStatus(ctx, status, errCh)
-	go acceptRelayConnections(ctx, "dicom", dicomListener, work, limits, func(conn net.Conn) { serveDICOM(workCtx, conn, cfg, clients.secure, provider, status) }, errCh)
+	if dicomListener != nil {
+		go acceptRelayConnections(ctx, "dicom", dicomListener, work, limits, func(conn net.Conn) { serveDICOM(workCtx, conn, cfg, clients.secure, provider, status) }, errCh)
+	}
 	go acceptRelayConnections(ctx, "hl7", hl7Listener, work, limits, func(conn net.Conn) { serveHL7(workCtx, conn, cfg, clients.secure, provider, status) }, errCh)
 	select {
 	case <-ctx.Done():
@@ -721,7 +735,9 @@ func resetCredentialExpiryTimer(timer *time.Timer, provider *credentialProvider)
 func drainRelayWork(work *workDrainer, listeners ...net.Listener) error {
 	drained := work.BeginDrain()
 	for _, listener := range listeners {
-		_ = listener.Close()
+		if listener != nil {
+			_ = listener.Close()
+		}
 	}
 	timer := time.NewTimer(serviceDrainTimeout)
 	defer timer.Stop()
@@ -736,6 +752,14 @@ func drainRelayWork(work *workDrainer, listeners ...net.Listener) error {
 func doctor(cfg *config) error { return doctorTo(cfg, os.Stdout) }
 
 func doctorTo(cfg *config, output io.Writer) error {
+	if retrievalEnabledLocal(cfg) {
+		key, err := readPermitSigningKey(cfg)
+		if err != nil {
+			return err
+		}
+		zeroBytes(key)
+		fmt.Fprintln(output, "retrieval configuration and signing key ok; PACS qualification required")
+	}
 	if _, err := readCredentialFile(cfg.CredentialPath, time.Now()); err != nil {
 		return errors.New("stored credential is invalid")
 	}
@@ -813,7 +837,7 @@ func loadConfigMode(path string, migrate bool) (*config, error) {
 	if err := normalizeManagedCredential(cfg, path); err != nil {
 		return nil, err
 	}
-	if cfg.SchemaVersion == 3 && !migrate {
+	if (cfg.SchemaVersion == 3 || cfg.SchemaVersion == 4) && !migrate {
 		return nil, errors.New("configuration migration required; run migrate-config")
 	}
 	if migrate {
@@ -871,6 +895,9 @@ func applyConnectionDefaults(cfg *config) {
 }
 
 func validateConfig(cfg *config, command string) error {
+	if err := validateRetrievalConfig(cfg); err != nil {
+		return err
+	}
 	if cfg.SchemaVersion != currentConfigSchemaVersion {
 		return fmt.Errorf("schemaVersion %d is unsupported; expected %d", cfg.SchemaVersion, currentConfigSchemaVersion)
 	}
@@ -982,7 +1009,7 @@ func migrateConfig(path, pairingURL, updateURL, updateKey string) error {
 	var header struct {
 		SchemaVersion int `json:"schemaVersion"`
 	}
-	if json.Unmarshal(data, &header) == nil && (header.SchemaVersion == 3 || header.SchemaVersion == 4) {
+	if json.Unmarshal(data, &header) == nil && (header.SchemaVersion == 3 || header.SchemaVersion == 4 || header.SchemaVersion == 5) {
 		if pairingURL != "" || updateURL != "" || updateKey != "" {
 			return errors.New("polling migration preserves the existing origin and trust")
 		}

@@ -68,7 +68,7 @@ cat > "$OUTPUT_DIR/installation-manifest.json" <<EOF
   "schemaVersion": 1,
   "releaseVersion": "$VERSION",
   "components": {
-    "configuration": 4,
+    "configuration": 5,
     "linuxService": 3,
     "windowsService": 4,
     "windowsFirewall": 1,

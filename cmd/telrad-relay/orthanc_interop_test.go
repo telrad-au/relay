@@ -622,7 +622,7 @@ type orthancTestContainer struct {
 	closed atomic.Bool
 }
 
-func startOrthancContainer(t *testing.T, ctx context.Context, role string, modalities map[string]any) *orthancTestContainer {
+func startOrthancContainer(t *testing.T, ctx context.Context, role string, modalities map[string]any, options ...map[string]any) *orthancTestContainer {
 	t.Helper()
 	if modalities == nil {
 		modalities = map[string]any{}
@@ -640,6 +640,11 @@ func startOrthancContainer(t *testing.T, ctx context.Context, role string, modal
 		"DicomAssociationCloseDelay": 0,
 		"TranscodeDicomProtocol":     false,
 		"DicomModalities":            modalities,
+	}
+	for _, option := range options {
+		for key, value := range option {
+			configuration[key] = value
+		}
 	}
 	contents, err := json.MarshalIndent(configuration, "", "  ")
 	if err != nil {
@@ -659,8 +664,11 @@ func startOrthancContainer(t *testing.T, ctx context.Context, role string, modal
 		"--add-host", "host.docker.internal:host-gateway",
 		"--publish", "127.0.0.1::8042",
 		"--mount", "type=bind,source=" + realConfigPath + ",target=/etc/orthanc/orthanc.json,readonly",
-		orthancInteropImage,
 	}
+	if enabled, _ := configuration["DicomServerEnabled"].(bool); enabled {
+		arguments = append(arguments, "--publish", "127.0.0.1::4242")
+	}
+	arguments = append(arguments, orthancInteropImage)
 	if output, err := exec.CommandContext(ctx, "docker", arguments...).CombinedOutput(); err != nil {
 		t.Fatalf("start Orthanc %s: %v\n%s", role, err, output)
 	}

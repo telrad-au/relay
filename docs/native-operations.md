@@ -28,7 +28,7 @@ are secrets and must not appear in tickets or logs.
 ## Configuration and pairing
 
 Linux stores configuration and credentials in `/etc/telrad-relay`; Windows uses
-`%ProgramData%\Telrad\Relay`. Configuration schema `4` contains endpoint and
+`%ProgramData%\Telrad\Relay`. Configuration schema `5` contains endpoint and
 listener settings but no bearer value. `relay-credential.json` is protected by
 Unix mode `0600` under a `0700` directory or by the installer-managed Windows
 service ACL.
@@ -264,3 +264,9 @@ leaves it untouched.
 An interrupted updater leaves its protected transaction evidence in place and
 refuses another application. Repair it with a reviewed native installer; do not
 edit a journal to nominate recovery paths or execute a staged file manually.
+
+## Retrieval configuration
+
+Schema v4 upgrades to v5 with push unchanged. For permit-key provisioning, source
+restrictions, recovery and rollback, see [PACS retrieval](pacs-retrieval.md). Native
+permission repair preserves and protects `permit-signing-key.json`.

@@ -227,7 +227,7 @@ func TestMigrateConfigHardCutsV2AndRemovesCertificateMaterial(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.SchemaVersion != 4 || cfg.RelayID != "" || cfg.ControlURL != "" || cfg.DicomPort != 21112 || cfg.MaxConnections != 20 {
+	if cfg.SchemaVersion != currentConfigSchemaVersion || cfg.RelayID != "" || cfg.ControlURL != "" || cfg.DicomPort != 21112 || cfg.MaxConnections != 20 {
 		t.Fatalf("migrated config=%#v", cfg)
 	}
 	encoded, _ := os.ReadFile(path)

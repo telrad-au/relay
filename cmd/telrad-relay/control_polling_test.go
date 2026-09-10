@@ -177,7 +177,7 @@ func TestPollingSchemaUpgradePreservesCredentialsAndRejectsForeignOrigin(t *test
 			if err != nil {
 				t.Fatal(err)
 			}
-			if cfg.SchemaVersion != 4 || !strings.HasPrefix(cfg.ControlURL, "https:") {
+			if cfg.SchemaVersion != currentConfigSchemaVersion || !strings.HasPrefix(cfg.ControlURL, "https:") {
 				t.Fatal("configuration not upgraded")
 			}
 			after, err := os.ReadFile(cfg.CredentialPath)

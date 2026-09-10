@@ -38,6 +38,7 @@ Usage:
   telrad ready            Check whether the running relay is ready
   telrad enroll           Authenticate this host again
   telrad rotate-credential Rotate the bearer credential
+  telrad retrieval-keygen  Create a local permit key (never replaces an existing key)
   telrad version          Print the installed version
 
 Options:

@@ -211,7 +211,7 @@ func secureNativeState() error {
 	if err := d.file.Chown(uid, gid); err != nil {
 		return err
 	}
-	for _, name := range []string{"relay.json", "relay-credential.json", "runtime-status.json", "relay.json.pairing-transaction.json", "relay.json.next", "relay.json.previous", "relay-credential.json.next", "relay-credential.json.previous"} {
+	for _, name := range []string{"relay.json", "relay-credential.json", permitKeyFilename, "runtime-status.json", "relay.json.pairing-transaction.json", "relay.json.next", "relay.json.previous", "relay-credential.json.next", "relay-credential.json.previous"} {
 		f, err := d.open(name)
 		if errors.Is(err, os.ErrNotExist) {
 			continue
