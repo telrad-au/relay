@@ -239,3 +239,29 @@ profile supports only completion-unavailable/order fallback.
 The native Linux/Windows install-and-rollback jobs and container build remain
 required before release. Cross-builds and simulated installer tests do not prove
 Windows SCM/ACL or installed systemd behavior on a production clinic host.
+
+## Report authorization
+
+The race suite checks source approval in Push mode, cancellations, local trust
+retirement, changed destinations, TEST isolation, cross-purpose signatures,
+accession mismatch, alternate identifiers, multiple orders and message injection.
+Forbidden reports must fail before any RIS TCP connection. Existing polling and
+benchmark fixtures carry independently generated report permits. The container
+performance harness generates a separate ephemeral signing authority in its
+private worker configuration and exports only public approval. Its report fixture
+uses OBR-18; the inbound HL7 integrity fixture retains its original identifiers.
+
+The cloud conformance suite includes an opt-in actual-binary test. Build Relay,
+then run in the Telrad cloud checkout:
+
+```sh
+RELAY_REPORT_TEST_BINARY=/absolute/path/to/telrad \
+scripts/test-api-conformance.sh apps/api/src/conformance/suite-relay-report-binary.test.ts
+```
+
+The harness uses disposable PostgreSQL/Redis, real cloud routes behind a temporary
+TLS adapter, an actual Relay subprocess and a loopback MLLP RIS. It verifies an
+order AA, signature preservation through the report queue, RIS AA delivery and
+rejection of a cloud-forged accession with a matching payload digest. No clinic
+traffic or production data is used. The adapter changes only advertised transport
+origins to its temporary HTTPS listener.

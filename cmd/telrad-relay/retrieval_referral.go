@@ -48,7 +48,23 @@ func field(s []string, i int) string {
 	}
 	return s[i]
 }
-func signReferrals(cfg *config, peer net.Addr, message []byte) ([]string, bool, error) {
+
+type orderSourcePolicy struct {
+	referralPolicy
+	AccessionIssuer string
+}
+
+func referralScopes(cfg *config, peer net.Addr, message []byte) ([]retrieval.Permit, bool, error) {
+	policies := make([]orderSourcePolicy, 0, len(cfg.Retrieval.Policies))
+	for _, policy := range cfg.Retrieval.Policies {
+		pacs, _ := cfg.Retrieval.pacs(policy.PACSID)
+		policies = append(policies, orderSourcePolicy{policy, pacs.AccessionIssuer})
+	}
+	return orderScopes(cfg.Retrieval.CompanyID, cfg.Retrieval.ConnectorID, policies, peer, message)
+}
+
+// Share source-approved order parsing across the two separately signed purposes.
+func orderScopes(companyID, connectorID string, policies []orderSourcePolicy, peer net.Addr, message []byte) ([]retrieval.Permit, bool, error) {
 	segments, e := referralSegments(message)
 	if e != nil {
 		return nil, false, e
@@ -73,9 +89,9 @@ func signReferrals(cfg *config, peer net.Addr, message []byte) ([]string, bool, 
 	if e != nil {
 		return nil, true, retrieval.ErrPolicy
 	}
-	var policy referralPolicy
+	var policy orderSourcePolicy
 	matches := 0
-	for _, p := range cfg.Retrieval.Policies {
+	for _, p := range policies {
 		approved := false
 		for _, s := range p.SourceAddresses {
 			a, _ := netip.ParseAddr(s)
@@ -91,7 +107,6 @@ func signReferrals(cfg *config, peer net.Addr, message []byte) ([]string, bool, 
 	if matches != 1 {
 		return nil, true, retrieval.ErrPolicy
 	}
-	pacs, _ := cfg.Retrieval.pacs(policy.PACSID)
 	var pid []string
 	var obrs [][]string
 	var orcs [][]string
@@ -135,18 +150,13 @@ func signReferrals(cfg *config, peer net.Addr, message []byte) ([]string, bool, 
 		return nil, true, retrieval.ErrPolicy
 	}
 	if controls["CA"] || controls["DC"] {
-		return []string{}, true, nil
+		return []retrieval.Permit{}, true, nil
 	}
 	if len(obrs) == 0 || len(obrs) > 64 {
 		return nil, true, retrieval.ErrPolicy
 	}
-	key, e := readPermitSigningKey(cfg)
-	if e != nil {
-		return nil, true, e
-	}
-	defer zeroBytes(key)
 	sum := sha256.Sum256(message)
-	permits := make([]string, 0, len(obrs))
+	permits := make([]retrieval.Permit, 0, len(obrs))
 	mapping := strings.Split(policy.AccessionSource, "-")
 	index, _ := strconv.Atoi(mapping[1])
 	for i, obr := range obrs {
@@ -157,7 +167,7 @@ func signReferrals(cfg *config, peer net.Addr, message []byte) ([]string, bool, 
 		accession := field(segment, index)
 		if index != 18 {
 			parts := strings.Split(accession, "^")
-			if len(parts) > 2 || (field(parts, 1) != "" && field(parts, 1) != pacs.AccessionIssuer) {
+			if len(parts) > 2 || (field(parts, 1) != "" && field(parts, 1) != policy.AccessionIssuer) {
 				return nil, true, retrieval.ErrPolicy
 			}
 			accession = field(parts, 0)
@@ -166,24 +176,39 @@ func signReferrals(cfg *config, peer net.Addr, message []byte) ([]string, bool, 
 		if setID == "" {
 			setID = strconv.Itoa(i + 1)
 		}
-		p := retrieval.Permit{Version: 2, Purpose: "pacs-retrieval", Kind: "accession", CompanyID: cfg.Retrieval.CompanyID, ConnectorID: cfg.Retrieval.ConnectorID, PACSID: pacs.ID, SourcePolicyID: policy.ID, Examination: retrieval.Examination{Accession: accession, Issuer: pacs.AccessionIssuer, AccessionSource: policy.AccessionSource}, Procedure: retrieval.Procedure{Sequence: i + 1, SourceSetID: setID}, HL7SHA256: hex.EncodeToString(sum[:]), IssuedAt: time.Now().UTC().Format("2006-01-02T15:04:05.000Z")}
-		envelope, e := retrieval.Sign(p, cfg.Retrieval.SigningKeyID, key)
-		if e != nil {
-			return nil, true, e
-		}
-		permits = append(permits, envelope)
+		p := retrieval.Permit{Version: 2, Purpose: "pacs-retrieval", Kind: "accession", CompanyID: companyID, ConnectorID: connectorID, PACSID: policy.PACSID, SourcePolicyID: policy.ID, Examination: retrieval.Examination{Accession: accession, Issuer: policy.AccessionIssuer, AccessionSource: policy.AccessionSource}, Procedure: retrieval.Procedure{Sequence: i + 1, SourceSetID: setID}, HL7SHA256: hex.EncodeToString(sum[:]), IssuedAt: time.Now().UTC().Format("2006-01-02T15:04:05.000Z")}
+		permits = append(permits, p)
 	}
 	return permits, true, nil
 }
+func signReferrals(cfg *config, peer net.Addr, message []byte) ([]string, bool, error) {
+	scopes, qualifies, err := referralScopes(cfg, peer, message)
+	if err != nil || !qualifies {
+		return nil, qualifies, err
+	}
+	permits := []string{}
+	if len(scopes) == 0 {
+		return permits, true, nil
+	}
+	key, err := readPermitSigningKey(cfg)
+	if err != nil {
+		return nil, true, err
+	}
+	defer zeroBytes(key)
+	for _, p := range scopes {
+		value, err := retrieval.Sign(p, cfg.Retrieval.SigningKeyID, key)
+		if err != nil {
+			return nil, true, err
+		}
+		permits = append(permits, value)
+	}
+	return permits, true, nil
+}
+
 func ingestClinicHL7(ctx context.Context, cfg *config, peer net.Addr, client *http.Client, provider *credentialProvider, status *runtimeStatusManager, message []byte, controlID string) ([]byte, error) {
-	if !retrievalEnabledLocal(cfg) {
+	if cfg.ReportAuthorization == nil && !retrievalEnabledLocal(cfg) {
 		return ingestHL7(ctx, cfg.HL7URL, client, provider, status, message, controlID)
 	}
-	current, e := currentRetrievalConfig(cfg)
-	if e != nil {
-		return nil, e
-	}
-
 	segments, err := referralSegments(message)
 	if err != nil {
 		return nil, err
@@ -192,44 +217,67 @@ func ingestClinicHL7(ctx context.Context, cfg *config, peer net.Addr, client *ht
 	if kind != "ORM^O01" && kind != "ORM^O01^ORM_O01" {
 		return ingestHL7(ctx, cfg.HL7URL, client, provider, status, message, controlID)
 	}
-	routing, err := discoverRetrievalSettings(ctx, current, client, provider, status)
+	reportCfg, err := currentReportConfig(cfg)
 	if err != nil {
 		return nil, err
 	}
-	if routing.Mode == "PUSH" {
-		return ingestHL7(ctx, cfg.HL7URL, client, provider, status, message, controlID)
+	reports, err := signReportAuthorizations(reportCfg, peer, message)
+	if err != nil {
+		return nil, err
 	}
-	if field(segments[0], 10) == "T" && routing.IngestMode != "TEST" {
-		return nil, retrieval.ErrPolicy
+	permits := []string{}
+	signingConfigs := []*config{reportCfg}
+	if retrievalEnabledLocal(cfg) {
+		current, err := currentRetrievalConfig(cfg)
+		if err != nil {
+			return nil, err
+		}
+		routing, err := discoverRetrievalSettings(ctx, current, client, provider, status)
+		if err != nil {
+			return nil, err
+		}
+		if field(segments[0], 10) == "T" && routing.IngestMode != "TEST" {
+			return nil, retrieval.ErrPolicy
+		}
+		if routing.Mode == "RETRIEVE" {
+			if !routing.Available && routing.IngestMode != "TEST" {
+				return nil, errors.New("retrieval_not_enabled")
+			}
+			permits, _, err = signReferrals(current, peer, message)
+			if err != nil {
+				return nil, err
+			}
+			signingConfigs = append(signingConfigs, current)
+		}
 	}
-	if !routing.Available && routing.IngestMode != "TEST" {
-		return nil, errors.New("retrieval_not_enabled")
-	}
-	permits, qualifies, e := signReferrals(current, peer, message)
-	if e != nil {
-		return nil, e
-	}
-	if !qualifies {
-		return ingestHL7(ctx, cfg.HL7URL, client, provider, status, message, controlID)
-	}
-	if len(permits) > 0 {
-		keys, _ := current.Retrieval.trusted()
-		code, _, e := controlRequest(ctx, client, provider, http.MethodPost, referralURL(cfg, "/signing-keys"), map[string]string{"keyId": current.Retrieval.SigningKeyID, "publicKey": base64.RawURLEncoding.EncodeToString(keys[current.Retrieval.SigningKeyID])}, nil)
-		if e != nil || (code != 200 && code != 201) {
+	registered := map[string]bool{}
+	for _, current := range signingConfigs {
+		auth, err := reportSigningConfig(current)
+		if err != nil {
+			return nil, err
+		}
+		kid := auth.SigningKeyID
+		if registered[kid] || len(reports)+len(permits) == 0 {
+			continue
+		}
+		registered[kid] = true
+		keys, _ := trustedOrderKeys(auth.TrustedPublicKeys)
+		code, _, err := controlRequest(ctx, client, provider, http.MethodPost, referralURL(cfg, "/signing-keys"), map[string]string{"keyId": kid, "publicKey": base64.RawURLEncoding.EncodeToString(keys[kid])}, nil)
+		if err != nil || (code != 200 && code != 201) {
 			controlFailure(status, code)
 			return nil, errors.New("permit_key_registration_failed")
 		}
 	}
-	body, e := json.Marshal(struct {
-		Version int      `json:"version"`
-		HL7     string   `json:"hl7"`
-		Permits []string `json:"permits"`
-	}{2, base64.StdEncoding.EncodeToString(message), permits})
-	if e != nil {
-		return nil, e
+	body, err := json.Marshal(struct {
+		Version              int      `json:"version"`
+		HL7                  string   `json:"hl7"`
+		Permits              []string `json:"permits"`
+		ReportAuthorizations []string `json:"reportAuthorizations"`
+	}{2, base64.StdEncoding.EncodeToString(message), permits, reports})
+	if err != nil {
+		return nil, err
 	}
-	// One immutable body/key for transport retries. AE/AR are returned exactly;
-	// neither is an acceptance or permission to fall back to raw HL7.
+	// Commit the order and both kinds of authorization under one immutable ACK.
 	return ingestHL7Body(ctx, referralURL(cfg, "/ingest/referrals"), client, provider, status, body, controlID, "application/json")
 }
 

@@ -46,6 +46,8 @@ const (
 )
 
 type config struct {
+	ReportAuthorization *reportAuthorizationConfig `json:"reportAuthorization,omitempty"`
+
 	Retrieval                  *retrievalConfig `json:"retrieval,omitempty"`
 	DisableDICOMListener       bool             `json:"disableDicomListener,omitempty"`
 	commandOutput              io.Writer
@@ -895,6 +897,11 @@ func applyConnectionDefaults(cfg *config) {
 }
 
 func validateConfig(cfg *config, command string) error {
+	if cfg.ReportAuthorization != nil {
+		if _, err := reportSigningConfig(cfg); err != nil {
+			return err
+		}
+	}
 	if err := validateRetrievalConfig(cfg); err != nil {
 		return err
 	}

@@ -2,6 +2,7 @@ FROM golang:1.27.0-alpine3.24@sha256:4c9fe60190a2a3350ddc51de80d0224b8a6698d12bd
 WORKDIR /src
 COPY go.mod go.sum ./
 COPY internal/synthetic ./internal/synthetic
+COPY internal/retrieval ./internal/retrieval
 COPY tools/relay-perf ./tools/relay-perf
 ARG PERF_COVERAGE=false
 RUN --mount=type=cache,target=/root/.cache/go-build \

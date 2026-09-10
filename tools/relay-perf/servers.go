@@ -23,16 +23,17 @@ import (
 )
 
 type workerConfig struct {
-	FixtureDirectory string    `json:"fixtureDirectory,omitempty"`
-	Profile          profile   `json:"profile"`
-	Origin           string    `json:"origin"`
-	Admin            string    `json:"admin"`
-	Relay            string    `json:"relay"`
-	RIS              string    `json:"ris"`
-	Credential       string    `json:"credential"`
-	Fixtures         []fixture `json:"fixtures"`
-	Mode             string    `json:"mode"`
-	Calibration      bool      `json:"calibration"`
+	ReportSigningSeed string    `json:"reportSigningSeed,omitempty"`
+	FixtureDirectory  string    `json:"fixtureDirectory,omitempty"`
+	Profile           profile   `json:"profile"`
+	Origin            string    `json:"origin"`
+	Admin             string    `json:"admin"`
+	Relay             string    `json:"relay"`
+	RIS               string    `json:"ris"`
+	Credential        string    `json:"credential"`
+	Fixtures          []fixture `json:"fixtures"`
+	Mode              string    `json:"mode"`
+	Calibration       bool      `json:"calibration"`
 }
 
 type cloudSnapshot struct {
@@ -256,7 +257,7 @@ func (s *cloudServer) control(w http.ResponseWriter, r *http.Request) {
 			if job.Event.Started.IsZero() {
 				job.Event.Started = time.Now()
 			}
-			jsonResponse(w, map[string]any{"type": "report", "deliveryId": fmt.Sprintf("delivery-%d", job.Event.Sequence), "token": job.Token, "messageControlId": controlID("report", job.Event.Sequence), "payload": string(job.Payload), "payloadSha256": hash(job.Payload), "claimExpiresAt": job.Expires})
+			jsonResponse(w, map[string]any{"type": "report", "deliveryId": fmt.Sprintf("delivery-%d", job.Event.Sequence), "token": job.Token, "messageControlId": controlID("report", job.Event.Sequence), "authorization": syntheticReportPermit(s.cfg), "payload": string(job.Payload), "payloadSha256": hash(job.Payload), "claimExpiresAt": job.Expires})
 			return
 		}
 		w.WriteHeader(204)
@@ -388,7 +389,7 @@ func (s *cloudServer) admin(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		payload := synthetic.HL7(controlID("report", e.Sequence), s.cfg.Profile.ReportBytes)
+		payload := synthetic.Report(controlID("report", e.Sequence), s.cfg.Profile.ReportBytes)
 		e.Bytes = int64(len(payload))
 		s.jobs = append(s.jobs, &reportJob{Event: e, Payload: payload})
 		jsonResponse(w, map[string]bool{"ok": true})
@@ -532,7 +533,7 @@ func serveRIS(ctx context.Context, cfg workerConfig) error {
 				return
 			}
 			seq, err := parseControlID(payload, "report")
-			if err != nil || !bytes.Equal(payload, synthetic.HL7(controlID("report", seq), cfg.Profile.ReportBytes)) {
+			if err != nil || !bytes.Equal(payload, synthetic.Report(controlID("report", seq), cfg.Profile.ReportBytes)) {
 				return
 			}
 			var b behavior

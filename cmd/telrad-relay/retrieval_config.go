@@ -59,8 +59,12 @@ func permitKeyID(public ed25519.PublicKey) string {
 	return "ed25519-" + hex.EncodeToString(sum[:])
 }
 func (r *retrievalConfig) trusted() (map[string]ed25519.PublicKey, error) {
+	return trustedOrderKeys(r.TrustedPublicKeys)
+}
+
+func trustedOrderKeys(publicKeys []string) (map[string]ed25519.PublicKey, error) {
 	keys := map[string]ed25519.PublicKey{}
-	for _, s := range r.TrustedPublicKeys {
+	for _, s := range publicKeys {
 		b, e := retrieval.DecodeBase64(s, 32)
 		if e != nil {
 			return nil, retrieval.ErrTrust
@@ -227,6 +231,9 @@ func generatePermitKey(configPath string) error {
 	return nil
 }
 func readPermitSigningKey(cfg *config) (ed25519.PrivateKey, error) {
+	return readOrderSigningKey(cfg, cfg.Retrieval.SigningKeyID, cfg.Retrieval.TrustedPublicKeys)
+}
+func readOrderSigningKey(cfg *config, keyID string, publicKeys []string) (ed25519.PrivateKey, error) {
 	directory, e := openSafeDirectory(filepath.Dir(cfg.configPath))
 	if e != nil {
 		return nil, errors.New("permit_key_unavailable")
@@ -260,8 +267,8 @@ func readPermitSigningKey(cfg *config) (ed25519.PrivateKey, error) {
 	defer zeroBytes(seed)
 	key := ed25519.NewKeyFromSeed(seed)
 	pub := key.Public().(ed25519.PublicKey)
-	keys, e := cfg.Retrieval.trusted()
-	if e != nil || record.KeyID != cfg.Retrieval.SigningKeyID || permitKeyID(pub) != record.KeyID || record.PublicKey != base64.RawURLEncoding.EncodeToString(pub) || !bytes.Equal(keys[record.KeyID], pub) {
+	keys, e := trustedOrderKeys(publicKeys)
+	if e != nil || record.KeyID != keyID || permitKeyID(pub) != record.KeyID || record.PublicKey != base64.RawURLEncoding.EncodeToString(pub) || !bytes.Equal(keys[record.KeyID], pub) {
 		zeroBytes(key)
 		return nil, retrieval.ErrTrust
 	}

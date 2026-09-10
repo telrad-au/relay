@@ -115,3 +115,11 @@ Schema v4 upgrades to v5 with retrieval absent. Optional retrieval keeps only it
 permit signing key and approved configuration in the existing volume; it adds no
 clinical spool or job state. Generate the key as UID 10001 and follow the
 [PACS retrieval guide](pacs-retrieval.md) for qualification and rollback.
+
+## Order-authorized reports
+
+Both image transfer modes require a clinic-signed order permit for report return.
+Provision the local source and key before upgrading an installation that returns
+reports. Enabled retrieval approval can supply these settings; Push-only clinics
+can use `reportAuthorization` without a PACS. See [report authorization](report-authorization.md)
+for setup, existing-order recovery, trust retirement and the security boundary.

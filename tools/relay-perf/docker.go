@@ -280,6 +280,11 @@ func (r *runner) prepare(ctx context.Context, res *result) (workerConfig, error)
 	if _, err := rand.Read(random); err != nil {
 		return cfg, err
 	}
+	reportSeed := make([]byte, 32)
+	if _, err := rand.Read(reportSeed); err != nil {
+		return cfg, err
+	}
+	cfg.ReportSigningSeed = base64.RawURLEncoding.EncodeToString(reportSeed)
 	cfg.Credential = "trr_v1_" + base64.RawURLEncoding.EncodeToString(random[:16]) + "_" + base64.RawURLEncoding.EncodeToString(random[16:])
 	cfg.Fixtures, err = r.prepareFixtures(ctx)
 	if err != nil {
@@ -324,6 +329,7 @@ func (r *runner) prepare(ctx context.Context, res *result) (workerConfig, error)
 		resolved["dicomIdleTimeoutSeconds"] = 5
 		resolved["dicomLifetimeSeconds"] = 15
 	}
+	resolved["reportAuthorization"] = syntheticReportConfig(cfg)
 	if err := writeJSON(filepath.Join(r.out, "relay-config.json"), resolved); err != nil {
 		return cfg, err
 	}
@@ -675,6 +681,7 @@ func initializeRelayState(cfg workerConfig, dir, state string) error {
 		config["reportHost"] = host
 	}
 	config["reportPort"] = 2576
+	config["reportAuthorization"] = syntheticReportConfig(cfg)
 	config["hl7MaxBytes"] = cfg.Profile.HL7Limit
 	if cfg.Mode == "faults" {
 		config["dicomIdleTimeoutSeconds"] = 5

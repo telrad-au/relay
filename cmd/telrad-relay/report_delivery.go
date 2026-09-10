@@ -13,6 +13,7 @@ import (
 
 type reportMessage struct {
 	Type             string    `json:"type"`
+	Authorization    string    `json:"authorization"`
 	DeliveryID       string    `json:"deliveryId"`
 	Token            string    `json:"token"`
 	MessageControlID string    `json:"messageControlId"`
@@ -34,7 +35,7 @@ func deliverReport(ctx context.Context, cfg *config, report reportMessage) repor
 	failure := func(code, ack string) reportResult {
 		return reportResult{Token: report.Token, Outcome: "failed", Error: code, AckCode: ack}
 	}
-	if retrievalEnabledLocal(cfg) && !safeRetrievalReport(report.Payload) {
+	if err := authorizeReport(cfg, report); err != nil {
 		return failure("invalid_report", "")
 	}
 	digest := sha256.Sum256([]byte(report.Payload))
@@ -98,7 +99,7 @@ func parseMLLPAcknowledgement(data []byte, controlID string) (string, error) {
 func hl7MessageControlID(message string) (string, error) { return hl7ControlID([]byte(message)) }
 
 // A compromised report channel must not return an ORM that a RIS could loop
-// into its approved referral feed. This restriction applies to opted-in clinics.
+// into its approved referral feed. Every returned report uses this restriction.
 func safeRetrievalReport(payload string) bool {
 	if bytes.ContainsAny([]byte(payload), "\x0b\x1c") {
 		return false

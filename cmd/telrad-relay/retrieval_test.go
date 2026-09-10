@@ -512,14 +512,14 @@ func TestRetrievalReportLoopCannotMintReferrals(t *testing.T) {
 
 func TestRetrievalRoutingUsesExplicitDiscoveryAndNeverFailureFallback(t *testing.T) {
 	for _, test := range []struct {
-		name, mode string
-		available  bool
-		code       int
-		wantRaw    bool
+		name, mode   string
+		available    bool
+		code         int
+		wantReferral bool
 	}{{"push", "PUSH", false, 200, true}, {"retrieve disabled", "RETRIEVE", false, 200, false}, {"missing discovery", "", false, 404, false}, {"unknown mode", "OTHER", true, 200, false}} {
 		t.Run(test.name, func(t *testing.T) {
 			cfg := retrievalTestConfig(t)
-			raw := 0
+			referrals := 0
 			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if strings.HasSuffix(r.URL.Path, "/retrieval-settings") {
 					if r.Method != http.MethodGet || r.ContentLength > 0 {
@@ -530,8 +530,21 @@ func TestRetrievalRoutingUsesExplicitDiscoveryAndNeverFailureFallback(t *testing
 					json.NewEncoder(w).Encode(retrievalSettings{2, cfg.Retrieval.CompanyID, cfg.RelayID, "PRODUCTION", test.mode, test.available})
 					return
 				}
-				if r.URL.Path == "/v1/relay/ingest/hl7" {
-					raw++
+				if r.URL.Path == "/v1/relay/signing-keys" {
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(201)
+					io.WriteString(w, `{}`)
+					return
+				}
+				if r.URL.Path == "/v1/relay/ingest/referrals" {
+					referrals++
+					var body struct {
+						Permits              []string `json:"permits"`
+						ReportAuthorizations []string `json:"reportAuthorizations"`
+					}
+					if json.NewDecoder(r.Body).Decode(&body) != nil || len(body.Permits) != 0 || len(body.ReportAuthorizations) != 1 {
+						t.Error("Push must carry only report authorization")
+					}
 					w.Header().Set("Content-Type", "application/hl7-v2")
 					io.WriteString(w, "MSH|^~\\&|TELRAD|RIS|SYNTHETIC|CLINIC|20260909000000||ACK|ack|P|2.5\rMSA|AA|message-1\r")
 					return
@@ -543,8 +556,8 @@ func TestRetrievalRoutingUsesExplicitDiscoveryAndNeverFailureFallback(t *testing
 			setRetrievalCloud(cfg, server.URL)
 			saveRetrievalTestConfig(t, cfg)
 			_, e := ingestClinicHL7(context.Background(), cfg, &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 12000}, server.Client(), testProvider(t, testCredential('A')), newRuntimeStatus(cfg.configPath), retrievalTestHL7("NW", 1), "message-1")
-			if (e == nil) != test.wantRaw || (raw == 1) != test.wantRaw {
-				t.Fatalf("raw=%d error=%v", raw, e)
+			if (e == nil) != test.wantReferral || (referrals == 1) != test.wantReferral {
+				t.Fatalf("referrals=%d error=%v", referrals, e)
 			}
 		})
 	}

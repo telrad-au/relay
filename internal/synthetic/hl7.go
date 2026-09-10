@@ -29,3 +29,23 @@ func ACK(code, id, ackID string) []byte {
 func message(s string) string {
 	return strings.ReplaceAll(strings.TrimSuffix(strings.ReplaceAll(s, "\r\n", "\n"), "\n"), "\n", "\r") + "\r"
 }
+
+// Report applies the cloud report-return accession contract to the shared
+// protocol fixture. Inbound HL7 integrity fixtures retain their original shape.
+func Report(id string, size int) []byte {
+	segments := strings.Split(string(HL7(id, 0)), "\r")
+	for i, segment := range segments {
+		fields := strings.Split(segment, "|")
+		if fields[0] == "OBR" {
+			fields[2] = ""
+			fields[3] = ""
+			fields[18] = "RELAY-REPORT"
+			segments[i] = strings.Join(fields, "|")
+		}
+	}
+	payload := strings.Join(segments, "\r")
+	if len(payload) < size {
+		payload = strings.Replace(payload, "café", "café"+strings.Repeat("x", size-len(payload)), 1)
+	}
+	return []byte(payload)
+}
