@@ -3,3 +3,4 @@
 /telrad-relay.exe
 *.test
 relay.env
+.DS_Store
