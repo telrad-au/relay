@@ -248,7 +248,8 @@ accession mismatch, alternate identifiers, multiple orders and message injection
 Forbidden reports must fail before any RIS TCP connection. Existing polling and
 benchmark fixtures carry independently generated report permits. The container
 performance harness generates a separate ephemeral signing authority in its
-private worker configuration and exports only public approval. Its report fixture
+private worker configuration and protected synthetic Relay state. Exported
+configuration contains no key or authorization settings. Its report fixture
 uses OBR-18; the inbound HL7 integrity fixture retains its original identifiers.
 
 The cloud conformance suite includes an opt-in actual-binary test. Build Relay,

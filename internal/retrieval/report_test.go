@@ -14,7 +14,7 @@ func TestReportPermitStrictEnvelopeAndPurpose(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	p := ReportPermit{Version: 1, Purpose: "report-delivery", ProcessingID: "P", CompanyID: "company", ConnectorID: "relay", SourcePolicyID: "source", Examination: Examination{Accession: "ACC", Issuer: "RIS", AccessionSource: "OBR-18"}, Procedure: Procedure{Sequence: 1, SourceSetID: "1"}, HL7SHA256: strings.Repeat("0", 64), IssuedAt: "2000-01-01T00:00:00.000Z", ReportHost: "ris.example.invalid", ReportPort: 2576}
+	p := ReportPermit{Version: 1, Purpose: "report-delivery", ProcessingID: "P", ConnectorID: "relay", SourcePolicyID: "source", Examination: Examination{Accession: "ACC", Issuer: "RIS", AccessionSource: "OBR-18"}, Procedure: Procedure{Sequence: 1, SourceSetID: "1"}, HL7SHA256: strings.Repeat("0", 64), IssuedAt: "2000-01-01T00:00:00.000Z", ReportHost: "ris.example.invalid", ReportPort: 2576}
 	envelope, err := SignReport(p, "clinic", key)
 	if err != nil {
 		t.Fatal(err)

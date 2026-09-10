@@ -28,6 +28,9 @@ func retrievalTestConfig(t *testing.T) *config {
 	if e := os.Chmod(filepath.Dir(cfg.configPath), 0700); e != nil {
 		t.Fatal(e)
 	}
+	if e := ensureReportSigningKey(cfg); e != nil {
+		t.Fatal(e)
+	}
 	if e := generatePermitKey(cfg.configPath); e != nil {
 		t.Fatal(e)
 	}
@@ -422,7 +425,7 @@ func TestRetrievalRequeriesAfterRestartAndReplaysCommittedSubmissions(t *testing
 		t.Fatal(e)
 	}
 	for _, file := range files {
-		if file.Name() != "relay.json" && file.Name() != permitKeyFilename && file.Name() != "runtime-status.json" {
+		if file.Name() != "relay.json" && file.Name() != permitKeyFilename && file.Name() != reportKeyFilename && file.Name() != "runtime-status.json" {
 			t.Fatalf("unexpected persistent file %s", file.Name())
 		}
 	}

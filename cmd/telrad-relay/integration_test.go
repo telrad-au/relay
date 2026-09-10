@@ -388,7 +388,7 @@ func TestHL7KeepsClinicConnectionForSequentialExchanges(t *testing.T) {
 	go serveHL7(ctx, relay, cfg, server.Client(), provider, newRuntimeStatus(filepath.Join(t.TempDir(), "relay.json")))
 	for index := 1; index <= 2; index++ {
 		id := fmt.Sprintf("control-%d", index)
-		message := []byte("MSH|^~\\&|CLINIC|A|TELRAD|B|20260101000000||ORM^O01|" + id + "|P|2.5\r")
+		message := []byte("MSH|^~\\&|CLINIC|A|TELRAD|B|20260101000000||ORU^R01|" + id + "|P|2.5\r")
 		frame := append([]byte{mllpStart}, message...)
 		frame = append(frame, mllpEnd, mllpCR)
 		if _, err := clinic.Write(frame); err != nil {
@@ -513,7 +513,7 @@ func TestHL7HandlesConcurrentClinicConnections(t *testing.T) {
 			defer cancel()
 			go serveHL7(ctx, relay, cfg, server.Client(), provider, statusManagers[index])
 			controlID := fmt.Sprintf("concurrent-%d", index)
-			message := []byte("MSH|^~\\&|A|B|C|D|20260101000000||ORM^O01|" + controlID + "|P|2.5\r")
+			message := []byte("MSH|^~\\&|A|B|C|D|20260101000000||ORU^R01|" + controlID + "|P|2.5\r")
 			frame := append([]byte{mllpStart}, message...)
 			frame = append(frame, mllpEnd, mllpCR)
 			if _, err := clinic.Write(frame); err != nil {

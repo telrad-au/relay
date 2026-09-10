@@ -137,7 +137,7 @@ func superviseControl(ctx, workCtx context.Context, cfg *config, client *http.Cl
 		var err error
 		if sessionURL == "" {
 			hostname, _ := os.Hostname()
-			hello := map[string]any{"type": "hello", "agentVersion": version, "platform": relayPlatform(), "hostname": hostname, "capabilities": map[string]any{"dicom": !cfg.DisableDICOMListener, "hl7": true, "reportDelivery": true, "reportAuthorizationV1": true, "httpsIngest": true}}
+			hello := map[string]any{"type": "hello", "agentVersion": version, "platform": relayPlatform(), "hostname": hostname, "capabilities": map[string]any{"dicom": !cfg.DisableDICOMListener, "hl7": true, "reportDelivery": true, "httpsIngest": true}}
 			if retrievalEnabledLocal(cfg) {
 				hello["capabilities"].(map[string]any)["pacsRetrievalV2"] = retrievalCapability(cfg)
 			}

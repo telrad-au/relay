@@ -3,11 +3,12 @@ package main
 import (
 	"context"
 	"crypto/ed25519"
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
 	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -19,15 +20,23 @@ import (
 // Runtime-generated keys only. Shared by polling tests and report benchmarks.
 func reportTestSigner(t testing.TB, cfg *config) func(string) string {
 	t.Helper()
-	pub, key, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
+	cfg.configPath = ""
+	cfg.CredentialPath = filepath.Join(t.TempDir(), "relay-credential.json")
+	if err := os.Chmod(filepath.Dir(cfg.CredentialPath), 0700); err != nil {
 		t.Fatal(err)
 	}
-	cfg.configPath = ""
 	if cfg.RelayID == "" {
 		cfg.RelayID = "synthetic-relay"
 	}
-	cfg.ReportAuthorization = &reportAuthorizationConfig{CompanyID: "synthetic-company", ConnectorID: cfg.RelayID, SigningKeyID: permitKeyID(pub), TrustedPublicKeys: []string{base64.RawURLEncoding.EncodeToString(pub)}, Policies: []reportSourcePolicy{{ID: "synthetic-source", SourceAddresses: []string{"127.0.0.1"}, SendingApplication: "SYNTHETIC", SendingFacility: "CLINIC", AccessionSource: "OBR-18", AccessionIssuer: "CLINIC"}}}
+	if err := ensureReportSigningKey(cfg); err != nil {
+		t.Fatal(err)
+	}
+	key, err := readReportSigningKey(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { zeroBytes(key) })
+	pub := key.Public().(ed25519.PublicKey)
 	return func(payload string) string {
 		segments, err := referralSegments([]byte(payload))
 		if err != nil {
@@ -39,7 +48,7 @@ func reportTestSigner(t testing.TB, cfg *config) func(string) string {
 				accession = field(s, 18)
 			}
 		}
-		grant := retrieval.ReportPermit{Version: 1, Purpose: "report-delivery", ProcessingID: "P", CompanyID: cfg.ReportAuthorization.CompanyID, ConnectorID: cfg.RelayID, SourcePolicyID: "synthetic-source", Examination: retrieval.Examination{Accession: accession, Issuer: "CLINIC", AccessionSource: "OBR-18"}, Procedure: retrieval.Procedure{Sequence: 1, SourceSetID: "1"}, HL7SHA256: strings.Repeat("0", 64), IssuedAt: "2000-01-01T00:00:00.000Z", ReportHost: cfg.ReportHost, ReportPort: cfg.ReportPort}
+		grant := retrieval.ReportPermit{Version: 1, Purpose: "report-delivery", ProcessingID: "P", ConnectorID: cfg.RelayID, SourcePolicyID: reportSourceID, Examination: retrieval.Examination{Accession: accession, Issuer: cfg.RelayID, AccessionSource: "OBR-18"}, Procedure: retrieval.Procedure{Sequence: 1, SourceSetID: "1"}, HL7SHA256: strings.Repeat("0", 64), IssuedAt: "2000-01-01T00:00:00.000Z", ReportHost: cfg.ReportHost, ReportPort: cfg.ReportPort}
 		envelope, err := retrieval.SignReport(grant, permitKeyID(pub), key)
 		if err != nil {
 			t.Fatal(err)
@@ -83,7 +92,7 @@ func TestReportAuthorizationBlocksCloudForgeriesBeforeMLLP(t *testing.T) {
 	cfg.ReportHost = "127.0.0.1"
 	cfg.ReportPort = listener.Addr().(*net.TCPAddr).Port
 	saveRetrievalTestConfig(t, cfg)
-	permits, err := signReportAuthorizations(cfg, &net.TCPAddr{IP: net.ParseIP("127.0.0.1")}, retrievalTestHL7("NW", 1))
+	permits, err := signReportAuthorizations(cfg, retrievalTestHL7("NW", 1))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,18 +129,18 @@ func TestReportAuthorizationBlocksCloudForgeriesBeforeMLLP(t *testing.T) {
 			}
 		})
 	}
-	keys, _ := cfg.Retrieval.trusted()
-	original, err := retrieval.VerifyReport(good.Authorization, keys)
-	if err != nil {
-		t.Fatal(err)
-	}
-	key, err := readPermitSigningKey(cfg)
+	key, err := readReportSigningKey(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer zeroBytes(key)
+	pub := key.Public().(ed25519.PublicKey)
+	keys := map[string]ed25519.PublicKey{permitKeyID(pub): pub}
+	original, err := retrieval.VerifyReport(good.Authorization, keys)
+	if err != nil {
+		t.Fatal(err)
+	}
 	for name, change := range map[string]func(*retrieval.ReportPermit){
-		"company":     func(p *retrieval.ReportPermit) { p.CompanyID = "other-company" },
 		"connector":   func(p *retrieval.ReportPermit) { p.ConnectorID = "other-relay" },
 		"namespace":   func(p *retrieval.ReportPermit) { p.Examination.Issuer = "OTHER" },
 		"policy":      func(p *retrieval.ReportPermit) { p.SourcePolicyID = "other-policy" },
@@ -141,7 +150,7 @@ func TestReportAuthorizationBlocksCloudForgeriesBeforeMLLP(t *testing.T) {
 			p := original
 			change(&p)
 			r := good
-			r.Authorization, err = retrieval.SignReport(p, cfg.Retrieval.SigningKeyID, key)
+			r.Authorization, err = retrieval.SignReport(p, permitKeyID(pub), key)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -150,7 +159,7 @@ func TestReportAuthorizationBlocksCloudForgeriesBeforeMLLP(t *testing.T) {
 			}
 		})
 	}
-	testPermits, err := signReportAuthorizations(cfg, &net.TCPAddr{IP: net.ParseIP("127.0.0.1")}, []byte(strings.Replace(string(retrievalTestHL7("NW", 1)), "|P|2.5", "|T|2.5", 1)))
+	testPermits, err := signReportAuthorizations(cfg, []byte(strings.Replace(string(retrievalTestHL7("NW", 1)), "|P|2.5", "|T|2.5", 1)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -165,9 +174,12 @@ func TestReportAuthorizationBlocksCloudForgeriesBeforeMLLP(t *testing.T) {
 		t.Fatal("changed destination accepted old permit")
 	}
 	cfg.ReportPort--
-	cfg.Retrieval.TrustedPublicKeys = []string{base64.RawURLEncoding.EncodeToString(make([]byte, 32))}
-	cfg.Retrieval.SigningKeyID = permitKeyID(make([]byte, 32))
-	saveRetrievalTestConfig(t, cfg)
+	if err := os.Remove(filepath.Join(reportKeyDirectory(cfg), reportKeyFilename)); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureReportSigningKey(cfg); err != nil {
+		t.Fatal(err)
+	}
 	if authorizeReport(cfg, good) == nil {
 		t.Fatal("retired clinic key accepted")
 	}
@@ -177,16 +189,10 @@ func TestReportAuthorizationBlocksCloudForgeriesBeforeMLLP(t *testing.T) {
 }
 func TestReportAuthorizationPushSourcesAndCancellations(t *testing.T) {
 	cfg := retrievalTestConfig(t)
-	auth, err := reportSigningConfig(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	cfg.ReportAuthorization = auth
 	cfg.Retrieval = nil
 	saveRetrievalTestConfig(t, cfg)
-	peer := &net.TCPAddr{IP: net.ParseIP("127.0.0.1")}
 	for _, control := range []string{"NW", "XO", "CA", "DC"} {
-		grants, err := signReportAuthorizations(cfg, peer, retrievalTestHL7(control, 2))
+		grants, err := signReportAuthorizations(cfg, retrievalTestHL7(control, 2))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -198,10 +204,8 @@ func TestReportAuthorizationPushSourcesAndCancellations(t *testing.T) {
 			t.Fatal("incorrect permit count")
 		}
 	}
-	if _, err := signReportAuthorizations(cfg, &net.TCPAddr{IP: net.ParseIP("192.0.2.1")}, retrievalTestHL7("NW", 1)); err == nil {
-		t.Fatal("unapproved sender signed")
-	}
-	if _, err := signReportAuthorizations(cfg, peer, []byte(strings.Replace(string(retrievalTestHL7("NW", 1)), "SYNTHETIC", "OTHER", 1))); err == nil {
-		t.Fatal("unapproved application signed")
+
+	if _, err := signReportAuthorizations(cfg, []byte(strings.Replace(string(retrievalTestHL7("NW", 1)), "SYNTHETIC", "OTHER", 1))); err != nil {
+		t.Fatal("received order required application configuration")
 	}
 }

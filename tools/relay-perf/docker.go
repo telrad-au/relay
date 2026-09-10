@@ -329,7 +329,6 @@ func (r *runner) prepare(ctx context.Context, res *result) (workerConfig, error)
 		resolved["dicomIdleTimeoutSeconds"] = 5
 		resolved["dicomLifetimeSeconds"] = 15
 	}
-	resolved["reportAuthorization"] = syntheticReportConfig(cfg)
 	if err := writeJSON(filepath.Join(r.out, "relay-config.json"), resolved); err != nil {
 		return cfg, err
 	}
@@ -681,7 +680,6 @@ func initializeRelayState(cfg workerConfig, dir, state string) error {
 		config["reportHost"] = host
 	}
 	config["reportPort"] = 2576
-	config["reportAuthorization"] = syntheticReportConfig(cfg)
 	config["hl7MaxBytes"] = cfg.Profile.HL7Limit
 	if cfg.Mode == "faults" {
 		config["dicomIdleTimeoutSeconds"] = 5
@@ -690,7 +688,7 @@ func initializeRelayState(cfg workerConfig, dir, state string) error {
 	if err := os.MkdirAll(state, 0700); err != nil {
 		return err
 	}
-	for name, value := range map[string]any{"relay.json": config, "relay-credential.json": map[string]any{"schemaVersion": 1, "credential": cfg.Credential}} {
+	for name, value := range map[string]any{"report-signing-key.json": syntheticReportKeyRecord(cfg), "relay.json": config, "relay-credential.json": map[string]any{"schemaVersion": 1, "credential": cfg.Credential}} {
 		path := filepath.Join(state, name)
 		if err := writeJSON(path, value); err != nil {
 			return err

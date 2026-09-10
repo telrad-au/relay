@@ -14,7 +14,6 @@ type ReportPermit struct {
 	ProcessingID   string      `json:"processingId"`
 	Version        int         `json:"version"`
 	Purpose        string      `json:"purpose"`
-	CompanyID      string      `json:"companyId"`
 	ConnectorID    string      `json:"connectorId"`
 	SourcePolicyID string      `json:"sourcePolicyId"`
 	Examination    Examination `json:"examination"`
@@ -29,7 +28,7 @@ func (p ReportPermit) Validate() error {
 	if p.Version != 1 || p.Purpose != "report-delivery" || (p.ProcessingID != "P" && p.ProcessingID != "T") {
 		return ErrPermit
 	}
-	for _, value := range []string{p.CompanyID, p.ConnectorID, p.SourcePolicyID} {
+	for _, value := range []string{p.ConnectorID, p.SourcePolicyID} {
 		if !Opaque(value) {
 			return ErrPermit
 		}
@@ -91,7 +90,7 @@ func VerifyReport(envelope string, trusted map[string]ed25519.PublicKey) (Report
 	if !ed25519.Verify(key, []byte(parts[0]+"."+parts[1]), sig) {
 		return p, ErrPermit
 	}
-	if exactObject(b, []string{"processingId", "version", "purpose", "companyId", "connectorId", "sourcePolicyId", "examination", "procedure", "hl7Sha256", "issuedAt", "reportHost", "reportPort"}) != nil || StrictJSON(b, &p) != nil || p.Validate() != nil {
+	if exactObject(b, []string{"processingId", "version", "purpose", "connectorId", "sourcePolicyId", "examination", "procedure", "hl7Sha256", "issuedAt", "reportHost", "reportPort"}) != nil || StrictJSON(b, &p) != nil || p.Validate() != nil {
 		return ReportPermit{}, ErrPermit
 	}
 	var fields map[string]json.RawMessage

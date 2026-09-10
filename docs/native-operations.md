@@ -273,8 +273,8 @@ permission repair preserves and protects `permit-signing-key.json`.
 
 ## Order-authorized reports
 
-Both image transfer modes require a clinic-signed order permit for report return.
-Provision the local source and key before upgrading an installation that returns
-reports. Enabled retrieval approval can supply these settings; Push-only clinics
-can use `reportAuthorization` without a PACS. See [report authorization](report-authorization.md)
-for setup, existing-order recovery, trust retirement and the security boundary.
+Report authorization is always enabled in both image modes. Relay automatically
+creates and retains `report-signing-key.json` beside its credential file; no
+additional settings or key-provisioning commands are required. Preserve the
+protected state directory across restarts and upgrades. See
+[report authorization](report-authorization.md) for the order flow and recovery.

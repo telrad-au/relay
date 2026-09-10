@@ -46,8 +46,6 @@ const (
 )
 
 type config struct {
-	ReportAuthorization *reportAuthorizationConfig `json:"reportAuthorization,omitempty"`
-
 	Retrieval                  *retrievalConfig `json:"retrieval,omitempty"`
 	DisableDICOMListener       bool             `json:"disableDicomListener,omitempty"`
 	commandOutput              io.Writer
@@ -593,6 +591,9 @@ func runWithContext(ctx context.Context, cfg *config, configPath string) error {
 }
 
 func runClinicalWithContext(ctx context.Context, cfg *config, configPath string) error {
+	if err := ensureReportSigningKey(cfg); err != nil {
+		return err
+	}
 	provider, err := newCredentialProvider(cfg.CredentialPath, time.Now())
 	if err != nil {
 		return errors.New("stored credential is invalid")
@@ -897,11 +898,6 @@ func applyConnectionDefaults(cfg *config) {
 }
 
 func validateConfig(cfg *config, command string) error {
-	if cfg.ReportAuthorization != nil {
-		if _, err := reportSigningConfig(cfg); err != nil {
-			return err
-		}
-	}
 	if err := validateRetrievalConfig(cfg); err != nil {
 		return err
 	}

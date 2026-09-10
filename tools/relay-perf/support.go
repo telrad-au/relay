@@ -178,7 +178,9 @@ func writeExternalSetup(out string, cfg workerConfig, work string) error {
 	}
 	configuration["reportHost"] = host
 	configuration["reportPort"] = 2576
-	configuration["reportAuthorization"] = syntheticReportConfig(cfg)
+	if err := writeJSON(filepath.Join(dir, "report-signing-key.json"), syntheticReportKeyRecord(cfg)); err != nil {
+		return err
+	}
 	if err := writeJSON(filepath.Join(dir, "relay.json"), configuration); err != nil {
 		return err
 	}

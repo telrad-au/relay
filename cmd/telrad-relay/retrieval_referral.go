@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -107,6 +108,18 @@ func orderScopes(companyID, connectorID string, policies []orderSourcePolicy, pe
 	if matches != 1 {
 		return nil, true, retrieval.ErrPolicy
 	}
+	return parsedOrderScopes(companyID, connectorID, policy, message, segments)
+}
+
+// Decode clinical scope independently of retrieval's optional source approval.
+func parsedOrderScopes(companyID, connectorID string, policy orderSourcePolicy, message []byte, segments [][]string) ([]retrieval.Permit, bool, error) {
+	msh := segments[0]
+	if field(msh, 8) != "ORM^O01" && field(msh, 8) != "ORM^O01^ORM_O01" {
+		return nil, false, nil
+	}
+	if (field(msh, 11) != "2.3.1" && field(msh, 11) != "2.5") || (field(msh, 10) != "P" && field(msh, 10) != "T") {
+		return nil, true, retrieval.ErrPolicy
+	}
 	var pid []string
 	var obrs [][]string
 	var orcs [][]string
@@ -206,9 +219,6 @@ func signReferrals(cfg *config, peer net.Addr, message []byte) ([]string, bool, 
 }
 
 func ingestClinicHL7(ctx context.Context, cfg *config, peer net.Addr, client *http.Client, provider *credentialProvider, status *runtimeStatusManager, message []byte, controlID string) ([]byte, error) {
-	if cfg.ReportAuthorization == nil && !retrievalEnabledLocal(cfg) {
-		return ingestHL7(ctx, cfg.HL7URL, client, provider, status, message, controlID)
-	}
 	segments, err := referralSegments(message)
 	if err != nil {
 		return nil, err
@@ -221,12 +231,18 @@ func ingestClinicHL7(ctx context.Context, cfg *config, peer net.Addr, client *ht
 	if err != nil {
 		return nil, err
 	}
-	reports, err := signReportAuthorizations(reportCfg, peer, message)
+	reports, err := signReportAuthorizations(reportCfg, message)
 	if err != nil {
 		return nil, err
 	}
 	permits := []string{}
-	signingConfigs := []*config{reportCfg}
+	key, err := readReportSigningKey(reportCfg)
+	if err != nil {
+		return nil, err
+	}
+	pub := key.Public().(ed25519.PublicKey)
+	zeroBytes(key)
+	registrationKeys := map[string]ed25519.PublicKey{permitKeyID(pub): pub}
 	if retrievalEnabledLocal(cfg) {
 		current, err := currentRetrievalConfig(cfg)
 		if err != nil {
@@ -247,22 +263,15 @@ func ingestClinicHL7(ctx context.Context, cfg *config, peer net.Addr, client *ht
 			if err != nil {
 				return nil, err
 			}
-			signingConfigs = append(signingConfigs, current)
+			keys, _ := current.Retrieval.trusted()
+			registrationKeys[current.Retrieval.SigningKeyID] = keys[current.Retrieval.SigningKeyID]
 		}
 	}
-	registered := map[string]bool{}
-	for _, current := range signingConfigs {
-		auth, err := reportSigningConfig(current)
-		if err != nil {
-			return nil, err
-		}
-		kid := auth.SigningKeyID
-		if registered[kid] || len(reports)+len(permits) == 0 {
+	for kid, public := range registrationKeys {
+		if len(reports)+len(permits) == 0 {
 			continue
 		}
-		registered[kid] = true
-		keys, _ := trustedOrderKeys(auth.TrustedPublicKeys)
-		code, _, err := controlRequest(ctx, client, provider, http.MethodPost, referralURL(cfg, "/signing-keys"), map[string]string{"keyId": kid, "publicKey": base64.RawURLEncoding.EncodeToString(keys[kid])}, nil)
+		code, _, err := controlRequest(ctx, client, provider, http.MethodPost, referralURL(cfg, "/signing-keys"), map[string]string{"keyId": kid, "publicKey": base64.RawURLEncoding.EncodeToString(public)}, nil)
 		if err != nil || (code != 200 && code != 201) {
 			controlFailure(status, code)
 			return nil, errors.New("permit_key_registration_failed")

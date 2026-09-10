@@ -201,7 +201,10 @@ type permitKeyFile struct {
 // Explicit offline provisioning only. O_EXCL prevents rotation or lost-key recovery
 // from silently replacing an existing signing authority.
 func generatePermitKey(configPath string) error {
-	d, e := openSafeDirectory(filepath.Dir(configPath))
+	return generateOrderKey(filepath.Dir(configPath), permitKeyFilename)
+}
+func generateOrderKey(directory, filename string) error {
+	d, e := openSafeDirectory(directory)
 	if e != nil {
 		return errors.New("permit_key_directory_unavailable")
 	}
@@ -216,7 +219,7 @@ func generatePermitKey(configPath string) error {
 		return e
 	}
 	defer zeroBytes(data)
-	f, e := createRelativeFile(d.file, permitKeyFilename, 0600, filepath.Join(filepath.Dir(configPath), permitKeyFilename))
+	f, e := createRelativeFile(d.file, filename, 0600, filepath.Join(directory, filename))
 	if e != nil {
 		return errors.New("permit_key_creation_refused")
 	}
@@ -228,18 +231,31 @@ func generatePermitKey(configPath string) error {
 	if e != nil || closeErr != nil {
 		return errors.New("permit_key_write_failed")
 	}
-	return nil
+	return syncDirectoryHandle(d.file)
 }
 func readPermitSigningKey(cfg *config) (ed25519.PrivateKey, error) {
 	return readOrderSigningKey(cfg, cfg.Retrieval.SigningKeyID, cfg.Retrieval.TrustedPublicKeys)
 }
 func readOrderSigningKey(cfg *config, keyID string, publicKeys []string) (ed25519.PrivateKey, error) {
-	directory, e := openSafeDirectory(filepath.Dir(cfg.configPath))
+	key, e := readLocalOrderKey(filepath.Dir(cfg.configPath), permitKeyFilename)
+	if e != nil {
+		return nil, e
+	}
+	pub := key.Public().(ed25519.PublicKey)
+	keys, e := trustedOrderKeys(publicKeys)
+	if e != nil || permitKeyID(pub) != keyID || !bytes.Equal(keys[keyID], pub) {
+		zeroBytes(key)
+		return nil, retrieval.ErrTrust
+	}
+	return key, nil
+}
+func readLocalOrderKey(path, filename string) (ed25519.PrivateKey, error) {
+	directory, e := openSafeDirectory(path)
 	if e != nil {
 		return nil, errors.New("permit_key_unavailable")
 	}
 	defer directory.Close()
-	f, e := directory.open(permitKeyFilename)
+	f, e := directory.open(filename)
 	if e != nil {
 		return nil, errors.New("permit_key_unavailable")
 	}
@@ -267,8 +283,7 @@ func readOrderSigningKey(cfg *config, keyID string, publicKeys []string) (ed2551
 	defer zeroBytes(seed)
 	key := ed25519.NewKeyFromSeed(seed)
 	pub := key.Public().(ed25519.PublicKey)
-	keys, e := trustedOrderKeys(publicKeys)
-	if e != nil || record.KeyID != keyID || permitKeyID(pub) != record.KeyID || record.PublicKey != base64.RawURLEncoding.EncodeToString(pub) || !bytes.Equal(keys[record.KeyID], pub) {
+	if permitKeyID(pub) != record.KeyID || record.PublicKey != base64.RawURLEncoding.EncodeToString(pub) {
 		zeroBytes(key)
 		return nil, retrieval.ErrTrust
 	}
