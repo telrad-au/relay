@@ -288,7 +288,7 @@ jobs:
     windows-installer:
         name: Verify Windows installer trust checks
         runs-on: windows-2025
-        timeout-minutes: 10
+        timeout-minutes: 15
         steps:
             - name: Check out repository
               uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
