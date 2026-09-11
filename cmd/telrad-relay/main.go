@@ -82,9 +82,17 @@ type config struct {
 }
 
 type pairingResponse struct {
-	RelayID         string `json:"relayId"`
-	Credential      string `json:"credential"`
-	ProtocolVersion int    `json:"protocolVersion"`
+	RelayID             string    `json:"relayId"`
+	Credential          string    `json:"credential,omitempty"`
+	ProtocolVersion     int       `json:"protocolVersion"`
+	CredentialVersion   int       `json:"credentialVersion,omitempty"`
+	FamilyID            string    `json:"familyId,omitempty"`
+	Generation          int       `json:"generation,omitempty"`
+	AccessCredential    string    `json:"accessCredential,omitempty"`
+	AccessExpiresAt     time.Time `json:"accessExpiresAt,omitempty"`
+	RenewableCredential string    `json:"renewableCredential,omitempty"`
+	RenewableExpiresAt  time.Time `json:"renewableExpiresAt,omitempty"`
+	RenewalURL          string    `json:"renewalUrl,omitempty"`
 
 	// Legacy endpoint fields are decoded only to enforce transition equality.
 	// They never select Relay destinations.
@@ -471,6 +479,7 @@ func enrollWithPairingToken(ctx context.Context, cfg *config, configPath string,
 		return errors.New("create pairing request")
 	}
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Telrad-Credential-Version", "2")
 	resp, err := clients.secure.Do(req)
 	if err != nil {
 		return fmt.Errorf("pairing request failed: %w", safeNetworkError(err))
@@ -500,7 +509,17 @@ func enrollWithPairingToken(ctx context.Context, cfg *config, configPath string,
 			return err
 		}
 	}
-	if err := commitPairing(configPath, cfg, credentialFile{SchemaVersion: credentialSchemaVersion, Credential: result.Credential}); err != nil {
+	record := credentialFile{SchemaVersion: credentialSchemaVersion, Credential: result.Credential}
+	if result.CredentialVersion == 2 {
+		renewalURL, _ := renewalEndpoint(cfg.PairingURL)
+		record = lifecycleRecord(credentialLifecycleMaterial{
+			CredentialVersion: result.CredentialVersion,
+			FamilyID:          result.FamilyID, Generation: result.Generation,
+			AccessCredential: result.AccessCredential, AccessExpiresAt: result.AccessExpiresAt,
+			RenewableCredential: result.RenewableCredential, RenewableExpiresAt: result.RenewableExpiresAt,
+		}, renewalURL, time.Now().UTC())
+	}
+	if err := commitPairing(configPath, cfg, record); err != nil {
 		return fmt.Errorf("commit pairing: %w", err)
 	}
 	fmt.Fprintf(nativeCommandOutput(cfg), "Paired relay %s\n", result.RelayID)
@@ -508,7 +527,7 @@ func enrollWithPairingToken(ctx context.Context, cfg *config, configPath string,
 }
 
 func validatePairingResponse(expectedPairingURL string, result pairingResponse) (protocolEndpoints, error) {
-	if result.ProtocolVersion != 1 || !validOpaqueID(result.RelayID) || !credentialPattern.MatchString(result.Credential) {
+	if result.ProtocolVersion != 1 || !validOpaqueID(result.RelayID) {
 		return protocolEndpoints{}, errors.New("pairing failed: invalid_response")
 	}
 	endpoints, err := deriveProtocolEndpoints(expectedPairingURL)
@@ -537,43 +556,45 @@ func validatePairingResponse(expectedPairingURL string, result pairingResponse) 
 	if provided != 0 && provided != len(legacy) {
 		return protocolEndpoints{}, errors.New("pairing failed: invalid_response")
 	}
+	if result.CredentialVersion == 0 {
+		if !credentialPattern.MatchString(result.Credential) || result.FamilyID != "" || result.Generation != 0 || result.AccessCredential != "" || !result.AccessExpiresAt.IsZero() || result.RenewableCredential != "" || !result.RenewableExpiresAt.IsZero() || result.RenewalURL != "" {
+			return protocolEndpoints{}, errors.New("pairing failed: invalid_response")
+		}
+		return endpoints, nil
+	}
+	renewalURL, endpointErr := renewalEndpoint(expectedPairingURL)
+	material := credentialLifecycleMaterial{
+		CredentialVersion: result.CredentialVersion,
+		FamilyID:          result.FamilyID, Generation: result.Generation,
+		AccessCredential: result.AccessCredential, AccessExpiresAt: result.AccessExpiresAt,
+		RenewableCredential: result.RenewableCredential, RenewableExpiresAt: result.RenewableExpiresAt,
+	}
+	if result.Credential != "" || endpointErr != nil || result.RenewalURL != renewalURL || validateLifecycleMaterial(material, credentialFile{}, true, time.Now()) != nil {
+		return protocolEndpoints{}, errors.New("pairing failed: invalid_response")
+	}
 	return endpoints, nil
 }
 
 func rotateCredential(ctx context.Context, cfg *config) error {
-	provider, err := newCredentialProvider(cfg.CredentialPath, time.Now())
+	record, err := readCredentialFile(cfg.CredentialPath, time.Now())
 	if err != nil {
 		return errors.New("stored credential is invalid")
 	}
-	rotationURL, _ := url.Parse(cfg.PairingURL)
-	rotationURL.Path = "/v1/relay/credentials/rotate"
-	rotationCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
-	defer cancel()
-	req, err := http.NewRequestWithContext(rotationCtx, http.MethodPost, rotationURL.String(), nil)
+	changed, terminal, err := advanceCredentialLifecycle(ctx, cfg, clientFactory(cfg).secure, true)
 	if err != nil {
-		return err
+		if terminal {
+			return errors.New("credential renewal was rejected; enroll Relay again")
+		}
+		return errors.New("credential renewal failed")
 	}
-	req.Header.Set("Authorization", "Bearer "+provider.Current())
-	resp, err := clientFactory(cfg).secure.Do(req)
-	if err != nil {
-		return fmt.Errorf("credential rotation failed: %w", safeNetworkError(err))
+	if !changed {
+		return errors.New("credential renewal did not produce a replacement")
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusCreated {
-		return fmt.Errorf("credential rotation failed: http_%d", resp.StatusCode)
+	if record.SchemaVersion == credentialSchemaVersion {
+		fmt.Fprintln(nativeCommandOutput(cfg), "Relay credential migrated")
+	} else {
+		fmt.Fprintln(nativeCommandOutput(cfg), "Relay credential renewed")
 	}
-	var result struct {
-		Credential              string    `json:"credential"`
-		OldCredentialValidUntil time.Time `json:"oldCredentialValidUntil"`
-	}
-	if !mediaTypeEquals(resp.Header.Get("Content-Type"), "application/json") || decodeBoundedJSON(resp.Body, maxCloudResponseBytes, &result) != nil || !credentialPattern.MatchString(result.Credential) || !result.OldCredentialValidUntil.After(time.Now()) {
-		return errors.New("credential rotation failed: invalid_response")
-	}
-	record := credentialFile{SchemaVersion: credentialSchemaVersion, Credential: result.Credential, PreviousCredential: provider.Current(), PreviousValidUntil: &result.OldCredentialValidUntil}
-	if err := commitCredential(cfg.CredentialPath, record); err != nil {
-		return err
-	}
-	fmt.Fprintln(nativeCommandOutput(cfg), "Relay credential rotated")
 	return nil
 }
 
@@ -625,7 +646,9 @@ func runClinicalWithContext(ctx context.Context, cfg *config, configPath string)
 	status.SetIngestReady(true)
 	errCh := make(chan error, 8)
 	credentialChanged := make(chan struct{}, 1)
-	go watchCredentialFile(ctx, provider, credentialChanged, status)
+	credentialLifecycleChanged := make(chan struct{}, 1)
+	go watchCredentialFile(ctx, provider, status, credentialChanged, credentialLifecycleChanged)
+	go maintainCredentialLifecycle(ctx, cfg, clients.secure, provider, credentialChanged, credentialLifecycleChanged, status)
 	controlDone := make(chan struct{})
 	go func() {
 		defer close(controlDone)
@@ -681,7 +704,7 @@ func acceptRelayConnections(ctx context.Context, protocol string, listener net.L
 	}
 }
 
-func watchCredentialFile(ctx context.Context, provider *credentialProvider, changed chan<- struct{}, status *runtimeStatusManager) {
+func watchCredentialFile(ctx context.Context, provider *credentialProvider, status *runtimeStatusManager, changed ...chan<- struct{}) {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	expiryTimer := time.NewTimer(time.Hour)
@@ -709,9 +732,11 @@ func watchCredentialFile(ctx context.Context, provider *credentialProvider, chan
 			resetCredentialExpiryTimer(expiryTimer, provider)
 			if adopted {
 				status.CredentialAdopted()
-				select {
-				case changed <- struct{}{}:
-				default:
+				for _, channel := range changed {
+					select {
+					case channel <- struct{}{}:
+					default:
+					}
 				}
 			}
 		}

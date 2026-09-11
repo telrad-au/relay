@@ -40,7 +40,9 @@ validated with HAPI.
 Pairing and credentials cover HTTP `201`, locally derived endpoint paths,
 legacy endpoint equality, content types, redirect rejection, authorization
 cardinality, response body bounds, secret-safe errors, file modes, transaction
-recovery, overlap expiry, atomic rotation, and live provider adoption.
+recovery, legacy migration, durable renewal-operation recovery, concurrent
+renewal serialization, expiry scheduling, atomic generation replacement, and
+live provider adoption without canceling active work.
 
 HL7 coverage keeps one clinic MLLP socket across sequential exchanges and
 asserts one HTTPS request per message. It checks exact framing, UTF-8,
@@ -177,7 +179,7 @@ CI uses `scripts/check-native-installation.sh` on its disposable Linux runner an
 `packaging/install-native.Tests.ps1` on its disposable Windows runner. These install
 at the real managed paths and exercise service identities, unpaired startup,
 configuration preservation, stopped-service repair, and malicious state links.
-The installed lifecycle test pairs against a synthetic HTTPS server, rotates and
+The installed lifecycle test pairs against a synthetic HTTPS server, renews and
 replaces the live identity, installs a signed candidate, and verifies rollback
 and enrollment preservation when a signed candidate reports the wrong version.
 The failing update must finish rollback before returning a nonzero result. Native

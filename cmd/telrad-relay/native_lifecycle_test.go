@@ -53,7 +53,7 @@ func TestNativeInstalledLifecycle(t *testing.T) {
 	mustRun("native-action", "stop")
 	t.Cleanup(func() { _ = serviceAction("stop") })
 	var paired atomic.Int32
-	rotated := make(chan struct{}, 1)
+	renewed := make(chan struct{}, 1)
 	var server *httptest.Server
 	server = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -65,18 +65,22 @@ func TestNativeInstalledLifecycle(t *testing.T) {
 			fmt.Fprintf(w, `{"pairingToken":%q}`, strings.Repeat("t", 40))
 		case r.URL.Path == "/v1/relay/pairing-enrollments":
 			identity := paired.Add(1)
+			now := time.Now().UTC()
 			w.WriteHeader(http.StatusCreated)
-			fmt.Fprintf(w, `{"relayId":"native-ci-%d","credential":%q,"protocolVersion":1}`, identity, testCredential(byte('A'+identity)))
-		case r.URL.Path == "/v1/relay/credentials/rotate":
+			fmt.Fprintf(w, `{"relayId":"native-ci-%d","protocolVersion":1,"credentialVersion":2,"familyId":"native-family-%d","generation":1,"accessCredential":%q,"accessExpiresAt":%q,"renewableCredential":%q,"renewableExpiresAt":%q,"renewalUrl":%q}`,
+				identity, identity, testAccessCredential(byte('A'+identity)), now.Add(10*time.Minute).Format(time.RFC3339Nano), testRenewableCredential(byte('A'+identity)), now.Add(30*24*time.Hour).Format(time.RFC3339Nano), server.URL+"/v1/relay/credentials/renew")
+		case r.URL.Path == "/v1/relay/credentials/renew":
+			now := time.Now().UTC()
 			w.WriteHeader(http.StatusCreated)
-			fmt.Fprintf(w, `{"credential":%q,"oldCredentialValidUntil":%q}`, testCredential('R'), time.Now().Add(15*time.Minute).UTC().Format(time.RFC3339))
+			fmt.Fprintf(w, `{"credentialVersion":2,"familyId":"native-family-1","generation":2,"accessCredential":%q,"accessExpiresAt":%q,"renewableCredential":%q,"renewableExpiresAt":%q}`,
+				testAccessCredential('R'), now.Add(10*time.Minute).Format(time.RFC3339Nano), testRenewableCredential('R'), now.Add(30*24*time.Hour).Format(time.RFC3339Nano))
 		case r.URL.Path == "/v1/relay/control/sessions":
 			w.WriteHeader(http.StatusCreated)
 			json.NewEncoder(w).Encode(readyMessage{Type: "ready", SessionID: "native-session", Transports: map[string]readyTransport{"dicom": {URL: server.URL + "/v1/relay/ingest/dicom", ContentType: "application/dicom"}, "hl7": {URL: server.URL + "/v1/relay/ingest/hl7", ContentType: "application/hl7-v2"}}})
 		default:
-			if r.Header.Get("Authorization") == "Bearer "+testCredential('R') {
+			if r.Header.Get("Authorization") == "Bearer "+testAccessCredential('R') {
 				select {
-				case rotated <- struct{}{}:
+				case renewed <- struct{}{}:
 				default:
 				}
 			}
@@ -126,9 +130,9 @@ func TestNativeInstalledLifecycle(t *testing.T) {
 	}
 	mustRun("rotate-credential")
 	select {
-	case <-rotated:
+	case <-renewed:
 	case <-time.After(15 * time.Second):
-		t.Fatal("running service did not adopt rotated credential")
+		t.Fatal("running service did not adopt renewed credential")
 	}
 	mustRun("enroll")
 	waitReady("0.0.0-ci.1")

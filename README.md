@@ -102,6 +102,12 @@ docker compose up --detach
 Docker retains configuration and authentication in the `telrad-relay-data`
 volume after enrollment.
 
+Pairing negotiates short-lived credentials when the Telrad service supports
+them. Relay renews those credentials automatically before expiry and migrates
+an existing bearer credential without requiring re-pairing. Keep the protected
+credential volume persistent: it contains the crash-recovery state needed to
+complete an interrupted renewal safely.
+
 Official images contain the source-controlled production pairing endpoint.
 Development and self-hosted deployments can override it at runtime with
 `TELRAD_RELAY_PAIRING_URL`. Relay derives the fixed control and ingest paths
@@ -193,8 +199,9 @@ service is stopped, credential diagnostics are unavailable.
 
 A new native installation starts local management under its dedicated service
 identity. DICOM and HL7 listeners remain closed until pairing succeeds. Pairing,
-rotation, service control, and exact update application require administrator
-authorization; the CLI announces each action before sudo or UAC.
+an immediate credential renewal, service control, and exact update application
+require administrator authorization; the CLI announces each action before sudo
+or UAC. Routine credential renewal is automatic and does not request elevation.
 
 `telrad update` only checks for an update. It does not change the host. After
 reviewing the release, an administrator can approve that exact version with:

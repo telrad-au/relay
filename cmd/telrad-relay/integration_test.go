@@ -30,6 +30,9 @@ func TestPairing201DerivesEndpointsAuthorizationAndPersistsAtomically(t *testing
 		if request.Header.Get("Authorization") != "" {
 			t.Fatal("pairing request unexpectedly carried authorization")
 		}
+		if request.Header.Get("X-Telrad-Credential-Version") != "2" {
+			t.Fatal("pairing request did not opt into credential lifecycle v2")
+		}
 		body, _ := io.ReadAll(request.Body)
 		if !bytes.Contains(body, []byte(`"pairingToken":"`+strings.Repeat("t", 40)+`"`)) {
 			t.Fatal("pairing token missing")
@@ -205,21 +208,27 @@ func TestNativeDeviceAuthorizationReportsDenial(t *testing.T) {
 	}
 }
 
-func TestCredentialRotationSendsEmptyBearerPostAndStoresOverlap(t *testing.T) {
+func TestManualCredentialOperationMigratesLegacyCredential(t *testing.T) {
 	oldCredential := testCredential('O')
-	newCredential := testCredential('N')
-	deadline := time.Now().UTC().Add(15 * time.Minute).Truncate(time.Second)
-	server := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+	now := time.Now().UTC()
+	accessCredential := testAccessCredential('N')
+	renewableCredential := testRenewableCredential('R')
+	accessExpiry := now.Add(10 * time.Minute).Truncate(time.Second)
+	renewableExpiry := now.Add(30 * 24 * time.Hour).Truncate(time.Second)
+	deadline := now.Add(5 * time.Minute).Truncate(time.Second)
+	var server *httptest.Server
+	server = httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		body, _ := io.ReadAll(request.Body)
-		if request.Method != http.MethodPost || request.URL.Path != "/v1/relay/credentials/rotate" || len(body) != 0 {
-			t.Fatalf("rotation request %s %s body=%q", request.Method, request.URL.Path, body)
+		if request.Method != http.MethodPost || request.URL.Path != "/v1/relay/credentials/migrate" || !bytes.Contains(body, []byte(`"operationId":"`)) {
+			t.Fatalf("migration request %s %s", request.Method, request.URL.Path)
 		}
-		if request.Header.Get("Authorization") != "Bearer "+oldCredential || request.Header.Get("Content-Type") != "" {
-			t.Fatal("rotation authentication or empty-body metadata is invalid")
+		if request.Header.Get("Authorization") != "Bearer "+oldCredential || request.Header.Get("Content-Type") != "application/json" {
+			t.Fatal("migration request metadata is invalid")
 		}
 		writer.Header().Set("Content-Type", "application/json; charset=utf-8")
 		writer.WriteHeader(http.StatusCreated)
-		_, _ = fmt.Fprintf(writer, `{"credential":%q,"oldCredentialValidUntil":%q}`, newCredential, deadline.Format(time.RFC3339))
+		_, _ = fmt.Fprintf(writer, `{"credentialVersion":2,"familyId":"family-1","generation":1,"accessCredential":%q,"accessExpiresAt":%q,"renewableCredential":%q,"renewableExpiresAt":%q,"oldCredentialValidUntil":%q,"renewalUrl":%q}`,
+			accessCredential, accessExpiry.Format(time.RFC3339), renewableCredential, renewableExpiry.Format(time.RFC3339), deadline.Format(time.RFC3339), server.URL+"/v1/relay/credentials/renew")
 	}))
 	defer server.Close()
 	oldFactory := clientFactory
@@ -240,8 +249,8 @@ func TestCredentialRotationSendsEmptyBearerPostAndStoresOverlap(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if record.Credential != newCredential || record.PreviousCredential != oldCredential || record.PreviousValidUntil == nil || !record.PreviousValidUntil.Equal(deadline) {
-		t.Fatalf("rotation record=%#v", record)
+	if record.SchemaVersion != credentialLifecycleSchemaVersion || record.AccessCredential != accessCredential || record.RenewableCredential != renewableCredential || record.PendingOperation != nil {
+		t.Fatalf("migration record=%#v", record)
 	}
 }
 

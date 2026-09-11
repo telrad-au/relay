@@ -14,33 +14,89 @@ import (
 	"time"
 )
 
-const credentialSchemaVersion = 1
+const (
+	credentialSchemaVersion          = 1
+	credentialLifecycleSchemaVersion = 2
+)
 
-var credentialPattern = regexp.MustCompile(`^trr_v1_[A-Za-z0-9_-]{22}_[A-Za-z0-9_-]{43}$`)
+var (
+	credentialPattern          = regexp.MustCompile(`^trr_v1_[A-Za-z0-9_-]{22}_[A-Za-z0-9_-]{43}$`)
+	accessCredentialPattern    = regexp.MustCompile(`^trr_access_v2_[A-Za-z0-9_-]{22}_[A-Za-z0-9_-]{43}$`)
+	renewableCredentialPattern = regexp.MustCompile(`^trr_renewable_v2_[A-Za-z0-9_-]{22}_[A-Za-z0-9_-]{43}$`)
+	credentialOperationPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{32,128}$`)
+)
+
+type credentialOperation struct {
+	Kind string `json:"kind"`
+	ID   string `json:"id"`
+}
 
 type credentialFile struct {
 	SchemaVersion      int        `json:"schemaVersion"`
-	Credential         string     `json:"credential"`
+	Credential         string     `json:"credential,omitempty"`
 	PreviousCredential string     `json:"previousCredential,omitempty"`
 	PreviousValidUntil *time.Time `json:"previousValidUntil,omitempty"`
+
+	CredentialVersion   int                  `json:"credentialVersion,omitempty"`
+	FamilyID            string               `json:"familyId,omitempty"`
+	Generation          int                  `json:"generation,omitempty"`
+	AccessCredential    string               `json:"accessCredential,omitempty"`
+	AccessObtainedAt    time.Time            `json:"accessObtainedAt,omitempty"`
+	AccessExpiresAt     time.Time            `json:"accessExpiresAt,omitempty"`
+	RenewableCredential string               `json:"renewableCredential,omitempty"`
+	RenewableExpiresAt  time.Time            `json:"renewableExpiresAt,omitempty"`
+	RenewalURL          string               `json:"renewalUrl,omitempty"`
+	PendingOperation    *credentialOperation `json:"pendingOperation,omitempty"`
 }
 
 func (record credentialFile) validate(now time.Time) error {
-	if record.SchemaVersion != credentialSchemaVersion {
+	switch record.SchemaVersion {
+	case credentialSchemaVersion:
+		if record.CredentialVersion != 0 || record.FamilyID != "" || record.Generation != 0 || record.AccessCredential != "" || !record.AccessObtainedAt.IsZero() || !record.AccessExpiresAt.IsZero() || record.RenewableCredential != "" || !record.RenewableExpiresAt.IsZero() || record.RenewalURL != "" {
+			return errors.New("legacy credential contains lifecycle fields")
+		}
+		if !credentialPattern.MatchString(record.Credential) {
+			return errors.New("credential has an invalid format")
+		}
+		if record.PreviousCredential == "" && record.PreviousValidUntil != nil {
+			return errors.New("previousValidUntil requires previousCredential")
+		}
+		if record.PreviousCredential != "" {
+			if !credentialPattern.MatchString(record.PreviousCredential) || record.PreviousValidUntil == nil {
+				return errors.New("previous credential overlap is invalid")
+			}
+		}
+		if record.PendingOperation != nil && (record.PendingOperation.Kind != "migrate" || !credentialOperationPattern.MatchString(record.PendingOperation.ID)) {
+			return errors.New("pending credential migration is invalid")
+		}
+		return nil
+	case credentialLifecycleSchemaVersion:
+		if record.Credential != "" || record.PreviousCredential != "" || record.PreviousValidUntil != nil {
+			return errors.New("lifecycle credential contains legacy fields")
+		}
+		if record.CredentialVersion != 2 || !validOpaqueID(record.FamilyID) || record.Generation < 1 || !accessCredentialPattern.MatchString(record.AccessCredential) || !renewableCredentialPattern.MatchString(record.RenewableCredential) {
+			return errors.New("lifecycle credential has an invalid format")
+		}
+		if record.AccessObtainedAt.IsZero() || record.AccessExpiresAt.IsZero() || record.RenewableExpiresAt.IsZero() || !record.AccessExpiresAt.After(record.AccessObtainedAt) || !record.RenewableExpiresAt.After(record.AccessExpiresAt) {
+			return errors.New("lifecycle credential expiry is invalid")
+		}
+		if err := validateEndpointURL("renewalUrl", record.RenewalURL, "https", "/v1/relay/credentials/renew"); err != nil {
+			return errors.New("lifecycle credential renewal URL is invalid")
+		}
+		if record.PendingOperation != nil && (record.PendingOperation.Kind != "renew" || !credentialOperationPattern.MatchString(record.PendingOperation.ID)) {
+			return errors.New("pending credential renewal is invalid")
+		}
+		return nil
+	default:
 		return fmt.Errorf("credential schemaVersion %d is unsupported", record.SchemaVersion)
 	}
-	if !credentialPattern.MatchString(record.Credential) {
-		return errors.New("credential has an invalid format")
+}
+
+func (record credentialFile) current() string {
+	if record.SchemaVersion == credentialLifecycleSchemaVersion {
+		return record.AccessCredential
 	}
-	if record.PreviousCredential == "" && record.PreviousValidUntil != nil {
-		return errors.New("previousValidUntil requires previousCredential")
-	}
-	if record.PreviousCredential != "" {
-		if !credentialPattern.MatchString(record.PreviousCredential) || record.PreviousValidUntil == nil {
-			return errors.New("previous credential overlap is invalid")
-		}
-	}
-	return nil
+	return record.Credential
 }
 
 func readCredentialFile(path string, now time.Time) (credentialFile, error) {
@@ -104,7 +160,18 @@ func newCredentialProvider(path string, now time.Time) (*credentialProvider, err
 func (provider *credentialProvider) Current() string {
 	provider.mu.RLock()
 	defer provider.mu.RUnlock()
-	return provider.record.Credential
+	return provider.record.current()
+}
+
+func (provider *credentialProvider) Snapshot() credentialFile {
+	provider.mu.RLock()
+	defer provider.mu.RUnlock()
+	record := provider.record
+	if record.PendingOperation != nil {
+		operation := *record.PendingOperation
+		record.PendingOperation = &operation
+	}
+	return record
 }
 
 func (provider *credentialProvider) Generation() uint64 {
@@ -123,12 +190,23 @@ func (provider *credentialProvider) PreviousDeadline() (time.Time, bool) {
 }
 
 func (provider *credentialProvider) ExpirePrevious(now time.Time) error {
+	credentialLifecycleMutex.Lock()
+	defer credentialLifecycleMutex.Unlock()
+	fileLock, err := acquireCredentialOperationFileLock(provider.path)
+	if err != nil {
+		return err
+	}
+	defer fileLock.Close()
 	provider.mu.Lock()
 	defer provider.mu.Unlock()
-	if provider.record.PreviousValidUntil == nil || provider.record.PreviousValidUntil.After(now) {
+	record, err := readCredentialFile(provider.path, now)
+	if err != nil {
+		return err
+	}
+	if record.PreviousValidUntil == nil || record.PreviousValidUntil.After(now) {
+		provider.record = record
 		return nil
 	}
-	record := provider.record
 	record.PreviousCredential = ""
 	record.PreviousValidUntil = nil
 	if err := atomicWriteJSON(provider.path, record); err != nil {
@@ -139,6 +217,15 @@ func (provider *credentialProvider) ExpirePrevious(now time.Time) error {
 }
 
 func (provider *credentialProvider) Reload(now time.Time) (bool, error) {
+	credentialLifecycleMutex.Lock()
+	defer credentialLifecycleMutex.Unlock()
+	fileLock, err := acquireCredentialOperationFileLock(provider.path)
+	if err != nil {
+		return false, err
+	}
+	defer fileLock.Close()
+	provider.mu.Lock()
+	defer provider.mu.Unlock()
 	record, err := readCredentialFile(provider.path, now)
 	if err != nil {
 		return false, err
@@ -150,9 +237,7 @@ func (provider *credentialProvider) Reload(now time.Time) (bool, error) {
 			return false, err
 		}
 	}
-	provider.mu.Lock()
-	defer provider.mu.Unlock()
-	changed := record.Credential != provider.record.Credential
+	changed := record.current() != provider.record.current()
 	provider.record = record
 	if changed {
 		provider.generation++
