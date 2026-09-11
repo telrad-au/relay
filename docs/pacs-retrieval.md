@@ -1,7 +1,7 @@
 # Accession-authorized PACS retrieval (v2)
 
-Retrieval is opt-in. Existing installations continue raw HL7, DICOM push and
-report return after the schema-v4 to v5 upgrade. Company Push remains the default;
+Retrieval is opt-in. The schema-v4 to v5 upgrade preserves image Push defaults.
+Report return requires [local order authorization](report-authorization.md). Company Push remains the default;
 Retrieve also accepts ordinary pushed DICOM. Do not publish a release or enable
 `RELAY_PACS_RETRIEVAL_ENABLED` as part of installing this change. Activation
 requires the actual Relay build, clinic source feed, PACS profile and cloud
@@ -124,7 +124,7 @@ source policy per feed. The actual TCP peer must match an approved source IP;
 MSH application/facility values are additional restrictions, not authentication.
 Enforce host-firewall source restrictions and prevent address spoofing on the
 clinic network. Do not authorize NAT/proxy addresses shared with unapproved feeds.
-Cloud report delivery never invokes the signer. For opted-in clinics, report
+Cloud report delivery never invokes the signer. Report
 return accepts only ORU R01 and rejects embedded messages/framing, preventing a
 cloud-origin ORM from being returned through the RIS referral feed.
 

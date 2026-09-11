@@ -60,6 +60,14 @@ func TestNativeInstallerPreservesConfigAndClearsInterruptedUpdate(t *testing.T) 
 	configBytes, _ := json.Marshal(previous)
 	os.WriteFile(paths.Config, configBytes, 0600)
 	os.WriteFile(paths.Executable, []byte("old binary"), 0755)
+	keyPath := filepath.Join(filepath.Dir(paths.Credential), reportKeyFilename)
+	if err := generateOrderKey(filepath.Dir(paths.Credential), reportKeyFilename); err != nil {
+		t.Fatal(err)
+	}
+	keyBytes, err := os.ReadFile(keyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
 	credential := []byte("synthetic existing enrollment; installer must not reinterpret")
 	os.WriteFile(paths.Credential, credential, 0600)
 	for _, path := range []string{updateJournalPath(paths.Executable), paths.Executable + ".previous", paths.Executable + ".config.previous", paths.Executable + ".new", paths.Executable + ".new.manifest.json"} {
@@ -68,7 +76,7 @@ func TestNativeInstallerPreservesConfigAndClearsInterruptedUpdate(t *testing.T) 
 	if err := installNativeBundle(paths, bundle, []byte("new binary"), ops); err != nil {
 		t.Fatal(err)
 	}
-	for path, want := range map[string][]byte{paths.Config: configBytes, paths.Credential: credential, paths.Executable: []byte("new binary"), paths.Installation: bundle.Installation} {
+	for path, want := range map[string][]byte{keyPath: keyBytes, paths.Config: configBytes, paths.Credential: credential, paths.Executable: []byte("new binary"), paths.Installation: bundle.Installation} {
 		got, err := os.ReadFile(path)
 		if err != nil || !bytes.Equal(got, want) {
 			t.Fatalf("%s was not preserved/installed: %v", filepath.Base(path), err)

@@ -65,7 +65,7 @@ func TestCloudRequiresByteExactCompleteDICOMBeforeReceipt(t *testing.T) {
 
 func TestCloudReportRequiresRISApplicationAAAndIdenticalResultReplay(t *testing.T) {
 	s, _ := testCloud(t)
-	payload := synthetic.HL7("perf-report-00000000", 4096)
+	payload := synthetic.Report("perf-report-00000000", 4096)
 	job := &reportJob{Token: "claim", Expires: time.Now().Add(time.Minute), Payload: payload, Event: event{Kind: "report"}}
 	s.jobs = []*reportJob{job}
 	call := func(body string) *httptest.ResponseRecorder {
@@ -98,7 +98,7 @@ func TestCloudReportRequiresRISApplicationAAAndIdenticalResultReplay(t *testing.
 
 func TestCloudExpiredClaimPreservesReportBytes(t *testing.T) {
 	s, _ := testCloud(t)
-	payload := synthetic.HL7("perf-report-00000000", 4096)
+	payload := synthetic.Report("perf-report-00000000", 4096)
 	s.jobs = []*reportJob{{Payload: payload, Event: event{Kind: "report"}}}
 	poll := func() map[string]any {
 		w := httptest.NewRecorder()

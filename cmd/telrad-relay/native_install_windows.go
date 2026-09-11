@@ -125,7 +125,7 @@ func secureNativeState() error {
 	if err := setNativeACL(filepath.Dir(paths.Config), true, false); err != nil {
 		return err
 	}
-	for _, name := range []string{"relay.json", "relay-credential.json", permitKeyFilename, "runtime-status.json", "relay.json.pairing-transaction.json", "relay.json.next", "relay.json.previous", "relay-credential.json.next", "relay-credential.json.previous"} {
+	for _, name := range []string{"relay.json", "relay-credential.json", permitKeyFilename, reportKeyFilename, "runtime-status.json", "relay.json.pairing-transaction.json", "relay.json.next", "relay.json.previous", "relay-credential.json.next", "relay-credential.json.previous"} {
 		path := filepath.Join(filepath.Dir(paths.Config), name)
 		if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
 			continue

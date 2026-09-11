@@ -612,6 +612,9 @@ func runWithContext(ctx context.Context, cfg *config, configPath string) error {
 }
 
 func runClinicalWithContext(ctx context.Context, cfg *config, configPath string) error {
+	if err := ensureReportSigningKey(cfg); err != nil {
+		return err
+	}
 	provider, err := newCredentialProvider(cfg.CredentialPath, time.Now())
 	if err != nil {
 		return errors.New("stored credential is invalid")

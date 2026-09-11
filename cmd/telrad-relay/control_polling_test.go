@@ -38,11 +38,13 @@ func TestPollingRetriesLostResultWithoutRedeliveringAndDrains(t *testing.T) {
 			_ = conn.Close()
 		}
 	}()
-	payload := "MSH|^~\\&|TELRAD|TEST|RIS|TEST|20260906000000||ORU^R01|report-1|P|2.5\r"
+	payload := reportTestPayload("ACC")
 	digest := sha256.Sum256([]byte(payload))
-	cfg := pairedTestConfig(t.TempDir())
+	stateDirectory := t.TempDir()
+	cfg := pairedTestConfig(stateDirectory)
 	cfg.ReportHost = "127.0.0.1"
 	cfg.ReportPort = listener.Addr().(*net.TCPAddr).Port
+	authorization := reportTestSigner(t, cfg)(payload)
 	provider := testProvider(t, testCredential('A'))
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -71,7 +73,7 @@ func TestPollingRetriesLostResultWithoutRedeliveringAndDrains(t *testing.T) {
 			attempt := polls
 			mu.Unlock()
 			// A later cloud claim is deliberately sent again with identical bytes.
-			_ = json.NewEncoder(w).Encode(reportMessage{Type: "report", DeliveryID: "delivery-1", Token: []string{"token-1", "token-2"}[attempt-1], MessageControlID: "report-1", Payload: payload, PayloadSHA256: hex.EncodeToString(digest[:]), ClaimExpiresAt: time.Now().Add(8 * time.Second)})
+			_ = json.NewEncoder(w).Encode(reportMessage{Type: "report", Authorization: authorization, DeliveryID: "delivery-1", Token: []string{"token-1", "token-2"}[attempt-1], MessageControlID: "report-1", Payload: payload, PayloadSHA256: hex.EncodeToString(digest[:]), ClaimExpiresAt: time.Now().Add(8 * time.Second)})
 		case strings.HasSuffix(r.URL.Path, "/result"):
 			var result reportResult
 			if err := json.NewDecoder(r.Body).Decode(&result); err != nil {
@@ -102,7 +104,9 @@ func TestPollingRetriesLostResultWithoutRedeliveringAndDrains(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	cfg.ControlURL = server.URL + "/v1/relay/control"
+	cfg.configPath = filepath.Join(stateDirectory, "relay.json")
+	setRetrievalCloud(cfg, server.URL)
+	saveRetrievalTestConfig(t, cfg)
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
@@ -134,7 +138,7 @@ func TestPollingRetriesLostResultWithoutRedeliveringAndDrains(t *testing.T) {
 	if first, second := <-received, <-received; first != second {
 		t.Fatal("cloud retry changed MLLP bytes")
 	}
-	entries, err := os.ReadDir(filepath.Dir(cfg.configPath))
+	entries, err := os.ReadDir(stateDirectory)
 	if err != nil {
 		t.Fatal(err)
 	}

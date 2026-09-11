@@ -293,7 +293,7 @@ func runTraffic(ctx context.Context, cfg workerConfig, dir string) trafficResult
 			}
 			defer c.Close()
 			_ = c.SetDeadline(time.Now().Add(10 * time.Second))
-			payload := synthetic.HL7(controlID("report", e.Sequence), cfg.Profile.ReportBytes)
+			payload := synthetic.Report(controlID("report", e.Sequence), cfg.Profile.ReportBytes)
 			_, err = c.Write(synthetic.Frame(payload))
 			if err != nil {
 				return finish(err)

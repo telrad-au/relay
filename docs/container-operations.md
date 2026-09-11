@@ -121,3 +121,11 @@ Schema v4 upgrades to v5 with retrieval absent. Optional retrieval keeps only it
 permit signing key and approved configuration in the existing volume; it adds no
 clinical spool or job state. Generate the key as UID 10001 and follow the
 [PACS retrieval guide](pacs-retrieval.md) for qualification and rollback.
+
+## Order-authorized reports
+
+Report authorization is always enabled in both image modes. Relay automatically
+creates and retains `report-signing-key.json` beside its credential file; no
+additional settings or key-provisioning commands are required. Preserve the
+protected state directory across restarts and upgrades. See
+[report authorization](report-authorization.md) for the order flow and recovery.

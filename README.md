@@ -173,6 +173,12 @@ address and listening port, TCP `2576` by default. The report receiver opens tha
 listener; Relay connects to it. Restrict each local port to the required clinic
 systems and validate the routes with approved test traffic.
 
+Report return requires a clinic-signed permit from an approved HL7 order for the
+report's accession. Relay verifies that permit and the configured RIS destination
+before delivery. This works in both modes; see [report authorization](docs/report-authorization.md).
+Authorization is automatic and requires no additional configuration. This establishes order
+authority; it does not authenticate the clinical report text.
+
 Report return uses outbound HTTPS polling, with up to three seconds of idle
 pickup latency. Telrad retains the delivery queue; Relay has no local delivery
 ledger. If delivery succeeds but its confirmation is lost, the RIS may receive

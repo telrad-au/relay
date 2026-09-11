@@ -280,6 +280,11 @@ func (r *runner) prepare(ctx context.Context, res *result) (workerConfig, error)
 	if _, err := rand.Read(random); err != nil {
 		return cfg, err
 	}
+	reportSeed := make([]byte, 32)
+	if _, err := rand.Read(reportSeed); err != nil {
+		return cfg, err
+	}
+	cfg.ReportSigningSeed = base64.RawURLEncoding.EncodeToString(reportSeed)
 	cfg.Credential = "trr_v1_" + base64.RawURLEncoding.EncodeToString(random[:16]) + "_" + base64.RawURLEncoding.EncodeToString(random[16:])
 	cfg.Fixtures, err = r.prepareFixtures(ctx)
 	if err != nil {
@@ -683,7 +688,7 @@ func initializeRelayState(cfg workerConfig, dir, state string) error {
 	if err := os.MkdirAll(state, 0700); err != nil {
 		return err
 	}
-	for name, value := range map[string]any{"relay.json": config, "relay-credential.json": map[string]any{"schemaVersion": 1, "credential": cfg.Credential}} {
+	for name, value := range map[string]any{"report-signing-key.json": syntheticReportKeyRecord(cfg), "relay.json": config, "relay-credential.json": map[string]any{"schemaVersion": 1, "credential": cfg.Credential}} {
 		path := filepath.Join(state, name)
 		if err := writeJSON(path, value); err != nil {
 			return err

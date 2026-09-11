@@ -85,8 +85,11 @@ func BenchmarkReportReturn(b *testing.B) {
 			// Precompute synthetic payloads and digests before timed exchanges.
 			payloads := make([][]byte, b.N)
 			digests := make([]string, b.N)
+			authorizations := make([]string, b.N)
+			signReport := reportTestSigner(b, cfg)
 			for i := range payloads {
-				payloads[i] = synthetic.HL7(fmt.Sprintf("benchmark-%d", i), 4096)
+				payloads[i] = synthetic.Report(fmt.Sprintf("benchmark-%d", i), 4096)
+				authorizations[i] = signReport(string(payloads[i]))
 				sum := sha256.Sum256(payloads[i])
 				digests[i] = hex.EncodeToString(sum[:])
 			}
@@ -118,7 +121,7 @@ func BenchmarkReportReturn(b *testing.B) {
 					deadline = time.Now().Add(time.Minute)
 					id := fmt.Sprintf("benchmark-%d", committed.Load())
 					payload := payloads[committed.Load()]
-					_ = json.NewEncoder(w).Encode(reportMessage{Type: "report", DeliveryID: id, Token: fmt.Sprintf("token-%d", attempt), MessageControlID: id, Payload: string(payload), PayloadSHA256: digests[committed.Load()], ClaimExpiresAt: deadline})
+					_ = json.NewEncoder(w).Encode(reportMessage{Type: "report", Authorization: authorizations[committed.Load()], DeliveryID: id, Token: fmt.Sprintf("token-%d", attempt), MessageControlID: id, Payload: string(payload), PayloadSHA256: digests[committed.Load()], ClaimExpiresAt: deadline})
 				case strings.HasSuffix(r.URL.Path, "/result"):
 					results.Add(1)
 					var result reportResult

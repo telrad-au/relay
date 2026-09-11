@@ -279,3 +279,11 @@ edit a journal to nominate recovery paths or execute a staged file manually.
 Schema v4 upgrades to v5 with push unchanged. For permit-key provisioning, source
 restrictions, recovery and rollback, see [PACS retrieval](pacs-retrieval.md). Native
 permission repair preserves and protects `permit-signing-key.json`.
+
+## Order-authorized reports
+
+Report authorization is always enabled in both image modes. Relay automatically
+creates and retains `report-signing-key.json` beside its credential file; no
+additional settings or key-provisioning commands are required. Preserve the
+protected state directory across restarts and upgrades. See
+[report authorization](report-authorization.md) for the order flow and recovery.
