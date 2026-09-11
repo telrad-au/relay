@@ -37,6 +37,22 @@ func openRelativeRegular(directory *os.File, name string) (*os.File, error) {
 	return os.NewFile(uintptr(fd), name), nil
 }
 
+func openCredentialLockHandle(directory *os.File, name, _ string) (*os.File, error) {
+	fd, err := unix.Openat(int(directory.Fd()), name, unix.O_RDWR|unix.O_CREAT|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0600)
+	if err != nil {
+		return nil, &os.PathError{Op: "openat credential lock", Path: name, Err: err}
+	}
+	return os.NewFile(uintptr(fd), name), nil
+}
+
+func lockCredentialHandle(file *os.File) error {
+	return unix.Flock(int(file.Fd()), unix.LOCK_EX)
+}
+
+func unlockCredentialHandle(file *os.File) error {
+	return unix.Flock(int(file.Fd()), unix.LOCK_UN)
+}
+
 func validateRegularHandle(f *os.File) error {
 	info, err := f.Stat()
 	if err != nil {

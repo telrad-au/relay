@@ -15,11 +15,29 @@ func testCredential(suffix byte) string {
 	return "trr_v1_" + strings.Repeat(string(suffix), 22) + "_" + strings.Repeat(string(suffix), 43)
 }
 
+func testAccessCredential(suffix byte) string {
+	return "trr_access_v2_" + strings.Repeat(string(suffix), 22) + "_" + strings.Repeat(string(suffix), 43)
+}
+
+func testRenewableCredential(suffix byte) string {
+	return "trr_renewable_v2_" + strings.Repeat(string(suffix), 22) + "_" + strings.Repeat(string(suffix), 43)
+}
+
 func TestCredentialGrammarAndOverlap(t *testing.T) {
 	now := time.Now()
 	deadline := now.Add(time.Hour)
 	valid := credentialFile{SchemaVersion: 1, Credential: testCredential('A'), PreviousCredential: testCredential('B'), PreviousValidUntil: &deadline}
 	if err := valid.validate(now); err != nil {
+		t.Fatal(err)
+	}
+	lifecycle := credentialFile{
+		SchemaVersion: credentialLifecycleSchemaVersion, CredentialVersion: 2,
+		FamilyID: "family-1", Generation: 1,
+		AccessCredential: testAccessCredential('A'), AccessObtainedAt: now,
+		AccessExpiresAt: now.Add(10 * time.Minute), RenewableCredential: testRenewableCredential('B'),
+		RenewableExpiresAt: now.Add(30 * 24 * time.Hour), RenewalURL: "https://ingest.example.test/v1/relay/credentials/renew",
+	}
+	if err := lifecycle.validate(now); err != nil {
 		t.Fatal(err)
 	}
 	for _, record := range []credentialFile{
@@ -76,7 +94,7 @@ func TestCredentialWatcherExpiresOverlapAtDeadline(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	go watchCredentialFile(ctx, provider, make(chan struct{}, 1), newRuntimeStatus(filepath.Join(directory, "relay.json")))
+	go watchCredentialFile(ctx, provider, newRuntimeStatus(filepath.Join(directory, "relay.json")), make(chan struct{}, 1))
 
 	time.Sleep(250 * time.Millisecond)
 	stored, err := readCredentialFile(path, time.Now())

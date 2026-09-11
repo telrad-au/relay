@@ -54,9 +54,8 @@ func startRetrievalSession(ctx context.Context, cfg *config, ready readyMessage,
 func pollRetrievals(ctx context.Context, cfg *config, sessionURL string, client *http.Client, provider *credentialProvider, work *workDrainer, status *runtimeStatusManager) {
 	// One serial worker bounds retrieval concurrency. PACS associations use
 	// locally approved DIMSE destinations independently of the cloud client.
-	credential := provider.Current()
 	for ctx.Err() == nil {
-		if provider.Current() != credential || status.AuthenticationRequired() {
+		if status.AuthenticationRequired() {
 			return
 		}
 		if _, e := currentRetrievalConfig(cfg); e != nil {
@@ -139,14 +138,13 @@ func executeRetrieval(parent context.Context, cfg *config, sessionURL string, cl
 	leaseTimer := time.AfterFunc(time.Until(claim.ClaimExpiresAt), cancel)
 	defer leaseTimer.Stop()
 	base := sessionURL + "/retrievals/" + url.PathEscape(claim.JobID)
-	credential := provider.Current()
 	initial, e := currentRetrievalConfig(cfg)
 	var originalPACS retrievalPACS
 	if e == nil {
 		_, originalPACS, e = authorizeRetrieval(initial, claim.Permit)
 	}
 	recheck := func() error {
-		if ctx.Err() != nil || provider.Current() != credential || status.AuthenticationRequired() {
+		if ctx.Err() != nil || status.AuthenticationRequired() {
 			return errors.New("lease_lost")
 		}
 		latest, e := currentRetrievalConfig(cfg)

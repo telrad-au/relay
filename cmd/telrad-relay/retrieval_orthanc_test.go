@@ -231,7 +231,7 @@ func TestRetrievalOrthancBinaryRestart(t *testing.T) {
 		files, _ := os.ReadDir(filepath.Dir(cfg.configPath))
 		for _, f := range files {
 			switch f.Name() {
-			case "relay.json", "relay-credential.json", permitKeyFilename, "runtime-status.json":
+			case "relay.json", "relay-credential.json", "relay-credential.json.lock", permitKeyFilename, "runtime-status.json":
 			default:
 				t.Fatalf("binary persisted work: %s", f.Name())
 			}

@@ -101,7 +101,6 @@ func superviseControl(ctx, workCtx context.Context, cfg *config, client *http.Cl
 	sessionURL := ""
 	stopRetrieval := func() {}
 	defer func() { stopRetrieval() }()
-	sessionCredential := provider.Current()
 	backoff := time.Duration(0)
 	defer func() {
 		status.SetControlConnected(false)
@@ -125,12 +124,6 @@ func superviseControl(ctx, workCtx context.Context, cfg *config, client *http.Cl
 				copy.Retrieval = latest.Retrieval
 				cfg = &copy
 			}
-		}
-		if provider.Current() != sessionCredential {
-			stopRetrieval()
-			stopRetrieval = func() {}
-			sessionURL = ""
-			sessionCredential = provider.Current()
 		}
 		var code int
 		var delay time.Duration

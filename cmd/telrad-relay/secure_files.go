@@ -17,6 +17,42 @@ type safeDirectory struct {
 	file *os.File
 }
 
+type credentialOperationFileLock struct {
+	directory *safeDirectory
+	file      *os.File
+}
+
+func acquireCredentialOperationFileLock(credentialPath string) (*credentialOperationFileLock, error) {
+	directory, err := openSafeDirectory(filepath.Dir(credentialPath))
+	if err != nil {
+		return nil, err
+	}
+	name := filepath.Base(credentialPath) + ".lock"
+	file, err := openCredentialLockHandle(directory.file, name, filepath.Join(filepath.Dir(credentialPath), name))
+	if err != nil {
+		directory.Close()
+		return nil, err
+	}
+	if err := validateRegularHandle(file); err != nil {
+		file.Close()
+		directory.Close()
+		return nil, err
+	}
+	if err := lockCredentialHandle(file); err != nil {
+		file.Close()
+		directory.Close()
+		return nil, err
+	}
+	return &credentialOperationFileLock{directory: directory, file: file}, nil
+}
+
+func (lock *credentialOperationFileLock) Close() error {
+	err := unlockCredentialHandle(lock.file)
+	err = errors.Join(err, lock.file.Close())
+	lock.directory.Close()
+	return err
+}
+
 func openSafeDirectory(path string) (*safeDirectory, error) {
 	return openDirectory(path, false)
 }
