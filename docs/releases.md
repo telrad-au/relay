@@ -248,8 +248,7 @@ Before creating the first stable tag:
    - `AZURE_ARTIFACT_SIGNING_CERTIFICATE_PROFILE_NAME`: the `PublicTrust`
      certificate profile name.
    The Azure identifiers are not private keys, but they remain environment
-   secrets to match the isolated signing pattern used by the upstream Codex
-   workflow.
+   secrets to match the isolated signing pattern used by the release workflow.
 8. Configure this environment variable:
    - `RELAY_ENROLLMENT_URL`: the production Relay pairing endpoint (the
      protected variable name is retained for release-workflow compatibility).

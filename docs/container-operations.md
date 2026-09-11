@@ -2,7 +2,7 @@
 
 The Compose deployment runs an immutable image with a read-only root filesystem,
 no additional Linux capabilities, and a named volume for schema-v5 configuration
-and its bearer credential record. The
+and its protected credential lifecycle record. The
 container does not update its own image. Native privilege helpers and management
 IPC are excluded from the image build. `auth`, `enroll`, `rotate-credential`, `doctor`,
 `status`, and `ready` operate directly as UID `10001`, without sudo or systemd.
@@ -46,6 +46,12 @@ whose exact path is `/v1/relay/pairing-enrollments`. Relay derives its fixed
 control, DICOM, and HL7 paths locally from that one origin; pairing cannot
 select another destination.
 
+Relay automatically migrates a legacy bearer record and renews lifecycle
+credentials before access expiry. Each operation is persisted before its HTTPS
+request and retried with the same operation ID after a timeout or container
+restart. Keep exactly one Relay service instance attached to the volume and do
+not edit or copy the credential record between installations.
+
 ## Networking
 
 Publish TCP `11112` only to DICOM sources and TCP `2575` only to HL7 sources.
@@ -67,8 +73,8 @@ review the intended enterprise trust policy first.
 The image health check runs `ready`. It remains healthy during temporary
 control-channel loss while DICOM and HL7 ingest remain available. `status`
 separately reports control and report-return availability. A cloud `401` or
-`403` marks the container unhealthy until a valid credential replacement or
-re-pairing is adopted.
+`403` marks the container unhealthy until re-pairing succeeds. A rejected or
+expired renewable credential has the same effect.
 
 Relay streams DICOM uploads directly and does not maintain an ingest spool.
 Stopping or recreating the container drains active work for up to one minute;

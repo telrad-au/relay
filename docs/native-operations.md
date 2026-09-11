@@ -29,9 +29,11 @@ are secrets and must not appear in tickets or logs.
 
 Linux stores configuration and credentials in `/etc/telrad-relay`; Windows uses
 `%ProgramData%\Telrad\Relay`. Configuration schema `5` contains endpoint and
-listener settings but no bearer value. `relay-credential.json` is protected by
-Unix mode `0600` under a `0700` directory or by the installer-managed Windows
-service ACL.
+listener settings but no bearer value. Credential record schema `2` contains a
+short-lived access credential, a rotating renewable credential, expiry metadata,
+and at most one pending operation ID. Existing schema-1 bearer records migrate
+automatically. `relay-credential.json` is protected by Unix mode `0600` under a
+`0700` directory or by the installer-managed Windows service ACL.
 
 The managed executable and update trust are administrator-owned. Linux stores
 them under `/usr/local/lib/telrad-relay`; Windows stores them under
@@ -62,10 +64,17 @@ telrad rotate-credential
 ```
 
 Administrator authorization applies to this exact operation; the service performs
-the HTTPS request and credential update under its own identity. The file update is atomic. If the server provides an overlap window, the prior
-credential remains only until its deadline. A running Relay adopts the new
-current credential within one second and reconnects control without rebinding
-the clinic listeners. Rotation is not periodic.
+the HTTPS request and credential update under its own identity. For lifecycle
+credentials, the command requests an immediate renewal; legacy credentials
+migrate instead.
+
+Routine lifecycle renewal is automatic and jittered before access expiry. Relay
+writes a random operation ID to the credential record before contacting Telrad,
+reuses that ID after timeouts or restarts, and atomically commits the returned
+generation. New requests adopt the committed access credential immediately.
+Already-started DICOM, HL7, report-return, and retrieval work is not canceled or
+rewritten. A rejected or expired renewable credential marks authentication as
+requiring attention and requires enrollment again.
 
 ## Status and degraded behavior
 
@@ -224,7 +233,7 @@ clinical runtime is ready.
 The native service can run unpaired with only local management available. It
 opens DICOM and HL7 listeners after successful pairing. Re-pairing drains active
 work before replacing the live identity. Disconnecting during that drain resumes
-the previous identity; rotation preserves live credential
+the previous identity; credential renewal preserves live credential
 adoption without rebinding listeners.
 
 Linux uses `/run/telrad-relay/management.sock`, authenticating OS peer credentials.

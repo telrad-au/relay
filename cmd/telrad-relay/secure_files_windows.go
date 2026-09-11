@@ -68,6 +68,27 @@ func openRelativeRegular(directory *os.File, name string) (*os.File, error) {
 	return openRelativeWindows(directory, name, windows.FILE_GENERIC_READ, windows.FILE_OPEN, windows.FILE_NON_DIRECTORY_FILE, nil)
 }
 
+func openCredentialLockHandle(directory *os.File, name, target string) (*os.File, error) {
+	file, err := createRelativeFile(directory, name, 0600, target)
+	if err == nil {
+		return file, nil
+	}
+	if !errors.Is(err, os.ErrExist) {
+		return nil, err
+	}
+	return openRelativeWindows(directory, name, windows.FILE_GENERIC_READ|windows.FILE_GENERIC_WRITE, windows.FILE_OPEN, windows.FILE_NON_DIRECTORY_FILE, nil)
+}
+
+func lockCredentialHandle(file *os.File) error {
+	var overlapped windows.Overlapped
+	return windows.LockFileEx(windows.Handle(file.Fd()), windows.LOCKFILE_EXCLUSIVE_LOCK, 0, 1, 0, &overlapped)
+}
+
+func unlockCredentialHandle(file *os.File) error {
+	var overlapped windows.Overlapped
+	return windows.UnlockFileEx(windows.Handle(file.Fd()), 0, 1, 0, &overlapped)
+}
+
 func openRelativeWindows(directory *os.File, name string, access, disposition, options uint32, sd *windows.SECURITY_DESCRIPTOR) (*os.File, error) {
 	n, err := windows.NewNTUnicodeString(name)
 	if err != nil {
