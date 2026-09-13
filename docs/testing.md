@@ -268,3 +268,11 @@ order AA, signature preservation through the report queue, RIS AA delivery and
 rejection of a cloud-forged accession with a matching payload digest. No clinic
 traffic or production data is used. The adapter changes only advertised transport
 origins to its temporary HTTPS listener.
+
+`TestHL7CloudOwnsValidationAndAcknowledgements` exercises Push and Retrieve over
+real loopback MLLP with a synthetic TLS cloud: HL7 version and duplicate PID
+validation are deferred, missing/invalid or ambiguous scopes get no grants,
+source policy and TEST/P isolation remain enforced, original bytes and cloud AR
+are preserved, and a subsequent corrected order receives the exact cloud AA on
+the same connection. The mock's negative ACK does not qualify the deployed API's
+HTTP-422 paths; see the [validation boundary](report-authorization.md#validation-boundary).

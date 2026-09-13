@@ -10,8 +10,8 @@ key across restarts and upgrades and registers only the public key with Telrad.
 The private key never leaves the clinic. PACS retrieval configuration and its key
 are independent of report authorization.
 
-For every ORM O01 order received on the HL7 listener, Relay signs each OBR-18
-accession. Telrad stores the original authorization with the order and returns
+For an ORM O01 order with an unambiguous local authorization scope, Relay signs
+each OBR-18 accession. Telrad stores the original authorization with the order and returns
 it with the report. Relay verifies its local signature, paired Relay ID, exact
 accession, production processing ID and configured report destination before
 opening an MLLP connection. Missing or invalid authorization produces
@@ -20,11 +20,39 @@ this check, and Telrad never claims unsigned report deliveries.
 
 The signed envelope also binds the original order's SHA-256, procedure sequence,
 source set ID and signing time. The accession namespace is the paired Relay;
-patient ID is not an authorization requirement. Orders use HL7 2.3.1 or 2.5 ORM
-O01 with standard delimiters and processing ID P or T. NW and XO authorize each
+patient ID is not an authorization requirement. Scope extraction recognizes ORM
+O01 with standard delimiters and processing ID P or T. Telrad decides which HL7
+versions and patient/clinical data are acceptable. NW and XO authorize each
 OBR-18 accession; CA and DC issue no new grants. TEST orders cannot authorize
 production reports. Reports contain exactly one OBR with the authorized accession
 in OBR-18; alternate OBR/ORC identifiers and embedded messages are rejected.
+
+## Validation boundary
+
+Relay does not reject an order because of its HL7 version or duplicate PID
+segments. Telrad owns order validation and the resulting application ACK.
+Relay still requires an unambiguous header, an approved and consistent order
+action, ORC-to-OBR association, explicit P/T processing, and valid procedure
+accessions within the signed envelope's 64-procedure limit before issuing grants.
+CA/DC create no grants; unknown or mixed actions, missing/invalid accessions and
+ambiguous scope create no grants either. Failure on any procedure discards all
+grants for that message. These checks authorize local activity; they do not
+replace Telrad's decision to accept or reject the order.
+
+The original order is forwarded unchanged with empty authorization arrays when
+scope cannot be authorized. Messages that cannot be parsed for authorization use
+the raw HL7 endpoint with no grant. Retrieval source policy remains local: an
+unapproved source gets no PACS permit. TEST messages never obtain production
+PACS permits, and TEST report permits remain unusable for production return.
+Configuration, key, authentication and transport failures remain failures.
+
+Telrad must return a correlated application AA/AE/AR, including for unsigned or
+invalid orders. Relay forwards that ACK byte for byte and never synthesizes one.
+The current Telrad referral API still returns HTTP 422 for some validation
+failures; those exchanges continue to close without an HL7 ACK until the API
+implements negative application acknowledgments. This Relay change must be
+qualified with that API follow-up before release; it does not permit unsigned
+report delivery or bypass cloud authorization verification.
 
 ## Operation and recovery
 

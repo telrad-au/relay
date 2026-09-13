@@ -74,9 +74,6 @@ func orderScopes(companyID, connectorID string, policies []orderSourcePolicy, pe
 	if field(msh, 8) != "ORM^O01" && field(msh, 8) != "ORM^O01^ORM_O01" {
 		return nil, false, nil
 	}
-	if field(msh, 11) != "2.3.1" && field(msh, 11) != "2.5" {
-		return nil, true, retrieval.ErrPolicy
-	}
 	// Processing ID must be explicit; TEST referrals can go to the isolated
 	// cloud lane, but TEST control sessions never start a PACS request.
 	if field(msh, 10) != "P" && field(msh, 10) != "T" {
@@ -117,10 +114,9 @@ func parsedOrderScopes(companyID, connectorID string, policy orderSourcePolicy, 
 	if field(msh, 8) != "ORM^O01" && field(msh, 8) != "ORM^O01^ORM_O01" {
 		return nil, false, nil
 	}
-	if (field(msh, 11) != "2.3.1" && field(msh, 11) != "2.5") || (field(msh, 10) != "P" && field(msh, 10) != "T") {
+	if field(msh, 10) != "P" && field(msh, 10) != "T" {
 		return nil, true, retrieval.ErrPolicy
 	}
-	var pid []string
 	var obrs [][]string
 	var orcs [][]string
 	var orc []string
@@ -131,11 +127,6 @@ func parsedOrderScopes(companyID, connectorID string, policy orderSourcePolicy, 
 			if i != 0 {
 				return nil, true, retrieval.ErrPolicy
 			}
-		case "PID":
-			if pid != nil {
-				return nil, true, retrieval.ErrPolicy
-			}
-			pid = s
 		case "ORC":
 			orc = s
 			control := field(s, 1)
@@ -221,7 +212,9 @@ func signReferrals(cfg *config, peer net.Addr, message []byte) ([]string, bool, 
 func ingestClinicHL7(ctx context.Context, cfg *config, peer net.Addr, client *http.Client, provider *credentialProvider, status *runtimeStatusManager, message []byte, controlID string) ([]byte, error) {
 	segments, err := referralSegments(message)
 	if err != nil {
-		return nil, err
+		// Parsing for authorization is stricter than transport. Telrad owns
+		// application validation; an unparseable scope gets no local grant.
+		return ingestHL7(ctx, cfg.HL7URL, client, provider, status, message, controlID)
 	}
 	kind := field(segments[0], 8)
 	if kind != "ORM^O01" && kind != "ORM^O01^ORM_O01" {
@@ -233,7 +226,11 @@ func ingestClinicHL7(ctx context.Context, cfg *config, peer net.Addr, client *ht
 	}
 	reports, err := signReportAuthorizations(reportCfg, message)
 	if err != nil {
-		return nil, err
+		if !authorizationScopeRejected(err) {
+			return nil, err
+		}
+		// No partial authorization: Telrad must validate the original order.
+		reports = []string{}
 	}
 	permits := []string{}
 	key, err := readReportSigningKey(reportCfg)
@@ -252,16 +249,18 @@ func ingestClinicHL7(ctx context.Context, cfg *config, peer net.Addr, client *ht
 		if err != nil {
 			return nil, err
 		}
-		if field(segments[0], 10) == "T" && routing.IngestMode != "TEST" {
-			return nil, retrieval.ErrPolicy
-		}
-		if routing.Mode == "RETRIEVE" {
+		// TEST traffic must never authorize production PACS activity. It can
+		// still reach Telrad for a correlated application rejection.
+		if routing.Mode == "RETRIEVE" && len(reports) > 0 && (field(segments[0], 10) != "T" || routing.IngestMode == "TEST") {
 			if !routing.Available && routing.IngestMode != "TEST" {
 				return nil, errors.New("retrieval_not_enabled")
 			}
 			permits, _, err = signReferrals(current, peer, message)
 			if err != nil {
-				return nil, err
+				if !authorizationScopeRejected(err) {
+					return nil, err
+				}
+				permits = []string{}
 			}
 			keys, _ := current.Retrieval.trusted()
 			registrationKeys[current.Retrieval.SigningKeyID] = keys[current.Retrieval.SigningKeyID]

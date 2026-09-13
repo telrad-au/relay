@@ -123,6 +123,10 @@ whose definitive or non-definitive classification belongs to the cloud.
 
 The MLLP listener validates UTF-8 and `MSH-10`, keeps the clinic connection open
 for sequential exchanges, and returns the exact correlated cloud ACK.
+Telrad owns order validation. Relay forwards the original message even when its
+authorization parser cannot issue a safe grant; see the
+[validation boundary](report-authorization.md#validation-boundary). A cloud
+application rejection leaves the MLLP connection available for a corrected order.
 Retry-eligible delivery failures use at most three attempts over 60 seconds with
 the same body and idempotency key. Other failures close the clinic exchange
 without a synthetic ACK.
