@@ -118,7 +118,7 @@ Never reuse a PACS or source-policy ID for another endpoint, namespace or mappin
 
 ## Clinic feed and routing
 
-This profile supports `ORM^O01` in HL7 2.3.1 and 2.5 with standard `|^~\&`
+This authorization profile recognizes `ORM^O01` with standard `|^~\&`
 delimiters and explicit processing ID P or T. Configure exactly one matching
 source policy per feed. The actual TCP peer must match an approved source IP;
 MSH application/facility values are additional restrictions, not authentication.
@@ -218,3 +218,8 @@ clinic referrals. Never reconstruct approval from unsigned jobs.
 See [testing](testing.md#retrieval-v2) for executable evidence and the remaining
 joint platform qualification gate. Keep the platform switch disabled until that
 gate and the clinic's exact version/PACS approval are complete.
+
+HL7 version and patient/clinical validation belong to Telrad. Local source and
+scope checks still govern PACS permission, but an unapproved scope now reaches
+Telrad without a PACS permit for application validation. See the
+[validation boundary](report-authorization.md#validation-boundary).

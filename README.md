@@ -168,6 +168,9 @@ Retrieve in Telrad alone does not configure or authorize access to the PACS.
 ### RIS orders and report return (both modes)
 
 Point the RIS's HL7 sender to the Relay host's LAN address on MLLP TCP `2575`.
+Telrad validates orders and returns the application acknowledgment. Relay checks
+transport and local authorization scope; see the
+[validation boundary](docs/report-authorization.md#validation-boundary).
 Configure Relay to deliver returned reports to the RIS/report receiver's LAN
 address and listening port, TCP `2576` by default. The report receiver opens that
 listener; Relay connects to it. Restrict each local port to the required clinic
