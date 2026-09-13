@@ -276,3 +276,9 @@ source policy and TEST/P isolation remain enforced, original bytes and cloud AR
 are preserved, and a subsequent corrected order receives the exact cloud AA on
 the same connection. The mock's negative ACK does not qualify the deployed API's
 HTTP-422 paths; see the [validation boundary](report-authorization.md#validation-boundary).
+
+`TestReportResultPreservesValidatedRISACK` verifies exact AA/AE/AR payload return,
+UTF-8 and ERR text preservation, unchanged outbound reports and exclusion of
+mismatched responses. Joint qualification additionally uses a real Relay binary
+and real platform routes with a RIS AE followed by AA: both original ACKs must
+remain in distinct delivery-attempt records after success.

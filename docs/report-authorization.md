@@ -91,3 +91,15 @@ without a valid locally signed order, assuming the clinic host, key, order feed
 and RIS accession interpretation remain trusted. It can still fabricate report
 text, alter patient metadata or replay reports for an authorized accession. The
 grant does not establish radiologist authorship or approval of a report version.
+
+## Original RIS acknowledgments
+
+Delivery results include optional `ackPayload`: the exact unframed UTF-8 RIS ACK,
+including MSA and ERR text, after framing and control-ID correlation checks.
+The existing 1 MiB ACK limit remains. AA is accepted; AE/AR remain clinic rejection.
+Malformed or uncorrelated responses and network failures carry no ACK payload.
+Telrad stores ACK text per delivery attempt as clinical data. Relay holds it only
+in memory while submitting the result; it never logs or persists the text locally.
+Deploy the platform's optional-field support and larger bounded result endpoint
+before this agent. Older agents remain supported. No authorization or retry
+semantics change.
