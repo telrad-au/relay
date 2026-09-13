@@ -23,10 +23,11 @@ type reportMessage struct {
 }
 
 type reportResult struct {
-	Token   string `json:"token"`
-	Outcome string `json:"outcome"`
-	AckCode string `json:"ackCode,omitempty"`
-	Error   string `json:"error,omitempty"`
+	Token      string `json:"token"`
+	Outcome    string `json:"outcome"`
+	AckCode    string `json:"ackCode,omitempty"`
+	AckPayload string `json:"ackPayload,omitempty"`
+	Error      string `json:"error,omitempty"`
 }
 
 // Report delivery is deliberately stateless: the cloud owns retries and the RIS
@@ -43,24 +44,26 @@ func deliverReport(ctx context.Context, cfg *config, report reportMessage) repor
 	if !validOpaqueID(report.DeliveryID) || !validOpaqueID(report.Token) || hex.EncodeToString(digest[:]) != report.PayloadSHA256 || err != nil || controlID != report.MessageControlID {
 		return failure("invalid_report", "")
 	}
-	ack, err := sendMLLP(ctx, cfg.ReportHost, cfg.ReportPort, report.Payload)
+	ack, payload, err := sendMLLP(ctx, cfg.ReportHost, cfg.ReportPort, report.Payload)
 	if err == nil && ack == "AA" {
-		return reportResult{Token: report.Token, Outcome: "accepted", AckCode: ack}
+		return reportResult{Token: report.Token, Outcome: "accepted", AckCode: ack, AckPayload: payload}
 	}
 	if ack != "" {
-		return failure("clinic_rejected", ack)
+		result := failure("clinic_rejected", ack)
+		result.AckPayload = payload
+		return result
 	}
 	return failure(safeNetworkError(err).Error(), "")
 }
 
-func sendMLLP(ctx context.Context, host string, port int, message string) (string, error) {
+func sendMLLP(ctx context.Context, host string, port int, message string) (string, string, error) {
 	controlID, err := hl7MessageControlID(message)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	connection, err := (&net.Dialer{Timeout: 10 * time.Second}).DialContext(ctx, "tcp", net.JoinHostPort(host, fmt.Sprint(port)))
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	defer connection.Close()
 	deadline := time.Now().Add(20 * time.Second)
@@ -73,13 +76,17 @@ func sendMLLP(ctx context.Context, host string, port int, message string) (strin
 	frame := append([]byte{0x0b}, []byte(message)...)
 	frame = append(frame, 0x1c, 0x0d)
 	if _, err := connection.Write(frame); err != nil {
-		return "", err
+		return "", "", err
 	}
 	data, err := readMLLPFrame(connection, 1024*1024)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
-	return parseMLLPAcknowledgement(data, controlID)
+	code, err := parseMLLPAcknowledgement(data, controlID)
+	if code == "" {
+		return "", "", err
+	}
+	return code, string(data[1 : len(data)-2]), err
 }
 
 func parseMLLPAcknowledgement(data []byte, controlID string) (string, error) {
