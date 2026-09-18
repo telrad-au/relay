@@ -124,6 +124,13 @@ def test_ci_runs_native_windows_and_linux_with_separate_evidence():
         '--relay-binary "$RUNNER_TEMP/${{ matrix.binary }}"',
         "-m pytest integration_tests",
         "-m integration_tests.relay_image_integrity",
-        "name: relay-image-integrity-local-${{ matrix.os }}",
+        "target: linux",
+        "target: windows",
+        "target: docker",
+        "--relay-image relay-integrity:current",
+        "inputs.storage || 'local'",
+        "allowed-account-ids: ${{ inputs.aws_account }}",
+        "github.event_name == 'workflow_dispatch' && inputs.storage == 'aws'",
+        "name: relay-image-integrity-${{ inputs.storage || 'local' }}-${{ matrix.target }}",
     ):
         assert required in workflow

@@ -87,8 +87,17 @@ native executable, and retains separate JSON evidence with OS/architecture.
 CI uses Python 3.12.13 on Linux and 3.13.15 on Windows (3.12.13 has no
 Windows build in the Actions Python distribution).
 Windows also verifies certificate removal on success and failure. No AWS
-credentials are required. These jobs do not qualify installed services or the
-packaged Docker image.
+credentials are required. Installed-service and container lifecycle behavior
+remain outside this integrity qualification.
+
+CI also builds the repository's release Dockerfile and runs the same cases with
+`--relay-image relay-integrity:current`. This target requires a Linux Docker host
+and root or passwordless `sudo chown` for its temporary UID-10001 state directory.
+It keeps the image's entrypoint and user, drops all capabilities, disables new
+privileges and makes the root filesystem read-only. Only synthetic configuration,
+credentials and the temporary public TLS certificate enter its state mount;
+the receiver and AWS credentials stay outside Relay. Evidence records the image
+ID and packaged executable hash. The container and temporary state are cleaned up.
 
 On a disposable Windows host, run from Administrator PowerShell (with OpenSSL on `PATH`):
 
@@ -108,6 +117,29 @@ The reference receiver flushes file contents on both platforms and additionally
 flushes the parent directory on Linux. Local read-back is not a power-loss test.
 The same Windows command supports the explicit AWS arguments below; automatic
 CI covers local storage, while live S3 qualification remains operator-invoked.
+
+## Three-target AWS qualification
+
+The `Relay image integrity` workflow's manual dispatch runs **native Linux,
+native Windows and the packaged Docker image** against real S3. Supply `storage=aws`,
+`aws_role`, `s3_bucket`, `aws_account` and `aws_region`. For example:
+
+```bash
+gh workflow run image-integrity.yml --ref YOUR_REVIEWED_BRANCH \
+  -f storage=aws -f aws_role=YOUR_SCOPED_ROLE_ARN \
+  -f s3_bucket=YOUR_DEDICATED_TEST_BUCKET \
+  -f aws_account=YOUR_12_DIGIT_ACCOUNT -f aws_region=ap-southeast-2
+```
+
+The role must trust GitHub's OIDC provider with audience `sts.amazonaws.com` and
+an exact subject `repo:telrad-au/relay:ref:refs/heads/YOUR_REVIEWED_BRANCH`.
+Grant only the test-bucket permissions below. No static AWS credentials are stored
+in GitHub. PR events always use local storage and cannot authenticate this AWS
+role. Each matrix target gets a separate run prefix and evidence artifact.
+Require all three reports to pass all eleven cases, reconcile 9 completed / 11
+attempted arrivals and report successful S3 cleanup. One platform's result is
+not a substitute for another. AWS qualification uses the reference receiver
+unless a separate operator-run command explicitly selects an application checkout.
 
 All Python dependencies are test-only. `requirements.in` and its hash-locked
 `requirements.lock` are separate from the distributed Go executable. Regenerate

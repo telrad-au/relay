@@ -7,7 +7,7 @@ to qualify an external application ingest checkout. No installed Relay is change
 import argparse
 import base64
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
+from contextlib import contextmanager, ExitStack
 from copy import deepcopy
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -33,6 +33,7 @@ from pynetdicom import AE, evt
 import uvicorn
 
 from .tls_trust import receiver_trust
+from .container_target import packaged_process
 
 from .backend import (
     AppConfig,
@@ -246,7 +247,7 @@ def cloud_server(directory, config, api, writer):
 
 
 @contextmanager
-def relay_process(binary, directory, origin, cert):
+def relay_process(binary, directory, origin, cert, image=None, report=None):
     dicom_port, hl7_port = free_port(), free_port()
     while hl7_port == dicom_port:
         hl7_port = free_port()
@@ -278,11 +279,16 @@ def relay_process(binary, directory, origin, cert):
         key: value for key, value in os.environ.items() if not key.startswith("AWS_")
     }
     environment["SSL_CERT_FILE"] = str(cert)
-    process = subprocess.Popen(
-        [str(binary), "--config", str(config), "run"],
-        env=environment,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+    stack = ExitStack()
+    process = (
+        stack.enter_context(packaged_process(image, directory, cert, report))
+        if image
+        else subprocess.Popen(
+            [str(binary), "--config", str(config), "run"],
+            env=environment,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
     )
     try:
         deadline = time.monotonic() + 15
@@ -302,6 +308,8 @@ def relay_process(binary, directory, origin, cert):
         except subprocess.TimeoutExpired:
             process.kill()
             process.wait(timeout=5)
+        finally:
+            stack.close()
 
 
 def send(case, port):
@@ -498,7 +506,9 @@ def exercise(port, api, writer, storage, reader, args, report):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--relay-binary", required=True, type=Path)
+    target = parser.add_mutually_exclusive_group(required=True)
+    target.add_argument("--relay-binary", type=Path)
+    target.add_argument("--relay-image")
     parser.add_argument("--storage", choices=("local", "aws"), required=True)
     parser.add_argument("--s3-bucket")
     parser.add_argument("--expected-aws-account")
@@ -517,6 +527,7 @@ def main():
         "runId": run,
         "status": "failed",
         "storage": args.storage,
+        "target": "docker" if args.relay_image else "native",
         "ingestAdapter": "application" if INGEST_SOURCE else "reference",
         "platform": {"system": platform.system(), "machine": platform.machine()},
         "startedAt": datetime.now(timezone.utc).isoformat(),
@@ -529,9 +540,12 @@ def main():
             os.environ.get("DICOM_PACS_ROUTING_ENABLED", "false").lower() != "true",
             "unset DICOM_PACS_ROUTING_ENABLED for the isolated integrity harness",
         )
-        args.relay_binary = args.relay_binary.resolve(strict=True)
-        require(os.access(args.relay_binary, os.X_OK), "Relay binary is not executable")
-        report["relayBinarySha256"] = digest(args.relay_binary.read_bytes())
+        if args.relay_binary:
+            args.relay_binary = args.relay_binary.resolve(strict=True)
+            require(
+                os.access(args.relay_binary, os.X_OK), "Relay binary is not executable"
+            )
+            report["relayBinarySha256"] = digest(args.relay_binary.read_bytes())
         if INGEST_SOURCE:
             report["applicationRevision"] = subprocess.check_output(
                 ["git", "-C", str(INGEST_SOURCE), "rev-parse", "HEAD"],
@@ -580,9 +594,17 @@ def main():
             api = ReceiptAPI()
             writer = FaultWriter(config, api, storage)
             with cloud_server(directory, config, api, writer) as (origin, cert):
-                with receiver_trust(cert), relay_process(
-                    args.relay_binary, directory, origin, cert
-                ) as port:
+                with (
+                    receiver_trust(cert),
+                    relay_process(
+                        args.relay_binary,
+                        directory,
+                        origin,
+                        cert,
+                        args.relay_image,
+                        report,
+                    ) as port,
+                ):
                     exercise(port, api, writer, storage, reader, args, report)
         report["status"] = "passed"
     except Exception as exc:

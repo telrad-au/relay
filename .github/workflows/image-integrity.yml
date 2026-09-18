@@ -2,6 +2,23 @@ name: Relay image integrity
 
 on:
   workflow_dispatch:
+    inputs:
+      storage:
+        type: choice
+        options: [local, aws]
+        default: aws
+      aws_role:
+        description: Scoped qualification role ARN
+        type: string
+      s3_bucket:
+        description: Dedicated non-production bucket without clinical consumers
+        type: string
+      aws_account:
+        description: Expected bucket and credential account
+        type: string
+      aws_region:
+        type: string
+        default: ap-southeast-2
   pull_request:
     paths:
       - "tools/relay-integrity/**"
@@ -14,22 +31,30 @@ on:
 
 permissions:
   contents: read
+  id-token: write
 
 jobs:
   local-integrity:
-    name: Image integrity (${{ matrix.os }})
+    name: Image integrity (${{ matrix.target }}, ${{ inputs.storage || 'local' }})
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: ubuntu-24.04
+            target: linux
             python-version: "3.12.13"
             binary: telrad-relay
             python: bin/python
           - os: windows-2025
+            target: windows
             python-version: "3.13.15"
             binary: telrad-relay.exe
             python: Scripts/python.exe
+          - os: ubuntu-24.04
+            target: docker
+            python-version: "3.12.13"
+            python: bin/python
+            binary: unused
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     defaults:
@@ -47,9 +72,13 @@ jobs:
           go-version: "1.27.0"
           cache: false
       - name: Build this revision's Relay binary
+        if: matrix.target != 'docker'
         env:
           GOTOOLCHAIN: local
         run: go build -o "$RUNNER_TEMP/${{ matrix.binary }}" ./cmd/telrad-relay
+      - name: Build this revision's packaged Relay image
+        if: matrix.target == 'docker'
+        run: docker build --build-arg VERSION=0.0.0-integrity --build-arg REVISION="$GITHUB_SHA" -t relay-integrity:current .
       - name: Install locked integration dependencies
         run: |
           python -m venv "$RUNNER_TEMP/integrity-venv"
@@ -57,17 +86,36 @@ jobs:
       - name: Verify comparisons and AWS SDK contracts
         working-directory: tools/relay-integrity
         run: '"$RUNNER_TEMP/integrity-venv/${{ matrix.python }}" -m pytest integration_tests -q'
-      - name: Run Relay through TLS test receiver and durable local storage
+      - name: Authenticate explicit AWS qualification
+        if: github.event_name == 'workflow_dispatch' && inputs.storage == 'aws'
+        uses: aws-actions/configure-aws-credentials@cabfdba3510de1431bac9dba27511d97497fc100
+        with:
+          role-to-assume: ${{ inputs.aws_role }}
+          aws-region: ${{ inputs.aws_region }}
+          allowed-account-ids: ${{ inputs.aws_account }}
+          role-duration-seconds: 900
+      - name: Run Relay through TLS and independent storage read-back
         working-directory: tools/relay-integrity
+        env:
+          STORAGE: ${{ inputs.storage || 'local' }}
+          TEST_BUCKET: ${{ inputs.s3_bucket }}
+          TEST_ACCOUNT: ${{ inputs.aws_account }}
+          TEST_REGION: ${{ inputs.aws_region || 'ap-southeast-2' }}
+          TARGET: ${{ matrix.target }}
         run: |
+          target=(--relay-binary "$RUNNER_TEMP/${{ matrix.binary }}")
+          if [[ "$TARGET" == docker ]]; then target=(--relay-image relay-integrity:current); fi
+          storage=(--storage "$STORAGE")
+          if [[ "$STORAGE" == aws ]]; then
+            storage+=(--s3-bucket "$TEST_BUCKET" --expected-aws-account "$TEST_ACCOUNT" --region "$TEST_REGION")
+          fi
           "$RUNNER_TEMP/integrity-venv/${{ matrix.python }}" -m integration_tests.relay_image_integrity \
-            --relay-binary "$RUNNER_TEMP/${{ matrix.binary }}" \
-            --storage local --evidence "$RUNNER_TEMP/relay-integrity-local.json"
+            "${target[@]}" "${storage[@]}" --evidence "$RUNNER_TEMP/relay-integrity.json"
       - name: Retain synthetic evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: relay-image-integrity-local-${{ matrix.os }}
-          path: ${{ runner.temp }}/relay-integrity-local.json
+          name: relay-image-integrity-${{ inputs.storage || 'local' }}-${{ matrix.target }}
+          path: ${{ runner.temp }}/relay-integrity.json
           if-no-files-found: warn
           retention-days: 14

@@ -294,5 +294,8 @@ always identifies the selected receiver and storage mode. The image-integrity
 workflow builds and executes native Linux and Windows binaries through all eleven
 local cases, retaining separate platform evidence. Windows additionally checks
 temporary machine certificate trust cleanup on success and failure; these
-checks run only on disposable hosts. Installed services and the packaged Docker
-image remain separate qualification boundaries.
+checks run only on disposable hosts. The matrix also exercises the release
+Dockerfile image with its packaged entrypoint, non-root user and read-only root
+filesystem. Manual AWS dispatch runs all three targets through real S3 with
+separate evidence and cleanup; PR events run the same matrix with local storage.
+Installed services remain a separate qualification boundary.
