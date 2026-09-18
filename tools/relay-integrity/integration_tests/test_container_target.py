@@ -68,5 +68,6 @@ def test_image_is_pinned_restricted_and_removed(tmp_path, monkeypatch, failure):
     assert "no-new-privileges:true" in create
     assert "--entrypoint" not in create and "--user" not in create
     assert [c[0] for c in calls[-2:]] == ["stop", "rm"]
+    assert calls[-2][1:3] == ("-t", "5")
     assert owners[0][1:] == (10001, 10001) and owners[-1][1:] == (123, 456)
     assert report["container"]["cleanup"] == "passed"

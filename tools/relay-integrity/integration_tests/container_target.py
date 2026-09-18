@@ -86,7 +86,7 @@ def packaged_process(image, directory, cert, report):
     finally:
         try:
             if created:
-                docker("stop", "--timeout", "5", name)
+                docker("stop", "-t", "5", name)
                 docker("rm", name)
                 report.setdefault("container", {})["cleanup"] = "passed"
         finally:
