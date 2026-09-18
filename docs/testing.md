@@ -282,3 +282,15 @@ UTF-8 and ERR text preservation, unchanged outbound reports and exclusion of
 mismatched responses. Joint qualification additionally uses a real Relay binary
 and real platform routes with a RIS AE followed by AA: both original ACKs must
 remain in distinct delivery-attempt records after success.
+
+## Image integrity
+
+[Image integrity tests](image-integrity.md) run the actual Relay binary through
+C-STORE and verified HTTPS. The receiver holds uploads in memory and compares
+exact dataset bytes, validates the added Part 10 header and checks every decoded
+frame. It does not persist payloads or depend on cloud storage or application code.
+The workflow runs the same ten integration cases on native Linux, native Windows
+and the release Dockerfile image, retaining separate evidence. Windows checks
+cleanup of temporary machine certificate trust on disposable hosts. Docker uses
+the packaged entrypoint, non-root user and read-only root filesystem.
+Installed services and downstream application integration remain separate tests.

@@ -1,0 +1,89 @@
+name: Relay image integrity
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "tools/relay-integrity/**"
+      - "cmd/**"
+      - "internal/**"
+      - "go.mod"
+      - "go.sum"
+      - "Dockerfile"
+      - "packaging/**"
+      - ".github/workflows/image-integrity.yml"
+      - "docs/image-integrity.md"
+
+permissions:
+  contents: read
+
+jobs:
+  local-integrity:
+    name: Image integrity (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: linux
+            python-version: "3.12.13"
+            binary: telrad-relay
+            python: bin/python
+          - os: windows-2025
+            target: windows
+            python-version: "3.13.15"
+            binary: telrad-relay.exe
+            python: Scripts/python.exe
+          - os: ubuntu-24.04
+            target: docker
+            python-version: "3.12.13"
+            python: bin/python
+            binary: unused
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: ${{ matrix.python-version }}
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version: "1.27.0"
+          cache: false
+      - name: Build this revision's Relay binary
+        if: matrix.target != 'docker'
+        env:
+          GOTOOLCHAIN: local
+        run: go build -o "$RUNNER_TEMP/${{ matrix.binary }}" ./cmd/telrad-relay
+      - name: Build this revision's packaged Relay image
+        if: matrix.target == 'docker'
+        run: docker build --build-arg VERSION=0.0.0-integrity --build-arg REVISION="$GITHUB_SHA" -t relay-integrity:current .
+      - name: Install locked integration dependencies
+        run: |
+          python -m venv "$RUNNER_TEMP/integrity-venv"
+          "$RUNNER_TEMP/integrity-venv/${{ matrix.python }}" -m pip install --require-hashes -r tools/relay-integrity/requirements.lock
+      - name: Verify comparisons and receiver contracts
+        working-directory: tools/relay-integrity
+        run: '"$RUNNER_TEMP/integrity-venv/${{ matrix.python }}" -m pytest integration_tests -q'
+      - name: Compare Relay uploads directly over TLS
+        working-directory: tools/relay-integrity
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          target=(--relay-binary "$RUNNER_TEMP/${{ matrix.binary }}")
+          if [[ "$TARGET" == docker ]]; then target=(--relay-image relay-integrity:current); fi
+          "$RUNNER_TEMP/integrity-venv/${{ matrix.python }}" -m integration_tests.relay_image_integrity \
+            "${target[@]}" --evidence "$RUNNER_TEMP/relay-integrity.json"
+      - name: Retain synthetic evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: relay-image-integrity-${{ matrix.target }}
+          path: ${{ runner.temp }}/relay-integrity.json
+          if-no-files-found: warn
+          retention-days: 14
