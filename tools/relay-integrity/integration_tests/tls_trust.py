@@ -14,15 +14,16 @@ def receiver_trust(cert):
     if sys.platform != "win32":
         yield
         return
-    # Go uses the Windows certificate store, not SSL_CERT_FILE. Import only the
-    # generated public certificate into this user's store, never LocalMachine.
+    # Go uses the Windows certificate store, not SSL_CERT_FILE. CurrentUser Root
+    # imports prompt on headless hosts. Like Relay's native lifecycle tests, use
+    # the machine store on an administrator-owned disposable test host only.
     certificate = ssl.PEM_cert_to_DER_cert(cert.read_text())
     thumbprint = sha1(certificate).hexdigest()
     certutil = str(Path(os.environ["SystemRoot"]) / "System32" / "certutil.exe")
 
     def run(*args):
         subprocess.run(
-            [certutil, "-user", *args],
+            [certutil, *args],
             check=True,
             timeout=30,
             stdout=subprocess.DEVNULL,

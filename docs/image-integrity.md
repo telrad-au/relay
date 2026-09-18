@@ -59,8 +59,9 @@ Prerequisites: Linux or a disposable Windows host, Python 3.12 or later, OpenSSL
 Git, and a Relay executable supporting configuration schema 5. The binary runs
 with a temporary configuration;
 no Relay installation, enrollment or production service changes are performed.
-On Windows, the harness temporarily imports its generated public TLS certificate
-into the current user's Root store and removes that exact certificate in `finally`,
+On Windows, run as Administrator on a disposable host. The harness temporarily
+imports its generated public TLS certificate into the machine Root store (the
+current-user store prompts interactively) and removes that exact certificate in `finally`,
 including on comparison failures. Cleanup failures fail qualification. Use a
 disposable host: forcibly killing the process can prevent certificate cleanup.
 Linux uses `SSL_CERT_FILE` without changing the system trust store.
@@ -89,7 +90,7 @@ Windows also verifies certificate removal on success and failure. No AWS
 credentials are required. These jobs do not qualify installed services or the
 packaged Docker image.
 
-On a disposable Windows host, run from PowerShell (with OpenSSL on `PATH`):
+On a disposable Windows host, run from Administrator PowerShell (with OpenSSL on `PATH`):
 
 ```powershell
 python -m venv "$env:TEMP/relay-integrity-venv"

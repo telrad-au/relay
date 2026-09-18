@@ -293,6 +293,6 @@ ingest checkout to qualify that implementation. AWS runs are opt-in and evidence
 always identifies the selected receiver and storage mode. The image-integrity
 workflow builds and executes native Linux and Windows binaries through all eleven
 local cases, retaining separate platform evidence. Windows additionally checks
-temporary current-user certificate trust cleanup on success and failure; these
+temporary machine certificate trust cleanup on success and failure; these
 checks run only on disposable hosts. Installed services and the packaged Docker
 image remain separate qualification boundaries.

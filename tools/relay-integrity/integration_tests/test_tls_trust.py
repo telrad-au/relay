@@ -73,14 +73,12 @@ def test_windows_trust_removes_only_generated_certificate(
     assert calls == [
         [
             str(Path("C:/Windows/System32/certutil.exe")),
-            "-user",
             "-addstore",
             "Root",
             str(certificate),
         ],
         [
             str(Path("C:/Windows/System32/certutil.exe")),
-            "-user",
             "-delstore",
             "Root",
             thumbprint,
