@@ -1,0 +1,57 @@
+name: Relay image integrity
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "tools/relay-integrity/**"
+      - "cmd/**"
+      - "internal/**"
+      - "go.mod"
+      - "go.sum"
+      - ".github/workflows/image-integrity.yml"
+      - "docs/image-integrity.md"
+
+permissions:
+  contents: read
+
+jobs:
+  local-integrity:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.12.13"
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+        with:
+          go-version: "1.27.0"
+          cache: false
+      - name: Build this revision's Relay binary
+        env:
+          GOTOOLCHAIN: local
+        run: go build -o "$RUNNER_TEMP/telrad-relay" ./cmd/telrad-relay
+      - name: Install locked integration dependencies
+        run: |
+          python -m venv "$RUNNER_TEMP/integrity-venv"
+          "$RUNNER_TEMP/integrity-venv/bin/pip" install --require-hashes -r tools/relay-integrity/requirements.lock
+      - name: Verify comparisons and AWS SDK contracts
+        working-directory: tools/relay-integrity
+        run: "$RUNNER_TEMP/integrity-venv/bin/python -m pytest integration_tests -q"
+      - name: Run Relay through TLS test receiver and durable local storage
+        working-directory: tools/relay-integrity
+        run: |
+          "$RUNNER_TEMP/integrity-venv/bin/python" -m integration_tests.relay_image_integrity \
+            --relay-binary "$RUNNER_TEMP/telrad-relay" \
+            --storage local --evidence "$RUNNER_TEMP/relay-integrity-local.json"
+      - name: Retain synthetic evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: relay-image-integrity-local
+          path: ${{ runner.temp }}/relay-integrity-local.json
+          if-no-files-found: warn
+          retention-days: 14

@@ -282,3 +282,12 @@ UTF-8 and ERR text preservation, unchanged outbound reports and exclusion of
 mismatched responses. Joint qualification additionally uses a real Relay binary
 and real platform routes with a RIS AE followed by AA: both original ACKs must
 remain in distinct delivery-attempt records after success.
+
+## Image integrity through durable storage
+
+[Image integrity qualification](image-integrity.md) runs an actual Relay binary
+through C-STORE, TLS and independent local/S3 read-back, compares exact dataset
+bytes and every decoded frame, and exercises failure acknowledgments. Public CI
+uses a self-contained test receiver; operators can explicitly supply an application
+ingest checkout to qualify that implementation. AWS runs are opt-in and evidence
+always identifies the selected receiver and storage mode.
