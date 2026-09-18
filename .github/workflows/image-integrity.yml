@@ -17,8 +17,22 @@ permissions:
 
 jobs:
   local-integrity:
-    runs-on: ubuntu-24.04
+    name: Image integrity (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            binary: telrad-relay
+            python: bin/python
+          - os: windows-2025
+            binary: telrad-relay.exe
+            python: Scripts/python.exe
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 15
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
@@ -33,25 +47,25 @@ jobs:
       - name: Build this revision's Relay binary
         env:
           GOTOOLCHAIN: local
-        run: go build -o "$RUNNER_TEMP/telrad-relay" ./cmd/telrad-relay
+        run: go build -o "$RUNNER_TEMP/${{ matrix.binary }}" ./cmd/telrad-relay
       - name: Install locked integration dependencies
         run: |
           python -m venv "$RUNNER_TEMP/integrity-venv"
-          "$RUNNER_TEMP/integrity-venv/bin/pip" install --require-hashes -r tools/relay-integrity/requirements.lock
+          "$RUNNER_TEMP/integrity-venv/${{ matrix.python }}" -m pip install --require-hashes -r tools/relay-integrity/requirements.lock
       - name: Verify comparisons and AWS SDK contracts
         working-directory: tools/relay-integrity
-        run: "$RUNNER_TEMP/integrity-venv/bin/python -m pytest integration_tests -q"
+        run: '"$RUNNER_TEMP/integrity-venv/${{ matrix.python }}" -m pytest integration_tests -q'
       - name: Run Relay through TLS test receiver and durable local storage
         working-directory: tools/relay-integrity
         run: |
-          "$RUNNER_TEMP/integrity-venv/bin/python" -m integration_tests.relay_image_integrity \
-            --relay-binary "$RUNNER_TEMP/telrad-relay" \
+          "$RUNNER_TEMP/integrity-venv/${{ matrix.python }}" -m integration_tests.relay_image_integrity \
+            --relay-binary "$RUNNER_TEMP/${{ matrix.binary }}" \
             --storage local --evidence "$RUNNER_TEMP/relay-integrity-local.json"
       - name: Retain synthetic evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: relay-image-integrity-local
+          name: relay-image-integrity-local-${{ matrix.os }}
           path: ${{ runner.temp }}/relay-integrity-local.json
           if-no-files-found: warn
           retention-days: 14

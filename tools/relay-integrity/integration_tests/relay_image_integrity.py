@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
+import platform
 import re
 import signal
 import socket
@@ -30,6 +31,8 @@ from botocore.session import Session
 from fastapi import FastAPI, Response
 from pynetdicom import AE, evt
 import uvicorn
+
+from .tls_trust import receiver_trust
 
 from .backend import (
     AppConfig,
@@ -515,6 +518,7 @@ def main():
         "status": "failed",
         "storage": args.storage,
         "ingestAdapter": "application" if INGEST_SOURCE else "reference",
+        "platform": {"system": platform.system(), "machine": platform.machine()},
         "startedAt": datetime.now(timezone.utc).isoformat(),
         "cases": [],
         "limitations": LIMITATIONS,
@@ -576,7 +580,9 @@ def main():
             api = ReceiptAPI()
             writer = FaultWriter(config, api, storage)
             with cloud_server(directory, config, api, writer) as (origin, cert):
-                with relay_process(args.relay_binary, directory, origin, cert) as port:
+                with receiver_trust(cert), relay_process(
+                    args.relay_binary, directory, origin, cert
+                ) as port:
                     exercise(port, api, writer, storage, reader, args, report)
         report["status"] = "passed"
     except Exception as exc:

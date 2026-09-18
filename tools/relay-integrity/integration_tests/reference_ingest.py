@@ -137,11 +137,13 @@ class ReceiptWriter:
             target.write(source_path.read_bytes())
             target.flush()
             os.fsync(target.fileno())
-        fd = os.open(destination.parent, os.O_RDONLY | os.O_DIRECTORY)
-        try:
-            os.fsync(fd)
-        finally:
-            os.close(fd)
+        # Windows supports the file fsync above, but not POSIX directory FDs.
+        if os.name != "nt":
+            fd = os.open(destination.parent, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
         readback = destination.read_bytes()
         return StoredObject(
             str(destination), len(readback), sha256(readback).hexdigest()

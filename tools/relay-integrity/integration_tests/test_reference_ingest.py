@@ -1,17 +1,50 @@
 """Exercise the public test receiver's real SDK request construction offline."""
 
 import base64
-from datetime import datetime, timezone
-from hashlib import sha256
 import os
-from pathlib import Path
 import subprocess
 import sys
+from datetime import datetime, timezone
+from hashlib import sha256
+from pathlib import Path
 
 from botocore.session import Session
 from botocore.stub import Stubber
 
-from .reference_ingest import AppConfig, LandingStorage, ReceiptContext, S3LandingConfig
+from .reference_ingest import (
+    AppConfig,
+    LandingStorage,
+    ReceiptContext,
+    ReceiptWriter,
+    S3LandingConfig,
+    StorageConfig,
+)
+
+
+def test_local_receiver_flushes_and_reads_exact_bytes(tmp_path, monkeypatch):
+    source = tmp_path / "source.dcm"
+    payload = b"synthetic image payload"
+    source.write_bytes(payload)
+    config = AppConfig(storage=StorageConfig(data_dir=tmp_path / "landing"))
+    writer = ReceiptWriter(config, None, LandingStorage(config))
+    original_fsync = os.fsync
+    flushed = []
+
+    def fsync(fd):
+        original_fsync(fd)
+        flushed.append(fd)
+
+    monkeypatch.setattr(os, "fsync", fsync)
+    stored = writer.receive_file(
+        source_path=source,
+        receipt_id="one",
+        tenant_id="synthetic",
+        received_at=datetime.now(timezone.utc),
+    )
+    assert len(flushed) == (1 if os.name == "nt" else 2)
+    assert Path(stored.landing_location).read_bytes() == payload
+    assert stored.byte_size == len(payload)
+    assert stored.checksum_sha256 == sha256(payload).hexdigest()
 
 
 def test_reference_receiver_puts_exact_bytes_with_service_checksum(tmp_path):
@@ -68,6 +101,7 @@ def test_invalid_application_checkout_never_falls_back(tmp_path):
         cwd=Path(__file__).resolve().parents[1],
         env={**os.environ, "RELAY_INTEGRITY_INGEST_SOURCE": str(tmp_path)},
         capture_output=True,
+        check=False,
         timeout=10,
     )
     assert result.returncode != 0

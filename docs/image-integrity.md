@@ -55,9 +55,15 @@ change to production logging policy.
 
 ## Run locally
 
-Prerequisites: Linux, Python 3.12 or later, OpenSSL, Git, and a Relay executable
-supporting configuration schema 5. The binary runs with a temporary configuration;
-no installation, enrollment or production service changes are performed.
+Prerequisites: Linux or a disposable Windows host, Python 3.12 or later, OpenSSL,
+Git, and a Relay executable supporting configuration schema 5. The binary runs
+with a temporary configuration;
+no Relay installation, enrollment or production service changes are performed.
+On Windows, the harness temporarily imports its generated public TLS certificate
+into the current user's Root store and removes that exact certificate in `finally`,
+including on comparison failures. Cleanup failures fail qualification. Use a
+disposable host: forcibly killing the process can prevent certificate cleanup.
+Linux uses `SSL_CERT_FILE` without changing the system trust store.
 
 From the Relay repository:
 
@@ -74,8 +80,31 @@ cd tools/relay-integrity
 
 Use the exact release executable to qualify a release. A source build tests that
 build only; it does not attest to an installed clinic executable. CI builds the
-current PR checkout using Go 1.27.0, runs the comparator/SDK contract tests and
-local integration, and retains JSON evidence. No AWS credentials are required.
+current PR checkout using Go 1.27.0 on both Ubuntu and Windows, runs the
+comparator/SDK contract tests and all eleven local integration cases with each
+native executable, and retains separate JSON evidence with OS/architecture.
+Windows also verifies certificate removal on success and failure. No AWS
+credentials are required. These jobs do not qualify installed services or the
+packaged Docker image.
+
+On a disposable Windows host, run from PowerShell (with OpenSSL on `PATH`):
+
+```powershell
+python -m venv "$env:TEMP/relay-integrity-venv"
+$python = "$env:TEMP/relay-integrity-venv/Scripts/python.exe"
+& $python -m pip install --require-hashes -r tools/relay-integrity/requirements.lock
+go build -o "$env:TEMP/telrad-relay.exe" ./cmd/telrad-relay
+Set-Location tools/relay-integrity
+& $python -m pytest integration_tests -q
+& $python -m integration_tests.relay_image_integrity `
+  --relay-binary "$env:TEMP/telrad-relay.exe" `
+  --storage local --evidence "$env:TEMP/relay-integrity-windows.json"
+```
+
+The reference receiver flushes file contents on both platforms and additionally
+flushes the parent directory on Linux. Local read-back is not a power-loss test.
+The same Windows command supports the explicit AWS arguments below; automatic
+CI covers local storage, while live S3 qualification remains operator-invoked.
 
 All Python dependencies are test-only. `requirements.in` and its hash-locked
 `requirements.lock` are separate from the distributed Go executable. Regenerate
