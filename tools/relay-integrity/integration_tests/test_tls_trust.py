@@ -128,9 +128,9 @@ def test_ci_runs_native_windows_and_linux_with_separate_evidence():
         "target: windows",
         "target: docker",
         "--relay-image relay-integrity:current",
-        "inputs.storage || 'local'",
-        "allowed-account-ids: ${{ inputs.aws_account }}",
-        "github.event_name == 'workflow_dispatch' && inputs.storage == 'aws'",
-        "name: relay-image-integrity-${{ inputs.storage || 'local' }}-${{ matrix.target }}",
+        "name: relay-image-integrity-${{ matrix.target }}",
     ):
         assert required in workflow
+
+    assert "id-token: write" not in workflow
+    assert "aws" not in workflow.lower()

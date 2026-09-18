@@ -1,33 +1,22 @@
-"""Run real Relay -> test/application HTTPS ingest -> local/S3 qualification.
-
-By default the HTTPS receiver is a test fixture. Set RELAY_INTEGRITY_INGEST_SOURCE
-to qualify an external application ingest checkout. No installed Relay is changed.
-"""
+"""Verify Relay preserves DICOM dataset bytes through C-STORE and HTTPS."""
 
 import argparse
-import base64
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager, ExitStack
 from copy import deepcopy
-from dataclasses import replace
 from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
 import platform
-import re
 import signal
 import socket
 import subprocess
 import tempfile
 import threading
 import time
-from urllib.parse import urlsplit
 from uuid import uuid4
 
-from botocore.config import Config
-from botocore.exceptions import ClientError
-from botocore.session import Session
 from fastapi import FastAPI, Response
 from pynetdicom import AE, evt
 import uvicorn
@@ -35,18 +24,7 @@ import uvicorn
 from .tls_trust import receiver_trust
 from .container_target import packaged_process
 
-from .backend import (
-    AppConfig,
-    S3LandingConfig,
-    ScratchConfig,
-    StorageConfig,
-    LandingStorage,
-    ReceiptWriter,
-    ReceiptWriteError,
-    RelayIngestRuntime,
-    build_relay_ingest_router,
-    INGEST_SOURCE,
-)
+from .reference_ingest import build_relay_ingest_router
 
 from .image_integrity import (
     ImageCase,
@@ -61,34 +39,25 @@ from .image_integrity import (
 CREDENTIAL = "trr_v1_" + "A" * 22 + "_" + "B" * 43  # Synthetic, local fixture only.
 LIMITATIONS = [
     "Authentication, control sessions and receipt metadata use in-memory fixtures.",
-    "No real application database, SQS recovery, HealthImaging import or viewer is exercised.",
+    "The receiver is a test fixture; application storage and downstream processing are not exercised.",
     "C-STORE push is exercised; PACS C-GET retrieval and installed clinic releases are not.",
     "Synthetic uncompressed/RLE coverage is not qualification of every modality or codec.",
 ]
 
 
 class ReceiptAPI:
-    """Metadata/control fixture shared by both receiver adapters."""
+    """In-memory upload capture and receipt fixture."""
 
     def __init__(self):
+        self.expected_case = None
+        self.reject_upload = False
+        self.payloads = {}
         self.arrivals = {}
         self.receipts = {}
         self.completed = set()
         self.hold_completion = False
         self.completion_entered = threading.Event()
         self.release_completion = threading.Event()
-
-    def authenticate_relay(self, *, authorization, protocol):
-        require(
-            authorization == f"Bearer {CREDENTIAL}" and protocol == "dicom",
-            "invalid fixture auth",
-        )
-        return {
-            "relayId": "integrity-relay",
-            "siteId": "integrity-relay",
-            "companyId": "synthetic-integrity",
-            "ingestMode": "TEST",
-        }
 
     def create_relay_dicom_arrival(self, **kwargs):
         receipt = str(uuid4())
@@ -105,40 +74,13 @@ class ReceiptAPI:
     def complete_relay_dicom_receipt(self, *, receipt_id, landing_receipt_id):
         require(
             receipt_id == landing_receipt_id and receipt_id in self.receipts,
-            "completion without landing receipt",
+            "completion without validated upload",
         )
         if self.hold_completion:
             self.completion_entered.set()
             require(self.release_completion.wait(10), "completion gate timed out")
         self.completed.add(receipt_id)
         return {"ok": True}
-
-
-class TrackedStorage(LandingStorage):
-    def __init__(self, config):
-        super().__init__(config)
-        self.attempted_keys = set()
-
-    def put_s3(self, file_path, *, context, received_at):
-        # Track before PUT, including ambiguous network failures, for exact cleanup.
-        self.attempted_keys.add(
-            self._s3_key(context.tenant_id, context.receipt_id, received_at)
-        )
-        return super().put_s3(file_path, context=context, received_at=received_at)
-
-
-class FaultWriter(ReceiptWriter):
-    fault = None
-
-    def receive_file(self, **kwargs):
-        if self.fault == "storage-failure":
-            raise ReceiptWriteError(
-                "synthetic storage failure", durability_failure=True
-            )
-        stored = super().receive_file(**kwargs)
-        if self.fault == "checksum-mismatch":
-            return replace(stored, checksum_sha256="0" * 64)
-        return stored
 
 
 def bound_socket():
@@ -153,7 +95,7 @@ def free_port():
 
 
 @contextmanager
-def cloud_server(directory, config, api, writer):
+def cloud_server(directory, api):
     cert, key = directory / "cert.pem", directory / "key.pem"
     subprocess.run(
         [
@@ -181,14 +123,7 @@ def cloud_server(directory, config, api, writer):
     )
     key.chmod(0o600)
     app = FastAPI()
-    app.include_router(
-        build_relay_ingest_router(
-            config,
-            RelayIngestRuntime(5),
-            api_client=api,
-            writer=writer,
-        )
-    )
+    app.include_router(build_relay_ingest_router(api, CREDENTIAL))
     with bound_socket() as sock:
         origin = f"https://127.0.0.1:{sock.getsockname()[1]}"
 
@@ -274,10 +209,7 @@ def relay_process(binary, directory, origin, cert, image=None, report=None):
         )
     )
     config.chmod(0o600)
-    # Do not pass AWS credentials or endpoint overrides to the Relay subprocess.
-    environment = {
-        key: value for key, value in os.environ.items() if not key.startswith("AWS_")
-    }
+    environment = os.environ.copy()
     environment["SSL_CERT_FILE"] = str(cert)
     stack = ExitStack()
     process = (
@@ -344,98 +276,7 @@ def send(case, port):
             association.abort()
 
 
-def aws_reader(args, storage):
-    require(
-        args.s3_bucket and re.fullmatch(r"\d{12}", args.expected_aws_account or ""),
-        "AWS mode requires a dedicated test bucket and expected 12-digit AWS account",
-    )
-    session = Session()
-    cfg = Config(
-        connect_timeout=10,
-        read_timeout=30,
-        retries={"max_attempts": 2},
-        ignore_configured_endpoint_urls=True,
-    )
-    sts = session.create_client("sts", region_name=args.region, config=cfg)
-    try:
-        require(
-            sts.get_caller_identity()["Account"] == args.expected_aws_account,
-            "AWS account mismatch",
-        )
-    finally:
-        sts.close()
-    reader = session.create_client("s3", region_name=args.region, config=cfg)
-    try:
-        reader.head_bucket(
-            Bucket=args.s3_bucket, ExpectedBucketOwner=args.expected_aws_account
-        )
-        # The selected writer resolves its own SDK client. Reject emulators and
-        # configured endpoint overrides instead of labelling their result AWS.
-        require(
-            storage._s3().meta.endpoint_url == reader.meta.endpoint_url,
-            "S3 writer has an endpoint override",
-        )
-        return reader
-    except BaseException:
-        reader.close()
-        raise
-
-
-def read_landed(location, args, reader, storage):
-    if args.storage == "local":
-        return Path(location).read_bytes()
-    uri = urlsplit(location)
-    key = uri.path.lstrip("/")
-    require(
-        uri.scheme == "s3"
-        and uri.netloc == args.s3_bucket
-        and key in storage.attempted_keys,
-        "unexpected landing object location",
-    )
-    response = reader.get_object(
-        Bucket=args.s3_bucket,
-        Key=key,
-        ExpectedBucketOwner=args.expected_aws_account,
-        ChecksumMode="ENABLED",
-    )
-    with response["Body"] as body:
-        payload = body.read()
-    require(len(payload) == response["ContentLength"], "S3 read-back length mismatch")
-    require(
-        response.get("ChecksumSHA256")
-        == base64.b64encode(bytes.fromhex(digest(payload))).decode("ascii"),
-        "S3 read-back checksum missing or mismatched",
-    )
-    return payload
-
-
-def cleanup_s3(args, reader, storage):
-    failures = 0
-    for key in sorted(storage.attempted_keys):
-        try:
-            require(
-                key.startswith(storage.config.s3_landing.prefix + "/"),
-                "cleanup key outside run",
-            )
-            request = {
-                "Bucket": args.s3_bucket,
-                "Key": key,
-                "ExpectedBucketOwner": args.expected_aws_account,
-            }
-            metadata = reader.head_object(**request)
-            # Remove the exact version, not a delete marker, in versioned buckets.
-            if "VersionId" in metadata:
-                request["VersionId"] = metadata["VersionId"]
-            reader.delete_object(**request)
-        except ClientError as exc:
-            if exc.response.get("ResponseMetadata", {}).get("HTTPStatusCode") != 404:
-                failures += 1
-        except Exception:
-            failures += 1
-    require(failures == 0, "S3 cleanup failed; inspect this run's isolated prefix")
-
-
-def exercise(port, api, writer, storage, reader, args, report):
+def exercise(port, api, report):
     cases = fixtures()
     cases.append(ImageCase("identical-repeat", cases[0].dataset, cases[0].pixels))
     changed = deepcopy(cases[0].dataset)
@@ -444,6 +285,7 @@ def exercise(port, api, writer, storage, reader, args, report):
     changed.PixelData = pixels.tobytes()
     cases.append(ImageCase("same-uid-different-pixels", changed, pixels))
     for case in cases:
+        api.expected_case = case
         before = set(api.completed)
         code, wire = send(case, port)
         require(code == 0, f"{case.name}: C-STORE did not succeed")
@@ -452,7 +294,7 @@ def exercise(port, api, writer, storage, reader, args, report):
             len(arrivals) == 1, f"{case.name}: expected exactly one completed arrival"
         )
         receipt = arrivals.pop()
-        landed = read_landed(api.receipts[receipt]["filePath"], args, reader, storage)
+        landed = api.payloads[receipt]
         incoming = api.arrivals[receipt]
         require(
             len(landed) == incoming["payload_size_bytes"],
@@ -460,7 +302,8 @@ def exercise(port, api, writer, storage, reader, args, report):
         )
         report["cases"].append(verify(case, wire, landed, incoming["payload_sha256"]))
 
-    # Hold completion after storage: C-STORE must wait for the durable receipt.
+    # The receiver validates the upload before issuing its synthetic receipt.
+    api.expected_case = cases[0]
     api.hold_completion = True
     before = set(api.completed)
     with ThreadPoolExecutor(max_workers=1) as executor:
@@ -478,26 +321,24 @@ def exercise(port, api, writer, storage, reader, args, report):
         "delayed receipt did not succeed",
     )
     receipt = (api.completed - before).pop()
-    landed = read_landed(api.receipts[receipt]["filePath"], args, reader, storage)
+    landed = api.payloads[receipt]
     evidence = verify(cases[0], wire, landed, api.arrivals[receipt]["payload_sha256"])
     evidence["case"] = "waits-for-receipt"
     report["cases"].append(evidence)
 
-    for fault in ("storage-failure", "checksum-mismatch"):
-        writer.fault = fault
-        completed, registered = set(api.completed), set(api.receipts)
-        code, _ = send(cases[0], port)
-        require(
-            code is not None and code != 0, f"{fault}: expected C-STORE failure status"
-        )
-        require(
-            api.completed == completed and set(api.receipts) == registered,
-            f"{fault}: corrupt/failed landing was acknowledged",
-        )
-        report["cases"].append({"case": fault, "status": "passed", "dicomStatus": code})
-    writer.fault = None
+    api.reject_upload = True
+    completed = set(api.completed)
+    code, _ = send(cases[0], port)
     require(
-        len(api.completed) == len(cases) + 1 and len(api.arrivals) == len(cases) + 3,
+        code is not None and code != 0, "receiver rejection: expected C-STORE failure"
+    )
+    require(api.completed == completed, "rejected upload was acknowledged")
+    report["cases"].append(
+        {"case": "receiver-rejection", "status": "passed", "dicomStatus": code}
+    )
+    api.reject_upload = False
+    require(
+        len(api.completed) == len(cases) + 1 and len(api.arrivals) == len(cases) + 2,
         "arrival inventory mismatch",
     )
     report["completedArrivals"] = len(api.completed)
@@ -509,11 +350,6 @@ def main():
     target = parser.add_mutually_exclusive_group(required=True)
     target.add_argument("--relay-binary", type=Path)
     target.add_argument("--relay-image")
-    parser.add_argument("--storage", choices=("local", "aws"), required=True)
-    parser.add_argument("--s3-bucket")
-    parser.add_argument("--expected-aws-account")
-    parser.add_argument("--region", default="ap-southeast-2")
-    parser.add_argument("--kms-key-id", default="")
     parser.add_argument("--evidence", type=Path, required=True)
     args = parser.parse_args()
 
@@ -523,46 +359,22 @@ def main():
     signal.signal(signal.SIGTERM, interrupted)
     run = str(uuid4())
     report = {
-        "schemaVersion": 1,
+        "schemaVersion": 2,
         "runId": run,
         "status": "failed",
-        "storage": args.storage,
         "target": "docker" if args.relay_image else "native",
-        "ingestAdapter": "application" if INGEST_SOURCE else "reference",
         "platform": {"system": platform.system(), "machine": platform.machine()},
         "startedAt": datetime.now(timezone.utc).isoformat(),
         "cases": [],
         "limitations": LIMITATIONS,
     }
-    reader, storage = None, None
     try:
-        require(
-            os.environ.get("DICOM_PACS_ROUTING_ENABLED", "false").lower() != "true",
-            "unset DICOM_PACS_ROUTING_ENABLED for the isolated integrity harness",
-        )
         if args.relay_binary:
             args.relay_binary = args.relay_binary.resolve(strict=True)
             require(
                 os.access(args.relay_binary, os.X_OK), "Relay binary is not executable"
             )
             report["relayBinarySha256"] = digest(args.relay_binary.read_bytes())
-        if INGEST_SOURCE:
-            report["applicationRevision"] = subprocess.check_output(
-                ["git", "-C", str(INGEST_SOURCE), "rev-parse", "HEAD"],
-                text=True,
-                timeout=10,
-            ).strip()
-            report["applicationDirty"] = bool(
-                subprocess.check_output(
-                    ["git", "-C", str(INGEST_SOURCE), "status", "--porcelain"],
-                    text=True,
-                    timeout=10,
-                ).strip()
-            )
-        else:
-            report["limitations"] = [
-                "HTTPS ingest uses a test receiver, not the application implementation."
-            ] + LIMITATIONS
         root = Path(__file__).resolve().parents[3]
         report["relayRepositoryRevision"] = subprocess.check_output(
             ["git", "-C", str(root), "rev-parse", "HEAD"], text=True, timeout=10
@@ -574,26 +386,8 @@ def main():
         )
         with tempfile.TemporaryDirectory(prefix="relay-integrity-") as temporary:
             directory = Path(temporary)
-            config = AppConfig(
-                storage=StorageConfig(data_dir=directory / "landing"),
-                scratch=ScratchConfig(min_free_bytes=0, max_reserved_bytes=2 * 1024**3),
-                landing_storage_backend="s3" if args.storage == "aws" else "local",
-                s3_landing=S3LandingConfig(
-                    region=args.region,
-                    bucket=args.s3_bucket or "",
-                    prefix=f"relay-integrity/{run}",
-                    kms_key_id=args.kms_key_id,
-                    timeout_seconds=15,
-                ),
-            )
-            storage = TrackedStorage(config)
-            if args.storage == "aws":
-                report["s3Prefix"] = config.s3_landing.prefix
-                report["awsRegion"] = args.region
-                reader = aws_reader(args, storage)
             api = ReceiptAPI()
-            writer = FaultWriter(config, api, storage)
-            with cloud_server(directory, config, api, writer) as (origin, cert):
+            with cloud_server(directory, api) as (origin, cert):
                 with (
                     receiver_trust(cert),
                     relay_process(
@@ -605,7 +399,7 @@ def main():
                         report,
                     ) as port,
                 ):
-                    exercise(port, api, writer, storage, reader, args, report)
+                    exercise(port, api, report)
         report["status"] = "passed"
     except Exception as exc:
         report["error"] = (
@@ -614,22 +408,10 @@ def main():
     except KeyboardInterrupt:
         report["error"] = "interrupted"
     finally:
-        if reader is not None:
-            try:
-                cleanup_s3(args, reader, storage)
-                report["cleanup"] = "passed"
-            except Exception as exc:
-                report["status"] = "failed"
-                report["cleanup"] = "failed"
-                report["cleanupError"] = type(exc).__name__
-            finally:
-                reader.close()
         report["finishedAt"] = datetime.now(timezone.utc).isoformat()
         args.evidence.parent.mkdir(parents=True, exist_ok=True)
         args.evidence.write_text(json.dumps(report, indent=2) + "\n")
-    print(
-        f"Relay image integrity ({args.storage}): {report['status']}; evidence: {args.evidence}"
-    )
+    print(f"Relay image integrity: {report['status']}; evidence: {args.evidence}")
     return 0 if report["status"] == "passed" else 1
 
 

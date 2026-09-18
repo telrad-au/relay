@@ -177,7 +177,7 @@ def verify(case: ImageCase, wire: bytes, landed: bytes, expected_file_hash: str)
     require(source == wire, f"{case.name}: sender changed dataset")
     require(
         digest(landed) == expected_file_hash,
-        f"{case.name}: stored object SHA-256 mismatch",
+        f"{case.name}: received object SHA-256 mismatch",
     )
     received = pydicom.dcmread(BytesIO(landed))
     meta = received.file_meta

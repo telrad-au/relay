@@ -43,7 +43,7 @@ def test_file_wrapper_can_change_without_changing_dataset(images):
 @pytest.mark.parametrize(
     "change", ["private-tag", "unicode-tag", "sequence", "pixels", "missing-frame"]
 )
-def test_changed_dataset_is_rejected_even_with_matching_storage_hash(images, change):
+def test_changed_dataset_is_rejected_even_with_matching_payload_hash(images, change):
     case = images[2]
     source = encode(case.dataset)
     altered = deepcopy(case.dataset)
@@ -86,7 +86,7 @@ def test_incorrect_file_meta_rejected(images, tag):
         verify(case, dataset_bytes(source), landed, digest(landed))
 
 
-def test_sender_mutation_and_storage_corruption_are_rejected(images):
+def test_sender_mutation_and_payload_corruption_are_rejected(images):
     case = images[0]
     source = encode(case.dataset)
     with pytest.raises(IntegrityFailure, match="sender changed"):

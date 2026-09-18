@@ -283,19 +283,14 @@ mismatched responses. Joint qualification additionally uses a real Relay binary
 and real platform routes with a RIS AE followed by AA: both original ACKs must
 remain in distinct delivery-attempt records after success.
 
-## Image integrity through durable storage
+## Image integrity
 
-[Image integrity qualification](image-integrity.md) runs an actual Relay binary
-through C-STORE, TLS and independent local/S3 read-back, compares exact dataset
-bytes and every decoded frame, and exercises failure acknowledgments. Public CI
-uses a self-contained test receiver; operators can explicitly supply an application
-ingest checkout to qualify that implementation. AWS runs are opt-in and evidence
-always identifies the selected receiver and storage mode. The image-integrity
-workflow builds and executes native Linux and Windows binaries through all eleven
-local cases, retaining separate platform evidence. Windows additionally checks
-temporary machine certificate trust cleanup on success and failure; these
-checks run only on disposable hosts. The matrix also exercises the release
-Dockerfile image with its packaged entrypoint, non-root user and read-only root
-filesystem. Manual AWS dispatch runs all three targets through real S3 with
-separate evidence and cleanup; PR events run the same matrix with local storage.
-Installed services remain a separate qualification boundary.
+[Image integrity tests](image-integrity.md) run the actual Relay binary through
+C-STORE and verified HTTPS. The receiver holds uploads in memory and compares
+exact dataset bytes, validates the added Part 10 header and checks every decoded
+frame. It does not persist payloads or depend on cloud storage or application code.
+The workflow runs the same ten integration cases on native Linux, native Windows
+and the release Dockerfile image, retaining separate evidence. Windows checks
+cleanup of temporary machine certificate trust on disposable hosts. Docker uses
+the packaged entrypoint, non-root user and read-only root filesystem.
+Installed services and downstream application integration remain separate tests.

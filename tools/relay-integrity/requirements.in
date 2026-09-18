@@ -1,5 +1,4 @@
 # Test-only dependencies; not part of the distributed Relay executable.
-botocore==1.43.67
 # Resolve pytest/click's Windows dependency even when regenerating on Linux.
 colorama==0.4.6
 fastapi==0.141.1
