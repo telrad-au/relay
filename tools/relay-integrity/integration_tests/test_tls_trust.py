@@ -119,6 +119,8 @@ def test_ci_runs_native_windows_and_linux_with_separate_evidence():
         "os: windows-2025",
         "binary: telrad-relay.exe",
         "python: Scripts/python.exe",
+        'python-version: "3.13.15"',
+        "python-version: ${{ matrix.python-version }}",
         "runs-on: ${{ matrix.os }}",
         'go build -o "$RUNNER_TEMP/${{ matrix.binary }}"',
         '--relay-binary "$RUNNER_TEMP/${{ matrix.binary }}"',

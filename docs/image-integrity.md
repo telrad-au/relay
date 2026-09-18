@@ -83,6 +83,8 @@ build only; it does not attest to an installed clinic executable. CI builds the
 current PR checkout using Go 1.27.0 on both Ubuntu and Windows, runs the
 comparator/SDK contract tests and all eleven local integration cases with each
 native executable, and retains separate JSON evidence with OS/architecture.
+CI uses Python 3.12.13 on Linux and 3.13.15 on Windows (3.12.13 has no
+Windows build in the Actions Python distribution).
 Windows also verifies certificate removal on success and failure. No AWS
 credentials are required. These jobs do not qualify installed services or the
 packaged Docker image.
