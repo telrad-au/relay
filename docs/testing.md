@@ -13,6 +13,10 @@ explicit command that provisions, measures and removes two isolated AWS VMs.
 
 The default suite uses local loopback TLS/HTTP, MLLP, and byte-level DICOM
 fixtures. Tests contain synthetic identifiers only.
+The hosted VPN qualification test exercises one shared HL7 listener with two
+observed source identities, separate HTTPS clients and credentials, and rejection
+of an unknown source. The mode and its remaining release gates are documented in
+[hosted VPN qualification](hosted-vpn-qualification.md).
 
 ```bash
 go test -race ./...

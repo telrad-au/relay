@@ -165,6 +165,14 @@ func execute(args []string) error {
 		fmt.Println(version)
 		return nil
 	}
+	if command == "hosted-run" {
+		if flags.NArg() != 1 {
+			return errors.New("hosted-run accepts no arguments")
+		}
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		return runHosted(ctx, *configPath)
+	}
 	if command == "retrieval-keygen" {
 		return generatePermitKey(*configPath)
 	}

@@ -9,6 +9,10 @@ network tunnel. It does not give Telrad routable access to the clinic network.
 
 Relay runs as a Linux service, Windows service, or Linux container.
 
+The experimental [hosted VPN qualification mode](docs/hosted-vpn-qualification.md)
+is for disposable synthetic testing while the managed binding and server-side
+acceptance contract is implemented. It is not part of a production release.
+
 ## Quickstart
 
 Native installation is the simplest option. After installation, `telrad`
