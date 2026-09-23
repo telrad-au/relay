@@ -46,8 +46,10 @@ const (
 )
 
 type config struct {
-	Retrieval                  *retrievalConfig `json:"retrieval,omitempty"`
-	DisableDICOMListener       bool             `json:"disableDicomListener,omitempty"`
+	Bindings                   []hostedManifestEntry `json:"bindings,omitempty"`
+	HostedRuntime              *managedHostedConfig  `json:"hostedRuntime,omitempty"`
+	Retrieval                  *retrievalConfig      `json:"retrieval,omitempty"`
+	DisableDICOMListener       bool                  `json:"disableDicomListener,omitempty"`
 	commandOutput              io.Writer
 	beforePairingCommit        func() error
 	SchemaVersion              int    `json:"schemaVersion"`
@@ -164,14 +166,6 @@ func execute(args []string) error {
 	if command == "version" {
 		fmt.Println(version)
 		return nil
-	}
-	if command == "hosted-run" {
-		if flags.NArg() != 1 {
-			return errors.New("hosted-run accepts no arguments")
-		}
-		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-		defer stop()
-		return runHosted(ctx, *configPath)
 	}
 	if command == "retrieval-keygen" {
 		return generatePermitKey(*configPath)
@@ -613,6 +607,12 @@ func run(cfg *config, configPath string) error {
 }
 
 func runWithContext(ctx context.Context, cfg *config, configPath string) error {
+	if cfg.HostedRuntime != nil {
+		return runManagedHosted(ctx, cfg)
+	}
+	if cfg.Bindings != nil {
+		return runHosted(ctx, configPath)
+	}
 	if nativeManagementEnabled(configPath) {
 		return runNativeManagement(ctx, cfg, configPath)
 	}
@@ -785,7 +785,17 @@ func drainRelayWork(work *workDrainer, listeners ...net.Listener) error {
 	}
 }
 
-func doctor(cfg *config) error { return doctorTo(cfg, os.Stdout) }
+func doctor(cfg *config) error {
+	if cfg.Bindings != nil {
+		_, _, err := loadHostedManifest(cfg.configPath)
+		return err
+	}
+	if cfg.HostedRuntime != nil {
+		_, err := hostedManagementCredential(cfg.HostedRuntime.ManagementCredentialPath)
+		return err
+	}
+	return doctorTo(cfg, os.Stdout)
+}
 
 func doctorTo(cfg *config, output io.Writer) error {
 	if retrievalEnabledLocal(cfg) {
@@ -804,6 +814,20 @@ func doctorTo(cfg *config, output io.Writer) error {
 }
 
 func runtimeReady(cfg *config, configPath string) error {
+	if cfg.HostedRuntime != nil {
+		if _, err := hostedManagementCredential(cfg.HostedRuntime.ManagementCredentialPath); err != nil {
+			return err
+		}
+		for _, port := range []int{cfg.DicomPort, cfg.HL7Port} {
+			conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), time.Second)
+			if err != nil {
+				return errors.New("hosted listener is unavailable")
+			}
+			_ = conn.Close()
+		}
+		fmt.Println("hosted relay ready")
+		return nil
+	}
 	if _, err := readCredentialFile(cfg.CredentialPath, time.Now()); err != nil {
 		return errors.New("stored credential is invalid")
 	}
@@ -823,7 +847,7 @@ func relayIsEnrolled(cfg *config) bool {
 }
 
 func pairingBootstrapForRun(command string, cfg *config) (bool, error) {
-	if command != "run" || relayIsEnrolled(cfg) {
+	if command != "run" || cfg.Bindings != nil || cfg.HostedRuntime != nil || relayIsEnrolled(cfg) {
 		return false, nil
 	}
 	if distribution != "docker" {
@@ -970,6 +994,36 @@ func validateConfig(cfg *config, command string) error {
 	}
 	if cfg.configPath != "" && filepath.Clean(cfg.configPath) == filepath.Clean(cfg.CredentialPath) {
 		return errors.New("credentialPath must differ from the configuration path")
+	}
+	if cfg.Bindings != nil && cfg.HostedRuntime != nil {
+		return errors.New("static bindings and managed hostedRuntime are mutually exclusive")
+	}
+	if cfg.Bindings != nil {
+		if cfg.RelayID != "" || cfg.Retrieval != nil || cfg.DisableDICOMListener || nativeManagementEnabled(cfg.configPath) {
+			return errors.New("bindings require a separately managed configuration without a root connector or retrieval policy")
+		}
+		if command != "run" && command != "doctor" && command != "ready" {
+			return errors.New("operate on an individual binding configuration for this command")
+		}
+		if len(cfg.Bindings) > 128 || cfg.MaxConnections > 4096 {
+			return errors.New("binding or connection limit exceeded")
+		}
+		return nil
+	}
+	if cfg.HostedRuntime != nil {
+		if cfg.RelayID != "" || cfg.Retrieval != nil || cfg.DisableDICOMListener || nativeManagementEnabled(cfg.configPath) {
+			return errors.New("hostedRuntime requires a dedicated process without a root connector or retrieval policy")
+		}
+		if command != "run" && command != "doctor" && command != "ready" {
+			return errors.New("operate on an individual hosted binding for this command")
+		}
+		if err := validateEndpointURL("hostedRuntime.managementUrl", cfg.HostedRuntime.ManagementURL, "https", "/internal/relay/hosted/configuration"); err != nil {
+			return err
+		}
+		if !filepath.IsAbs(cfg.HostedRuntime.StateDirectory) || !filepath.IsAbs(cfg.HostedRuntime.ManagementCredentialPath) {
+			return errors.New("hosted runtime paths must be absolute")
+		}
+		return nil
 	}
 	paired := command == "run" || command == "doctor" || command == "ready" || command == "rotate-credential"
 	if err := validateProtocolEndpoints(cfg, paired); err != nil {

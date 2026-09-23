@@ -1,12 +1,9 @@
 package main
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"net"
 	"path/filepath"
 	"strconv"
@@ -16,16 +13,7 @@ import (
 
 // The static manifest is for disposable VPN qualification. The managed
 // configuration lease and backend acceptance gate are required before release.
-type hostedManifest struct {
-	SchemaVersion       int                   `json:"schemaVersion"`
-	ListenAddress       string                `json:"listenAddress"`
-	DicomPort           int                   `json:"dicomPort"`
-	HL7Port             int                   `json:"hl7Port"`
-	MaxConnections      int                   `json:"maxConnections"`
-	MaxDicomConnections int                   `json:"maxDicomConnections"`
-	MaxHL7Connections   int                   `json:"maxHl7Connections"`
-	Bindings            []hostedManifestEntry `json:"bindings"`
-}
+type hostedManifest = config
 
 type hostedManifestEntry struct {
 	SourceIP   string `json:"sourceIp"`
@@ -33,37 +21,30 @@ type hostedManifestEntry struct {
 }
 
 type hostedBinding struct {
-	cfg      *config
-	provider *credentialProvider
-	clients  protocolClients
-	status   *runtimeStatusManager
-	limits   *connectionLimiter
-	ctx      context.Context
-	cancel   context.CancelFunc
-	mu       sync.Mutex
-	closed   bool
-	sockets  map[net.Conn]struct{}
+	cfg         *config
+	provider    *credentialProvider
+	clients     protocolClients
+	status      *runtimeStatusManager
+	limits      *connectionLimiter
+	ctx         context.Context
+	cancel      context.CancelFunc
+	mu          sync.Mutex
+	closed      bool
+	validUntil  time.Time
+	fingerprint string
+	sockets     map[net.Conn]struct{}
 }
 
 func loadHostedManifest(path string) (*hostedManifest, map[string]*hostedBinding, error) {
-	data, err := safeReadFile(path, maxCloudResponseBytes)
+	manifest, err := loadConfigMode(path, false)
 	if err != nil {
 		return nil, nil, err
 	}
-	var manifest hostedManifest
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&manifest); err != nil {
-		return nil, nil, fmt.Errorf("decode hosted manifest: %w", err)
+	if manifest.Bindings == nil {
+		return nil, nil, errors.New("binding configuration is required")
 	}
-	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		return nil, nil, errors.New("hosted manifest has multiple JSON values")
-	}
-	if manifest.SchemaVersion != 1 || net.ParseIP(manifest.ListenAddress) == nil || manifest.DicomPort < 1 || manifest.DicomPort > 65535 || manifest.HL7Port < 1 || manifest.HL7Port > 65535 || manifest.DicomPort == manifest.HL7Port {
-		return nil, nil, errors.New("invalid hosted listener configuration")
-	}
-	if manifest.MaxConnections < 1 || manifest.MaxConnections > 4096 || manifest.MaxDicomConnections < 1 || manifest.MaxHL7Connections < 1 || manifest.MaxDicomConnections > manifest.MaxConnections || manifest.MaxHL7Connections > manifest.MaxConnections || len(manifest.Bindings) < 1 || len(manifest.Bindings) > 128 {
-		return nil, nil, errors.New("invalid hosted connection limits or bindings")
+	if err := validateConfig(manifest, "run"); err != nil {
+		return nil, nil, err
 	}
 	bindings := make(map[string]*hostedBinding, len(manifest.Bindings))
 	ids := make(map[string]struct{}, len(manifest.Bindings))
@@ -89,7 +70,7 @@ func loadHostedManifest(path string) (*hostedManifest, map[string]*hostedBinding
 		if err := validateConfig(cfg, "run"); err != nil {
 			return nil, nil, fmt.Errorf("validate hosted child: %w", err)
 		}
-		if cfg.Retrieval != nil || cfg.DisableDICOMListener {
+		if cfg.Bindings != nil || cfg.Retrieval != nil || cfg.DisableDICOMListener {
 			return nil, nil, errors.New("hosted child must use push DICOM and cannot enable PACS retrieval")
 		}
 		if reportIP := net.ParseIP(cfg.ReportHost); reportIP == nil || reportIP.To4() == nil || reportIP.String() != cfg.ReportHost {
@@ -114,7 +95,7 @@ func loadHostedManifest(path string) (*hostedManifest, map[string]*hostedBinding
 		}
 		bindings[entry.SourceIP] = &hostedBinding{cfg: cfg, provider: provider, clients: clientFactory(cfg), status: newRuntimeStatus(childPath), limits: newConnectionLimiter(cfg), sockets: make(map[net.Conn]struct{})}
 	}
-	return &manifest, bindings, nil
+	return manifest, bindings, nil
 }
 
 func (binding *hostedBinding) register(conn net.Conn) bool {
@@ -123,8 +104,25 @@ func (binding *hostedBinding) register(conn net.Conn) bool {
 	if binding.closed {
 		return false
 	}
+	if !binding.validUntil.IsZero() && !time.Now().Before(binding.validUntil) {
+		return false
+	}
 	binding.sockets[conn] = struct{}{}
 	return true
+}
+
+func (binding *hostedBinding) setDeadline(deadline time.Time) {
+	binding.mu.Lock()
+	if !binding.closed {
+		binding.validUntil = deadline
+	}
+	binding.mu.Unlock()
+}
+
+func (binding *hostedBinding) expired(now time.Time) bool {
+	binding.mu.Lock()
+	defer binding.mu.Unlock()
+	return !binding.validUntil.IsZero() && !now.Before(binding.validUntil)
 }
 
 func (binding *hostedBinding) unregister(conn net.Conn) {
@@ -206,6 +204,12 @@ func runHosted(ctx context.Context, path string) error {
 }
 
 func acceptHostedConnections(ctx context.Context, protocol string, listener net.Listener, bindings map[string]*hostedBinding, work *workDrainer, global *connectionLimiter, errCh chan<- error) {
+	acceptHostedWithLookup(ctx, protocol, listener, func(peer net.Addr) *hostedBinding {
+		return hostedBindingForPeer(peer, bindings)
+	}, work, global, errCh)
+}
+
+func acceptHostedWithLookup(ctx context.Context, protocol string, listener net.Listener, lookup func(net.Addr) *hostedBinding, work *workDrainer, global *connectionLimiter, errCh chan<- error) {
 	for {
 		conn, err := listener.Accept()
 		if err != nil {
@@ -214,7 +218,7 @@ func acceptHostedConnections(ctx context.Context, protocol string, listener net.
 			}
 			return
 		}
-		binding := hostedBindingForPeer(conn.RemoteAddr(), bindings)
+		binding := lookup(conn.RemoteAddr())
 		if binding == nil || !global.Acquire(protocol) {
 			_ = conn.Close()
 			continue
