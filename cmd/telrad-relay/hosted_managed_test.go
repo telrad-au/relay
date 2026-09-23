@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -167,5 +168,45 @@ func TestManagedHostedContainerDoesNotEnterClinicPairing(t *testing.T) {
 	}
 	if err := doctor(cfg); err != nil {
 		t.Fatalf("managed doctor required a clinic credential: %v", err)
+	}
+}
+
+func TestManagedHostedReadyChecksBoundSocketsWithoutDialing(t *testing.T) {
+	listeners := make([]net.Listener, 0, 2)
+	for range 2 {
+		listener, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		listeners = append(listeners, listener)
+		t.Cleanup(func() { _ = listener.Close() })
+	}
+	port := func(address net.Addr) int {
+		_, raw, err := net.SplitHostPort(address.String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		value, err := strconv.Atoi(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return value
+	}
+	tokenPath := filepath.Join(t.TempDir(), "management-token")
+	if err := os.WriteFile(tokenPath,
+		[]byte("thr_v1_"+"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := defaultConfig()
+	cfg.ListenAddress = "127.0.0.1"
+	cfg.DicomPort = port(listeners[0].Addr())
+	cfg.HL7Port = port(listeners[1].Addr())
+	cfg.HostedRuntime = &managedHostedConfig{ManagementCredentialPath: tokenPath}
+	if err := runtimeReady(cfg, ""); err != nil {
+		t.Fatalf("bound hosted listeners were not ready: %v", err)
+	}
+	_ = listeners[0].Close()
+	if err := runtimeReady(cfg, ""); err == nil {
+		t.Fatal("closed hosted listener remained ready")
 	}
 }

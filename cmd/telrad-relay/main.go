@@ -819,11 +819,16 @@ func runtimeReady(cfg *config, configPath string) error {
 			return err
 		}
 		for _, port := range []int{cfg.DicomPort, cfg.HL7Port} {
-			conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), time.Second)
-			if err != nil {
+			// The VPN ingress firewall intentionally rejects loopback probes.
+			// An active listener must instead hold the configured socket.
+			probe, err := net.Listen("tcp", net.JoinHostPort(cfg.ListenAddress, strconv.Itoa(port)))
+			if err == nil {
+				_ = probe.Close()
 				return errors.New("hosted listener is unavailable")
 			}
-			_ = conn.Close()
+			if !errors.Is(err, syscall.EADDRINUSE) {
+				return errors.New("hosted listener is unavailable")
+			}
 		}
 		fmt.Println("hosted relay ready")
 		return nil
