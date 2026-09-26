@@ -131,6 +131,9 @@ func superviseControl(ctx, workCtx context.Context, cfg *config, client *http.Cl
 		if sessionURL == "" {
 			hostname, _ := os.Hostname()
 			hello := map[string]any{"type": "hello", "agentVersion": version, "platform": relayPlatform(), "hostname": hostname, "capabilities": map[string]any{"dicom": !cfg.DisableDICOMListener, "hl7": true, "reportDelivery": true, "httpsIngest": true}}
+			if cfg.gatewayMode() {
+				hello["capabilities"].(map[string]any)["gateway"] = true
+			}
 			if retrievalEnabledLocal(cfg) {
 				hello["capabilities"].(map[string]any)["pacsRetrievalV2"] = retrievalCapability(cfg)
 			}

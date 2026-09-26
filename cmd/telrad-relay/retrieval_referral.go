@@ -210,6 +210,11 @@ func signReferrals(cfg *config, peer net.Addr, message []byte) ([]string, bool, 
 }
 
 func ingestClinicHL7(ctx context.Context, cfg *config, peer net.Addr, client *http.Client, provider *credentialProvider, status *runtimeStatusManager, message []byte, controlID string) ([]byte, error) {
+	if cfg.gatewayMode() {
+		// The tunnel vouches for the sender and Telrad validates the order, so
+		// a gateway neither signs report permits nor sends a referral envelope.
+		return ingestHL7(ctx, cfg.HL7URL, client, provider, status, message, controlID)
+	}
 	segments, err := referralSegments(message)
 	if err != nil {
 		// Parsing for authorization is stricter than transport. Telrad owns

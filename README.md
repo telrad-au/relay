@@ -285,6 +285,8 @@ applies updates only after an administrator approves an exact verified version.
   verification.
 - [Configuration reference](packaging/relay.example.json): advanced listener,
   timeout, and report-return settings.
+- [Gateway mode](docs/gateway-mode.md): in development and not yet released.
+  Telrad runs one Relay on its VPN gateway for clinics that connect over IPsec.
 
 ## Licence
 
