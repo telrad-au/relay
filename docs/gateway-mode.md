@@ -18,7 +18,7 @@ which clinic a connection belongs to:
 
 - Every HTTPS ingest request that the Relay makes for a DICOM or HL7 connection
   carries exactly one `X-Telrad-Peer-Ip` header. Its value is the canonical
-  IPv4 address of that connection's TCP peer, for example `100.96.0.10`. Telrad
+  IPv4 address of that connection's TCP peer, for example `198.51.100.10`. Telrad
   resolves the address to a company, VPN connection and session when it accepts
   the request, and rejects addresses that do not resolve. AE titles, HL7 sender
   fields and patient identifiers never select a tenant.
@@ -43,11 +43,9 @@ clinic. The gateway host is inside Telrad's trust boundary, so this adds no new
 exposure. For the same reason, a report signing key held by the gateway would
 not protect anything.
 
-The delivery token is the only authority for report delivery. Anyone who holds
-it and can reach the delivery listener can make the gateway send a single
-ORU^R01 message to any IPv4 address and port that the gateway can reach. Keep
-the token as secret as the gateway credential, and let only the platform reach
-the delivery listener's private interface.
+The delivery token is the only authority for report delivery. Keep it as secret
+as the gateway credential, and let only the platform reach the delivery
+listener's private interface.
 
 ## Report delivery
 
@@ -61,7 +59,7 @@ Content-Type: application/json
 
 {
   "deliveryId": "opaque-delivery-id",
-  "destination": {"host": "100.100.0.42", "port": 2575},
+  "destination": {"host": "192.0.2.42", "port": 2575},
   "messageControlId": "MSH-10 of the payload",
   "payload": "MSH|^~\\&|...",
   "payloadSha256": "lowercase hex SHA-256 of the payload"
@@ -151,8 +149,8 @@ Provision the delivery token file with mode `0600` in a directory with mode
 spaces, optionally followed by a newline. The platform holds the same token.
 The gateway reads it at startup, so restart the gateway after changing it.
 
-Native installers do not support gateway mode. Run it as a container on the
-host network, and replace the container image to update it.
+Native installers do not support gateway mode. Run it as a container and
+replace the image to update it.
 
 ## Readiness
 
@@ -160,7 +158,6 @@ host network, and replace the container image to update it.
 token and any delivery TLS certificate and key. `telrad ready`, which the
 container health check runs, checks the stored credential, requires a fresh
 `ready` runtime status and checks that the configured DICOM, HL7 and delivery
-sockets are held. It tries to bind each socket and expects `EADDRINUSE`. It does
-not dial the listeners, because the VPN ingress firewall rejects loopback
-connections. Readiness does not depend on the platform: a gateway has no
+sockets are held. It tries to bind each socket and expects the address to be in use; it does not
+dial the listeners. Readiness does not depend on the platform: a gateway has no
 control session, and `telrad status` reports `control connected: false`.

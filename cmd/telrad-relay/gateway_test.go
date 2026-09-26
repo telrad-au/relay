@@ -60,7 +60,7 @@ func TestGatewayExampleConfigurationContract(t *testing.T) {
 	if !cfg.gatewayMode() || cfg.ReportHost != "" || cfg.ReportPort != 0 || cfg.MaxConnectionsPerPeer != defaultMaxConnectionsPerPeer || cfg.MaxConcurrentDeliveries != defaultMaxConcurrentDeliveries {
 		t.Fatalf("gateway defaults: mode=%q report=%q:%d perPeer=%d deliveries=%d", cfg.Mode, cfg.ReportHost, cfg.ReportPort, cfg.MaxConnectionsPerPeer, cfg.MaxConcurrentDeliveries)
 	}
-	if cfg.DeliveryListenAddress != "172.19.0.1" || cfg.DeliveryPort != 2580 || cfg.DeliveryTokenPath != "delivery-token" || gatewayConfigRelative(cfg, cfg.DeliveryTokenPath) != filepath.Join(filepath.Dir(cfg.configPath), "delivery-token") {
+	if cfg.DeliveryListenAddress != "192.0.2.1" || cfg.DeliveryPort != 2580 || cfg.DeliveryTokenPath != "delivery-token" || gatewayConfigRelative(cfg, cfg.DeliveryTokenPath) != filepath.Join(filepath.Dir(cfg.configPath), "delivery-token") {
 		t.Fatalf("gateway delivery listener: %s:%d token=%q", cfg.DeliveryListenAddress, cfg.DeliveryPort, cfg.DeliveryTokenPath)
 	}
 	for _, command := range []string{"auth", "enroll"} {
@@ -150,7 +150,7 @@ func TestClinicConfigurationIsUnchangedByGatewayMode(t *testing.T) {
 		t.Fatalf("clinic per-peer limit error = %v", err)
 	}
 	for name, value := range map[string]any{
-		"deliveryListenAddress": "172.19.0.1", "deliveryPort": 2580, "deliveryTokenPath": "delivery-token",
+		"deliveryListenAddress": "192.0.2.1", "deliveryPort": 2580, "deliveryTokenPath": "delivery-token",
 		"maxConcurrentDeliveries": 16, "deliveryTlsCertPath": "delivery.crt", "deliveryTlsKeyPath": "delivery.key",
 	} {
 		candidate := readPackagedConfigFields(t, "relay.example.json")
@@ -361,8 +361,8 @@ func TestGatewayPeerAttributionRejectsNonIPv4AndCapsEachPeer(t *testing.T) {
 		address net.Addr
 		want    string
 	}{
-		{&net.TCPAddr{IP: net.ParseIP("100.96.0.10"), Port: 40000}, "100.96.0.10"},
-		{&net.TCPAddr{IP: net.ParseIP("::ffff:100.96.0.11"), Port: 40000}, "100.96.0.11"},
+		{&net.TCPAddr{IP: net.ParseIP("198.51.100.10"), Port: 40000}, "198.51.100.10"},
+		{&net.TCPAddr{IP: net.ParseIP("::ffff:198.51.100.11"), Port: 40000}, "198.51.100.11"},
 		{&net.TCPAddr{IP: net.ParseIP("2001:db8::1"), Port: 40000}, ""},
 		{&net.TCPAddr{IP: net.IPv4zero, Port: 40000}, ""},
 		{&net.UnixAddr{Name: "/tmp/socket", Net: "unix"}, ""},
@@ -384,8 +384,8 @@ func TestGatewayPeerAttributionRejectsNonIPv4AndCapsEachPeer(t *testing.T) {
 	if served.Load() != 0 {
 		t.Fatal("non-IPv4 peer reached a protocol handler")
 	}
-	peer := netip.MustParseAddr("100.96.0.10")
-	if !attribution.acquire(peer) || attribution.acquire(peer) || !attribution.acquire(netip.MustParseAddr("100.96.0.11")) {
+	peer := netip.MustParseAddr("198.51.100.10")
+	if !attribution.acquire(peer) || attribution.acquire(peer) || !attribution.acquire(netip.MustParseAddr("198.51.100.11")) {
 		t.Fatal("per-peer cap did not isolate peers")
 	}
 	attribution.release(peer)
@@ -401,16 +401,16 @@ func TestPeerTransportSetsExactlyOneHeaderWithoutMutatingTheRequest(t *testing.T
 		seen = request.Header.Values(gatewayPeerHeader)
 		return &http.Response{StatusCode: http.StatusNoContent, Body: http.NoBody, Request: request}, nil
 	})
-	client := peerClient(&http.Client{Transport: base}, netip.MustParseAddr("100.96.0.10"))
+	client := peerClient(&http.Client{Transport: base}, netip.MustParseAddr("198.51.100.10"))
 	request, _ := http.NewRequest(http.MethodPost, "https://example.test/v1/relay/ingest/hl7", bytes.NewReader([]byte("x")))
-	request.Header.Add(gatewayPeerHeader, "100.96.0.99")
-	request.Header.Add(gatewayPeerHeader, "100.96.0.98")
+	request.Header.Add(gatewayPeerHeader, "198.51.100.99")
+	request.Header.Add(gatewayPeerHeader, "198.51.100.98")
 	response, err := client.Do(request)
 	if err != nil {
 		t.Fatal(err)
 	}
 	_ = response.Body.Close()
-	if len(seen) != 1 || seen[0] != "100.96.0.10" {
+	if len(seen) != 1 || seen[0] != "198.51.100.10" {
 		t.Fatalf("peer header = %q", seen)
 	}
 	if values := request.Header.Values(gatewayPeerHeader); len(values) != 2 {
@@ -435,7 +435,7 @@ func TestGatewayIngestsHL7WithoutSigningOrReferral(t *testing.T) {
 	cfg.HL7URL = server.URL + "/v1/relay/ingest/hl7"
 	// No signing key exists; a clinic Relay would fail to sign this order.
 	order := retrievalTestHL7("NW", 1)
-	ack, err := ingestClinicHL7(context.Background(), cfg, &net.TCPAddr{IP: net.ParseIP("100.96.0.10")}, server.Client(), testProvider(t, testCredential('A')), newRuntimeStatus(filepath.Join(t.TempDir(), "relay.json")), order, "message-1")
+	ack, err := ingestClinicHL7(context.Background(), cfg, &net.TCPAddr{IP: net.ParseIP("198.51.100.10")}, server.Client(), testProvider(t, testCredential('A')), newRuntimeStatus(filepath.Join(t.TempDir(), "relay.json")), order, "message-1")
 	if err != nil || len(ack) == 0 {
 		t.Fatalf("ACK=%q error=%v", ack, err)
 	}
@@ -464,7 +464,7 @@ func TestGatewayReadyChecksHeldSocketsWithoutDialling(t *testing.T) {
 	cfg.DicomPort = listeners[0].Addr().(*net.TCPAddr).Port
 	cfg.HL7Port = listeners[1].Addr().(*net.TCPAddr).Port
 	cfg.DeliveryListenAddress, cfg.DeliveryPort, cfg.DeliveryTokenPath, cfg.MaxConcurrentDeliveries = "127.0.0.1", listeners[2].Addr().(*net.TCPAddr).Port, "delivery-token", defaultMaxConcurrentDeliveries
-	gatewayTestCredential(t, cfg.CredentialPath, "https://ingest.dev.app.telrad.com.au")
+	gatewayTestCredential(t, cfg.CredentialPath, "https://ingest.example.invalid")
 	writeDeliveryTestToken(t, gatewayConfigRelative(cfg, cfg.DeliveryTokenPath))
 	newRuntimeStatus(cfg.configPath).SetIngestReady(true)
 	if err := validateConfig(cfg, "ready"); err != nil {
