@@ -12,7 +12,8 @@ Start and stop the service through the container runtime.
 ## First pairing
 
 Copy `packaging/compose.env.example` outside the repository and fill in the
-immutable image reference, clinic-facing bind address, and report destination.
+immutable image reference and clinic-facing bind address. The RIS report
+receiver is configured in Telrad; optionally pin it in that file.
 Do not put `TELRAD_RELAY_PAIRING_TOKEN` in that file.
 
 ```bash
@@ -55,7 +56,9 @@ not edit or copy the credential record between installations.
 ## Networking
 
 Publish TCP `11112` only to DICOM sources and TCP `2575` only to HL7 sources.
-The report destination must be reachable from the container:
+The report receiver must be reachable from the container. Telrad-configured
+receivers are private IPv4 addresses; a receiver reached by name must be pinned
+locally with `TELRAD_RELAY_REPORT_DESTINATION_HOST`:
 
 - use a routable address for another host;
 - use a Compose service name for a receiver on the same Docker network;
