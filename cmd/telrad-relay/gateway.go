@@ -18,8 +18,9 @@ import (
 
 // Gateway mode runs the Relay on Telrad's IPsec gateway host for every
 // site-to-site VPN. The tunnel vouches for the clinic, so the gateway neither
-// signs orders nor verifies report permits. It translates protocols and tells
-// Telrad which tunnel address each native connection came from.
+// signs orders nor verifies report permits. It translates protocols, tells
+// Telrad which tunnel address each native connection came from, and delivers
+// the reports Telrad pushes to it (see gateway_delivery.go).
 const (
 	relayModeClinic              = "clinic"
 	relayModeGateway             = "gateway"
@@ -34,6 +35,9 @@ func validateRelayMode(cfg *config, command string) error {
 	case "", relayModeClinic:
 		if cfg.MaxConnectionsPerPeer != 0 {
 			return errors.New("maxConnectionsPerPeer is valid only in gateway mode")
+		}
+		if hasGatewayDeliverySettings(cfg) {
+			return errors.New("report delivery listener settings are valid only in gateway mode")
 		}
 		return nil
 	case relayModeGateway:
@@ -50,7 +54,7 @@ func validateRelayMode(cfg *config, command string) error {
 	case cfg.DisableDICOMListener:
 		return errors.New("gateway mode requires the DICOM listener")
 	case cfg.ReportHost != "" || cfg.ReportPort != 0:
-		return errors.New("gateway mode takes each report destination from its control claim; remove reportHost and reportPort")
+		return errors.New("gateway mode takes each report destination from its delivery request; remove reportHost and reportPort")
 	case cfg.UpdateManifestURL != "" || cfg.UpdatePublicKey != "":
 		return errors.New("gateway mode is updated by replacing its container image; remove updateManifestUrl and updatePublicKey")
 	case strings.TrimSpace(cfg.CredentialPath) == "":
@@ -58,7 +62,7 @@ func validateRelayMode(cfg *config, command string) error {
 	case cfg.MaxConnectionsPerPeer < 1 || cfg.MaxConnectionsPerPeer > cfg.MaxConnections:
 		return errors.New("maxConnectionsPerPeer must be from 1 through maxConnections")
 	}
-	return nil
+	return validateGatewayDeliveryConfig(cfg)
 }
 
 // A gateway has no configured report destination. Clear the clinic defaults
@@ -176,36 +180,31 @@ func (transport peerTransport) RoundTrip(request *http.Request) (*http.Response,
 	return transport.base.RoundTrip(clone)
 }
 
-// A gateway dials the destination the claim names. The payload restriction
-// still applies: a report channel must never return an order.
-func gatewayReportDestination(report reportMessage) (string, int, bool) {
-	destination := report.Destination
-	if destination == nil || destination.Port < 1 || destination.Port > 65535 {
-		return "", 0, false
-	}
-	address, err := netip.ParseAddr(destination.Host)
-	if err != nil || !address.Is4() || address.IsUnspecified() || address.String() != destination.Host {
-		return "", 0, false
-	}
-	if !safeRetrievalReport(report.Payload) {
-		return "", 0, false
-	}
-	return destination.Host, destination.Port, true
-}
-
 func gatewayDoctor(cfg *config, output io.Writer) error {
 	if _, err := readCredentialFile(cfg.CredentialPath, time.Now()); err != nil {
 		return errors.New("stored credential is invalid")
 	}
-	fmt.Fprintf(output, "gateway configuration and credential ok; DICOM %s:%d, HL7 %s:%d, reports to each claimed destination\n", cfg.ListenAddress, cfg.DicomPort, cfg.ListenAddress, cfg.HL7Port)
+	_, tlsConfig, err := gatewayDeliveryPrerequisites(cfg)
+	if err != nil {
+		return err
+	}
+	scheme := "http"
+	if tlsConfig != nil {
+		scheme = "https"
+	}
+	fmt.Fprintf(output, "gateway configuration, credential and delivery token ok; DICOM %s:%d, HL7 %s:%d, report deliveries %s://%s%s\n", cfg.ListenAddress, cfg.DicomPort, cfg.ListenAddress, cfg.HL7Port, scheme, net.JoinHostPort(cfg.DeliveryListenAddress, strconv.Itoa(cfg.DeliveryPort)), gatewayDeliveryPath)
 	return nil
 }
 
 // The VPN ingress firewall rejects loopback probes, so readiness proves that
 // the running Relay holds each configured socket instead of dialling it.
 func gatewayListenersHeld(cfg *config) error {
-	for _, port := range []int{cfg.DicomPort, cfg.HL7Port} {
-		probe, err := net.Listen("tcp", net.JoinHostPort(cfg.ListenAddress, strconv.Itoa(port)))
+	for _, address := range []string{
+		net.JoinHostPort(cfg.ListenAddress, strconv.Itoa(cfg.DicomPort)),
+		net.JoinHostPort(cfg.ListenAddress, strconv.Itoa(cfg.HL7Port)),
+		net.JoinHostPort(cfg.DeliveryListenAddress, strconv.Itoa(cfg.DeliveryPort)),
+	} {
+		probe, err := net.Listen("tcp", address)
 		if err == nil {
 			_ = probe.Close()
 			return errors.New("gateway listener is unavailable")

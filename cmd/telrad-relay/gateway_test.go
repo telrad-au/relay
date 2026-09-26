@@ -57,8 +57,11 @@ func TestGatewayExampleConfigurationContract(t *testing.T) {
 			t.Fatalf("%s: %v", command, err)
 		}
 	}
-	if !cfg.gatewayMode() || cfg.ReportHost != "" || cfg.ReportPort != 0 || cfg.MaxConnectionsPerPeer != defaultMaxConnectionsPerPeer {
-		t.Fatalf("gateway defaults: mode=%q report=%q:%d perPeer=%d", cfg.Mode, cfg.ReportHost, cfg.ReportPort, cfg.MaxConnectionsPerPeer)
+	if !cfg.gatewayMode() || cfg.ReportHost != "" || cfg.ReportPort != 0 || cfg.MaxConnectionsPerPeer != defaultMaxConnectionsPerPeer || cfg.MaxConcurrentDeliveries != defaultMaxConcurrentDeliveries {
+		t.Fatalf("gateway defaults: mode=%q report=%q:%d perPeer=%d deliveries=%d", cfg.Mode, cfg.ReportHost, cfg.ReportPort, cfg.MaxConnectionsPerPeer, cfg.MaxConcurrentDeliveries)
+	}
+	if cfg.DeliveryListenAddress != "172.19.0.1" || cfg.DeliveryPort != 2580 || cfg.DeliveryTokenPath != "delivery-token" || gatewayConfigRelative(cfg, cfg.DeliveryTokenPath) != filepath.Join(filepath.Dir(cfg.configPath), "delivery-token") {
+		t.Fatalf("gateway delivery listener: %s:%d token=%q", cfg.DeliveryListenAddress, cfg.DeliveryPort, cfg.DeliveryTokenPath)
 	}
 	for _, command := range []string{"auth", "enroll"} {
 		if err := validateConfig(cfg, command); err == nil || !strings.Contains(err.Error(), "does not pair") {
@@ -76,10 +79,25 @@ func TestGatewayExampleConfigurationContract(t *testing.T) {
 			f["updateManifestUrl"] = "https://example.test/stable.json"
 			f["updatePublicKey"] = "not-used"
 		},
-		"per-peer limit above global": func(f map[string]any) { f["maxConnectionsPerPeer"] = 257 },
-		"negative per-peer limit":     func(f map[string]any) { f["maxConnectionsPerPeer"] = -1 },
-		"missing relay ID":            func(f map[string]any) { delete(f, "relayId") },
-		"missing HL7 URL":             func(f map[string]any) { delete(f, "hl7Url") },
+		"per-peer limit above global":    func(f map[string]any) { f["maxConnectionsPerPeer"] = 257 },
+		"negative per-peer limit":        func(f map[string]any) { f["maxConnectionsPerPeer"] = -1 },
+		"missing relay ID":               func(f map[string]any) { delete(f, "relayId") },
+		"missing HL7 URL":                func(f map[string]any) { delete(f, "hl7Url") },
+		"missing delivery address":       func(f map[string]any) { delete(f, "deliveryListenAddress") },
+		"unspecified delivery address":   func(f map[string]any) { f["deliveryListenAddress"] = "0.0.0.0" },
+		"IPv6 delivery address":          func(f map[string]any) { f["deliveryListenAddress"] = "::1" },
+		"hostname delivery address":      func(f map[string]any) { f["deliveryListenAddress"] = "gateway.internal" },
+		"non-canonical delivery address": func(f map[string]any) { f["deliveryListenAddress"] = "172.019.0.1" },
+		"missing delivery port":          func(f map[string]any) { delete(f, "deliveryPort") },
+		"oversize delivery port":         func(f map[string]any) { f["deliveryPort"] = 65536 },
+		"delivery port shared with HL7":  func(f map[string]any) { f["deliveryPort"] = f["hl7Port"] },
+		"missing delivery token path":    func(f map[string]any) { delete(f, "deliveryTokenPath") },
+		"delivery token is credential":   func(f map[string]any) { f["deliveryTokenPath"] = f["credentialPath"] },
+		"delivery token is config":       func(f map[string]any) { f["deliveryTokenPath"] = "relay.json" },
+		"negative concurrent deliveries": func(f map[string]any) { f["maxConcurrentDeliveries"] = -1 },
+		"too many concurrent deliveries": func(f map[string]any) { f["maxConcurrentDeliveries"] = 257 },
+		"TLS certificate without key":    func(f map[string]any) { f["deliveryTlsCertPath"] = "delivery.crt" },
+		"TLS key without certificate":    func(f map[string]any) { f["deliveryTlsKeyPath"] = "delivery.key" },
 	}
 	for name, mutate := range rejected {
 		t.Run(name, func(t *testing.T) {
@@ -131,11 +149,19 @@ func TestClinicConfigurationIsUnchangedByGatewayMode(t *testing.T) {
 	if err := validateConfig(limited, "run"); err == nil || !strings.Contains(err.Error(), "gateway mode") {
 		t.Fatalf("clinic per-peer limit error = %v", err)
 	}
-	// A clinic Relay accepts and ignores a claim destination.
-	var report reportMessage
-	claim := `{"type":"report","deliveryId":"d","token":"t","messageControlId":"m","payload":"p","payloadSha256":"s","claimExpiresAt":"2026-01-01T00:00:00Z","authorization":"a","destination":{"host":"100.100.0.42","port":2575}}`
-	if err := decodeBoundedJSON(strings.NewReader(claim), maxCloudResponseBytes, &report); err != nil || report.Destination == nil || report.Destination.Host != "100.100.0.42" || report.Destination.Port != 2575 {
-		t.Fatalf("claim destination = %+v error=%v", report.Destination, err)
+	for name, value := range map[string]any{
+		"deliveryListenAddress": "172.19.0.1", "deliveryPort": 2580, "deliveryTokenPath": "delivery-token",
+		"maxConcurrentDeliveries": 16, "deliveryTlsCertPath": "delivery.crt", "deliveryTlsKeyPath": "delivery.key",
+	} {
+		candidate := readPackagedConfigFields(t, "relay.example.json")
+		candidate[name] = value
+		loaded, err := loadConfig(writeGatewayTestConfig(t, candidate))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := validateConfig(loaded, "run"); err == nil || !strings.Contains(err.Error(), "gateway mode") {
+			t.Fatalf("clinic %s error = %v", name, err)
+		}
 	}
 }
 
@@ -163,51 +189,49 @@ func freeLoopbackPort(t *testing.T) int {
 	return listener.Addr().(*net.TCPAddr).Port
 }
 
-// Each VPN peer's orders reach Telrad attributed to that peer and nothing else.
-// Control traffic is the gateway's own and carries no peer address.
-func TestGatewayAttributesEachPeersHTTPSRequestsToItsOwnAddress(t *testing.T) {
-	type observation struct {
-		path  string
-		peers []string
-		body  []byte
-	}
-	var mu sync.Mutex
-	var observations []observation
-	hello := make(chan map[string]any, 1)
-	var server *httptest.Server
-	server = httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+type gatewayObservation struct {
+	method string
+	path   string
+	peers  []string
+	body   []byte
+}
+
+// gatewayTestPlatform records every HTTPS request a running gateway makes.
+// It serves HL7 ingest only: a gateway has no control session.
+type gatewayTestPlatform struct {
+	mu           sync.Mutex
+	observations []gatewayObservation
+}
+
+func (platform *gatewayTestPlatform) snapshot() []gatewayObservation {
+	platform.mu.Lock()
+	defer platform.mu.Unlock()
+	return append([]gatewayObservation(nil), platform.observations...)
+}
+
+// startTestGateway runs the gateway from the packaged example with loopback
+// listeners and returns its configuration, config path and delivery token.
+func startTestGateway(t *testing.T) (*config, string, string, *gatewayTestPlatform) {
+	t.Helper()
+	platform := &gatewayTestPlatform{}
+	server := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		body, _ := io.ReadAll(request.Body)
-		mu.Lock()
-		observations = append(observations, observation{request.URL.Path, request.Header.Values(gatewayPeerHeader), body})
-		mu.Unlock()
-		switch {
-		case request.URL.Path == "/v1/relay/ingest/hl7":
-			controlID, err := hl7ControlID(body)
-			if err != nil {
-				writer.WriteHeader(http.StatusBadRequest)
-				return
-			}
-			writer.Header().Set("Content-Type", "application/hl7-v2")
-			_, _ = writer.Write(syntheticHL7Acknowledgement("AA", controlID, "ack-"+controlID))
-		case request.Method == http.MethodPost && request.URL.Path == "/v1/relay/control/sessions":
-			var message map[string]any
-			_ = json.Unmarshal(body, &message)
-			select {
-			case hello <- message:
-			default:
-			}
-			writer.Header().Set("Content-Type", "application/json")
-			writer.WriteHeader(http.StatusCreated)
-			_, _ = fmt.Fprintf(writer, `{"type":"ready","sessionId":"gateway-session","connectorId":"gateway-relay","ingestMode":"PRODUCTION","transports":{"dicom":{"url":%q,"contentType":"application/dicom"},"hl7":{"url":%q,"contentType":"application/hl7-v2"}}}`,
-				server.URL+"/v1/relay/ingest/dicom", server.URL+"/v1/relay/ingest/hl7")
-		case strings.HasSuffix(request.URL.Path, "/poll") || request.Method == http.MethodDelete:
-			writer.WriteHeader(http.StatusNoContent)
-		default:
-			t.Errorf("unexpected request %s %s", request.Method, request.URL.Path)
+		platform.mu.Lock()
+		platform.observations = append(platform.observations, gatewayObservation{request.Method, request.URL.Path, request.Header.Values(gatewayPeerHeader), body})
+		platform.mu.Unlock()
+		if request.URL.Path != "/v1/relay/ingest/hl7" {
 			writer.WriteHeader(http.StatusNotFound)
+			return
 		}
+		controlID, err := hl7ControlID(body)
+		if err != nil {
+			writer.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		writer.Header().Set("Content-Type", "application/hl7-v2")
+		_, _ = writer.Write(syntheticHL7Acknowledgement("AA", controlID, "ack-"+controlID))
 	}))
-	defer server.Close()
+	t.Cleanup(server.Close)
 	oldFactory := clientFactory
 	clientFactory = func(*config) protocolClients {
 		return protocolClients{secure: server.Client(), updates: server.Client()}
@@ -222,6 +246,8 @@ func TestGatewayAttributesEachPeersHTTPSRequestsToItsOwnAddress(t *testing.T) {
 	fields["listenAddress"] = "127.0.0.1"
 	fields["dicomPort"] = freeLoopbackPort(t)
 	fields["hl7Port"] = freeLoopbackPort(t)
+	fields["deliveryListenAddress"] = "127.0.0.1"
+	fields["deliveryPort"] = freeLoopbackPort(t)
 	data, _ := json.Marshal(fields)
 	configPath := filepath.Join(directory, "relay.json")
 	if err := os.WriteFile(configPath, data, 0o600); err != nil {
@@ -235,6 +261,7 @@ func TestGatewayAttributesEachPeersHTTPSRequestsToItsOwnAddress(t *testing.T) {
 		t.Fatal(err)
 	}
 	gatewayTestCredential(t, cfg.CredentialPath, server.URL)
+	token := writeDeliveryTestToken(t, gatewayConfigRelative(cfg, cfg.DeliveryTokenPath))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -242,21 +269,20 @@ func TestGatewayAttributesEachPeersHTTPSRequestsToItsOwnAddress(t *testing.T) {
 	t.Cleanup(func() {
 		cancel()
 		select {
-		case <-done:
+		case err := <-done:
+			if err != nil {
+				t.Errorf("gateway stopped with %v", err)
+			}
 		case <-time.After(10 * time.Second):
 			t.Error("gateway did not stop")
 		}
 	})
+	return cfg, configPath, token, platform
+}
 
-	select {
-	case message := <-hello:
-		capabilities, _ := message["capabilities"].(map[string]any)
-		if capabilities["gateway"] != true || capabilities["dicom"] != true || capabilities["hl7"] != true {
-			t.Fatalf("hello capabilities = %v", capabilities)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("gateway did not open a control session")
-	}
+// Each VPN peer's orders reach Telrad attributed to that peer and nothing else.
+func TestGatewayAttributesEachPeersHTTPSRequestsToItsOwnAddress(t *testing.T) {
+	cfg, _, _, platform := startTestGateway(t)
 
 	hl7Address := net.JoinHostPort(cfg.ListenAddress, strconv.Itoa(cfg.HL7Port))
 	sendFrom := func(peer, controlID string) error {
@@ -309,15 +335,10 @@ func TestGatewayAttributesEachPeersHTTPSRequestsToItsOwnAddress(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	mu.Lock()
-	defer mu.Unlock()
 	attributed := map[string]string{}
-	for _, seen := range observations {
+	for _, seen := range platform.snapshot() {
 		if seen.path != "/v1/relay/ingest/hl7" {
-			if len(seen.peers) != 0 {
-				t.Fatalf("gateway control request %s carried a peer address %q", seen.path, seen.peers)
-			}
-			continue
+			t.Fatalf("gateway made an unexpected request %s %s", seen.method, seen.path)
 		}
 		if len(seen.peers) != 1 {
 			t.Fatalf("HL7 request carried %d peer header values: %q", len(seen.peers), seen.peers)
@@ -397,103 +418,6 @@ func TestPeerTransportSetsExactlyOneHeaderWithoutMutatingTheRequest(t *testing.T
 	}
 }
 
-func fakeRIS(t *testing.T) (int, *atomic.Int32) {
-	t.Helper()
-	listener, err := net.Listen("tcp4", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = listener.Close() })
-	var connections atomic.Int32
-	go func() {
-		for {
-			conn, err := listener.Accept()
-			if err != nil {
-				return
-			}
-			connections.Add(1)
-			_ = conn.SetDeadline(time.Now().Add(time.Second))
-			_, _ = readMLLPFrame(conn, 1<<20)
-			_, _ = conn.Write([]byte("\x0bMSH|^~\\&|RIS|TEST|TELRAD|TEST|20260910000000||ACK|ack|P|2.5\rMSA|AA|report-1\r\x1c\r"))
-			_ = conn.Close()
-		}
-	}()
-	return listener.Addr().(*net.TCPAddr).Port, &connections
-}
-
-func TestGatewayReportDeliveryDialsTheClaimedDestination(t *testing.T) {
-	port, connections := fakeRIS(t)
-	cfg := pairedTestConfig(t.TempDir())
-	cfg.Mode, cfg.ReportHost, cfg.ReportPort, cfg.MaxConnectionsPerPeer = relayModeGateway, "", 0, defaultMaxConnectionsPerPeer
-	cfg.configPath = ""
-	if err := validateConfig(cfg, "run"); err != nil {
-		t.Fatal(err)
-	}
-	good := reportTestMessage(reportTestPayload("ACC"), "")
-	good.Destination = &reportDestination{Host: "127.0.0.1", Port: port}
-	if result := deliverReport(context.Background(), cfg, good); result.Outcome != "accepted" || result.AckCode != "AA" {
-		t.Fatalf("gateway delivery: %+v", result)
-	}
-	if connections.Load() != 1 {
-		t.Fatalf("RIS connections = %d", connections.Load())
-	}
-	for name, mutate := range map[string]func(*reportMessage){
-		"missing destination":     func(r *reportMessage) { r.Destination = nil },
-		"hostname destination":    func(r *reportMessage) { r.Destination = &reportDestination{Host: "localhost", Port: port} },
-		"IPv6 destination":        func(r *reportMessage) { r.Destination = &reportDestination{Host: "::1", Port: port} },
-		"mapped IPv6 destination": func(r *reportMessage) { r.Destination = &reportDestination{Host: "::ffff:127.0.0.1", Port: port} },
-		"non-canonical IPv4":      func(r *reportMessage) { r.Destination = &reportDestination{Host: "127.000.000.001", Port: port} },
-		"unspecified destination": func(r *reportMessage) { r.Destination = &reportDestination{Host: "0.0.0.0", Port: port} },
-		"zero port":               func(r *reportMessage) { r.Destination.Port = 0 },
-		"oversize port":           func(r *reportMessage) { r.Destination.Port = 65536 },
-		"order injection":         func(r *reportMessage) { r.Payload = strings.Replace(r.Payload, "ORU^R01", "ORM^O01", 1) },
-		"embedded message":        func(r *reportMessage) { r.Payload += "MSH|^~\\&|X|X|X|X|20260101||ORU^R01|x|P|2.5\r" },
-		"digest mismatch":         func(r *reportMessage) { r.PayloadSHA256 = strings.Repeat("0", 64) },
-		"control ID mismatch":     func(r *reportMessage) { r.MessageControlID = "other" },
-	} {
-		t.Run(name, func(t *testing.T) {
-			r := good
-			r.Destination = &reportDestination{Host: good.Destination.Host, Port: good.Destination.Port}
-			mutate(&r)
-			if name != "digest mismatch" && name != "control ID mismatch" {
-				r.PayloadSHA256 = reportTestMessage(r.Payload, "").PayloadSHA256
-			}
-			before := connections.Load()
-			if result := deliverReport(context.Background(), cfg, r); result.Outcome != "failed" || result.Error != "invalid_report" {
-				t.Fatalf("invalid claim delivered: %+v", result)
-			}
-			if connections.Load() != before {
-				t.Fatal("invalid claim reached the RIS")
-			}
-		})
-	}
-}
-
-func TestClinicReportDeliveryIgnoresClaimDestination(t *testing.T) {
-	configuredPort, configured := fakeRIS(t)
-	claimedPort, claimed := fakeRIS(t)
-	cfg := retrievalTestConfig(t)
-	cfg.ReportHost = "127.0.0.1"
-	cfg.ReportPort = configuredPort
-	saveRetrievalTestConfig(t, cfg)
-	permits, err := signReportAuthorizations(cfg, retrievalTestHL7("NW", 1))
-	if err != nil {
-		t.Fatal(err)
-	}
-	report := reportTestMessage(reportTestPayload("ACC"), permits[0])
-	report.Destination = &reportDestination{Host: "127.0.0.1", Port: claimedPort}
-	if result := deliverReport(context.Background(), cfg, report); result.Outcome != "accepted" {
-		t.Fatalf("clinic delivery: %+v", result)
-	}
-	if configured.Load() != 1 || claimed.Load() != 0 {
-		t.Fatalf("configured=%d claimed=%d", configured.Load(), claimed.Load())
-	}
-	report.Authorization = ""
-	if result := deliverReport(context.Background(), cfg, report); result.Outcome != "failed" || result.Error != "invalid_report" {
-		t.Fatalf("clinic delivery without a permit: %+v", result)
-	}
-}
-
 func TestGatewayIngestsHL7WithoutSigningOrReferral(t *testing.T) {
 	var paths []string
 	var contentTypes []string
@@ -524,8 +448,8 @@ func TestGatewayIngestsHL7WithoutSigningOrReferral(t *testing.T) {
 }
 
 func TestGatewayReadyChecksHeldSocketsWithoutDialling(t *testing.T) {
-	listeners := make([]net.Listener, 0, 2)
-	for range 2 {
+	listeners := make([]net.Listener, 0, 3)
+	for range 3 {
 		listener, err := net.Listen("tcp", "127.0.0.1:0")
 		if err != nil {
 			t.Fatal(err)
@@ -539,7 +463,9 @@ func TestGatewayReadyChecksHeldSocketsWithoutDialling(t *testing.T) {
 	cfg.ListenAddress = "127.0.0.1"
 	cfg.DicomPort = listeners[0].Addr().(*net.TCPAddr).Port
 	cfg.HL7Port = listeners[1].Addr().(*net.TCPAddr).Port
+	cfg.DeliveryListenAddress, cfg.DeliveryPort, cfg.DeliveryTokenPath, cfg.MaxConcurrentDeliveries = "127.0.0.1", listeners[2].Addr().(*net.TCPAddr).Port, "delivery-token", defaultMaxConcurrentDeliveries
 	gatewayTestCredential(t, cfg.CredentialPath, "https://ingest.dev.app.telrad.com.au")
+	writeDeliveryTestToken(t, gatewayConfigRelative(cfg, cfg.DeliveryTokenPath))
 	newRuntimeStatus(cfg.configPath).SetIngestReady(true)
 	if err := validateConfig(cfg, "ready"); err != nil {
 		t.Fatal(err)
@@ -550,6 +476,10 @@ func TestGatewayReadyChecksHeldSocketsWithoutDialling(t *testing.T) {
 	var doctorOutput bytes.Buffer
 	if err := doctorTo(cfg, &doctorOutput); err != nil || !strings.Contains(doctorOutput.String(), "gateway") {
 		t.Fatalf("doctor output=%q error=%v", doctorOutput.String(), err)
+	}
+	_ = listeners[2].Close()
+	if err := runtimeReady(cfg, cfg.configPath); err == nil {
+		t.Fatal("gateway was ready without its delivery listener")
 	}
 	_ = listeners[1].Close()
 	if err := runtimeReady(cfg, cfg.configPath); err == nil {

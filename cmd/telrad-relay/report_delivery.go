@@ -20,14 +20,6 @@ type reportMessage struct {
 	Payload          string    `json:"payload"`
 	PayloadSHA256    string    `json:"payloadSha256"`
 	ClaimExpiresAt   time.Time `json:"claimExpiresAt"`
-	// Destination is used only in gateway mode. A clinic Relay returns every
-	// report to its configured, permit-bound report host and port.
-	Destination *reportDestination `json:"destination,omitempty"`
-}
-
-type reportDestination struct {
-	Host string `json:"host"`
-	Port int    `json:"port"`
 }
 
 type reportResult struct {
@@ -44,13 +36,7 @@ func deliverReport(ctx context.Context, cfg *config, report reportMessage) repor
 	failure := func(code, ack string) reportResult {
 		return reportResult{Token: report.Token, Outcome: "failed", Error: code, AckCode: ack}
 	}
-	host, port := cfg.ReportHost, cfg.ReportPort
-	if cfg.gatewayMode() {
-		var ok bool
-		if host, port, ok = gatewayReportDestination(report); !ok {
-			return failure("invalid_report", "")
-		}
-	} else if err := authorizeReport(cfg, report); err != nil {
+	if err := authorizeReport(cfg, report); err != nil {
 		return failure("invalid_report", "")
 	}
 	digest := sha256.Sum256([]byte(report.Payload))
@@ -58,7 +44,7 @@ func deliverReport(ctx context.Context, cfg *config, report reportMessage) repor
 	if !validOpaqueID(report.DeliveryID) || !validOpaqueID(report.Token) || hex.EncodeToString(digest[:]) != report.PayloadSHA256 || err != nil || controlID != report.MessageControlID {
 		return failure("invalid_report", "")
 	}
-	ack, payload, err := sendMLLP(ctx, host, port, report.Payload)
+	ack, payload, err := sendMLLP(ctx, cfg.ReportHost, cfg.ReportPort, report.Payload)
 	if err == nil && ack == "AA" {
 		return reportResult{Token: report.Token, Outcome: "accepted", AckCode: ack, AckPayload: payload}
 	}

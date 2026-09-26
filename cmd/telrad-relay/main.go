@@ -67,6 +67,12 @@ type config struct {
 	MaxDicomConnections        int    `json:"maxDicomConnections,omitempty"`
 	MaxHL7Connections          int    `json:"maxHl7Connections,omitempty"`
 	MaxConnectionsPerPeer      int    `json:"maxConnectionsPerPeer,omitempty"`
+	DeliveryListenAddress      string `json:"deliveryListenAddress,omitempty"`
+	DeliveryPort               int    `json:"deliveryPort,omitempty"`
+	DeliveryTokenPath          string `json:"deliveryTokenPath,omitempty"`
+	MaxConcurrentDeliveries    int    `json:"maxConcurrentDeliveries,omitempty"`
+	DeliveryTLSCertPath        string `json:"deliveryTlsCertPath,omitempty"`
+	DeliveryTLSKeyPath         string `json:"deliveryTlsKeyPath,omitempty"`
 	ConnectTimeoutSeconds      int    `json:"connectTimeoutSeconds,omitempty"`
 	TLSHandshakeTimeoutSeconds int    `json:"tlsHandshakeTimeoutSeconds,omitempty"`
 	ResponseHeaderTimeoutSecs  int    `json:"responseHeaderTimeoutSeconds,omitempty"`
@@ -648,6 +654,17 @@ func runClinicalWithContext(ctx context.Context, cfg *config, configPath string)
 		defer dicomListener.Close()
 	}
 	defer hl7Listener.Close()
+	// A gateway receives reports on its delivery listener instead of polling.
+	var deliveries *gatewayDeliveryServer
+	var deliveryListener net.Listener
+	if cfg.gatewayMode() {
+		if deliveries, err = listenGatewayDeliveries(workCtx, cfg, work); err != nil {
+			return err
+		}
+		deliveryListener = deliveries.listener
+		defer deliveries.server.Close()
+		status.SetReportReturnAvailable(true)
+	}
 	status.SetIngestReady(true)
 	errCh := make(chan error, 8)
 	credentialChanged := make(chan struct{}, 1)
@@ -655,10 +672,15 @@ func runClinicalWithContext(ctx context.Context, cfg *config, configPath string)
 	go watchCredentialFile(ctx, provider, status, credentialChanged, credentialLifecycleChanged)
 	go maintainCredentialLifecycle(ctx, cfg, clients.secure, provider, credentialChanged, credentialLifecycleChanged, status)
 	controlDone := make(chan struct{})
-	go func() {
-		defer close(controlDone)
-		superviseControl(ctx, workCtx, cfg, clients.secure, provider, credentialChanged, work, status)
-	}()
+	if deliveries != nil {
+		close(controlDone)
+		go deliveries.serve(ctx, errCh)
+	} else {
+		go func() {
+			defer close(controlDone)
+			superviseControl(ctx, workCtx, cfg, clients.secure, provider, credentialChanged, work, status)
+		}()
+	}
 	go maintainRuntimeStatus(ctx, status, errCh)
 	if dicomListener != nil {
 		go acceptRelayConnections(ctx, "dicom", dicomListener, work, limits, connections.serve(func(conn net.Conn, client *http.Client) { serveDICOM(workCtx, conn, cfg, client, provider, status) }), errCh)
@@ -667,7 +689,7 @@ func runClinicalWithContext(ctx context.Context, cfg *config, configPath string)
 	select {
 	case <-ctx.Done():
 		status.SetIngestReady(false)
-		if err := drainRelayWork(work, dicomListener, hl7Listener); err != nil {
+		if err := drainRelayWork(work, dicomListener, hl7Listener, deliveryListener); err != nil {
 			slog.Warn("relay shutdown drain deadline expired", "activeWork", work.Active())
 		}
 		cancelWork()
@@ -938,6 +960,9 @@ func applyConnectionDefaults(cfg *config) {
 	}
 	if cfg.gatewayMode() && cfg.MaxConnectionsPerPeer == 0 {
 		cfg.MaxConnectionsPerPeer = defaultMaxConnectionsPerPeer
+	}
+	if cfg.gatewayMode() && cfg.MaxConcurrentDeliveries == 0 {
+		cfg.MaxConcurrentDeliveries = defaultMaxConcurrentDeliveries
 	}
 }
 
