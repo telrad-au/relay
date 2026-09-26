@@ -20,6 +20,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -393,6 +394,9 @@ func TestDeliveryTokenFileRules(t *testing.T) {
 		"open directory":      {deliveryTestToken, 0o600, 0o755, false},
 	} {
 		t.Run(name, func(t *testing.T) {
+			if runtime.GOOS == "windows" && (test.file != 0o600 || test.dir != 0o700) {
+				t.Skip("POSIX mode checks do not apply on Windows")
+			}
 			if err := os.Chmod(directory, 0o700); err != nil {
 				t.Fatal(err)
 			}

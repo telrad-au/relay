@@ -12,7 +12,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 )
 
@@ -209,7 +208,7 @@ func gatewayListenersHeld(cfg *config) error {
 			_ = probe.Close()
 			return errors.New("gateway listener is unavailable")
 		}
-		if !errors.Is(err, syscall.EADDRINUSE) {
+		if !listenerAddressInUse(err) {
 			return errors.New("gateway listener is unavailable")
 		}
 	}
