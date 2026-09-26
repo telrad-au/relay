@@ -47,6 +47,7 @@ const (
 
 type config struct {
 	Retrieval                  *retrievalConfig `json:"retrieval,omitempty"`
+	Mode                       string           `json:"mode,omitempty"`
 	DisableDICOMListener       bool             `json:"disableDicomListener,omitempty"`
 	commandOutput              io.Writer
 	beforePairingCommit        func() error
@@ -65,6 +66,13 @@ type config struct {
 	MaxConnections             int    `json:"maxConnections,omitempty"`
 	MaxDicomConnections        int    `json:"maxDicomConnections,omitempty"`
 	MaxHL7Connections          int    `json:"maxHl7Connections,omitempty"`
+	MaxConnectionsPerPeer      int    `json:"maxConnectionsPerPeer,omitempty"`
+	DeliveryListenAddress      string `json:"deliveryListenAddress,omitempty"`
+	DeliveryPort               int    `json:"deliveryPort,omitempty"`
+	DeliveryTokenPath          string `json:"deliveryTokenPath,omitempty"`
+	MaxConcurrentDeliveries    int    `json:"maxConcurrentDeliveries,omitempty"`
+	DeliveryTLSCertPath        string `json:"deliveryTlsCertPath,omitempty"`
+	DeliveryTLSKeyPath         string `json:"deliveryTlsKeyPath,omitempty"`
 	ConnectTimeoutSeconds      int    `json:"connectTimeoutSeconds,omitempty"`
 	TLSHandshakeTimeoutSeconds int    `json:"tlsHandshakeTimeoutSeconds,omitempty"`
 	ResponseHeaderTimeoutSecs  int    `json:"responseHeaderTimeoutSeconds,omitempty"`
@@ -612,8 +620,10 @@ func runWithContext(ctx context.Context, cfg *config, configPath string) error {
 }
 
 func runClinicalWithContext(ctx context.Context, cfg *config, configPath string) error {
-	if err := ensureReportSigningKey(cfg); err != nil {
-		return err
+	if !cfg.gatewayMode() {
+		if err := ensureReportSigningKey(cfg); err != nil {
+			return err
+		}
 	}
 	provider, err := newCredentialProvider(cfg.CredentialPath, time.Now())
 	if err != nil {
@@ -625,6 +635,7 @@ func runClinicalWithContext(ctx context.Context, cfg *config, configPath string)
 	workCtx, cancelWork := context.WithCancel(context.WithoutCancel(ctx))
 	defer cancelWork()
 	limits := newConnectionLimiter(cfg)
+	connections := newConnectionAttribution(cfg, clients.secure)
 	var dicomListener net.Listener
 	if !cfg.DisableDICOMListener {
 		dicomListener, err = net.Listen("tcp", net.JoinHostPort(cfg.ListenAddress, strconv.Itoa(cfg.DicomPort)))
@@ -643,6 +654,17 @@ func runClinicalWithContext(ctx context.Context, cfg *config, configPath string)
 		defer dicomListener.Close()
 	}
 	defer hl7Listener.Close()
+	// A gateway receives reports on its delivery listener instead of polling.
+	var deliveries *gatewayDeliveryServer
+	var deliveryListener net.Listener
+	if cfg.gatewayMode() {
+		if deliveries, err = listenGatewayDeliveries(workCtx, cfg, work); err != nil {
+			return err
+		}
+		deliveryListener = deliveries.listener
+		defer deliveries.server.Close()
+		status.SetReportReturnAvailable(true)
+	}
 	status.SetIngestReady(true)
 	errCh := make(chan error, 8)
 	credentialChanged := make(chan struct{}, 1)
@@ -650,19 +672,24 @@ func runClinicalWithContext(ctx context.Context, cfg *config, configPath string)
 	go watchCredentialFile(ctx, provider, status, credentialChanged, credentialLifecycleChanged)
 	go maintainCredentialLifecycle(ctx, cfg, clients.secure, provider, credentialChanged, credentialLifecycleChanged, status)
 	controlDone := make(chan struct{})
-	go func() {
-		defer close(controlDone)
-		superviseControl(ctx, workCtx, cfg, clients.secure, provider, credentialChanged, work, status)
-	}()
+	if deliveries != nil {
+		close(controlDone)
+		go deliveries.serve(ctx, errCh)
+	} else {
+		go func() {
+			defer close(controlDone)
+			superviseControl(ctx, workCtx, cfg, clients.secure, provider, credentialChanged, work, status)
+		}()
+	}
 	go maintainRuntimeStatus(ctx, status, errCh)
 	if dicomListener != nil {
-		go acceptRelayConnections(ctx, "dicom", dicomListener, work, limits, func(conn net.Conn) { serveDICOM(workCtx, conn, cfg, clients.secure, provider, status) }, errCh)
+		go acceptRelayConnections(ctx, "dicom", dicomListener, work, limits, connections.serve(func(conn net.Conn, client *http.Client) { serveDICOM(workCtx, conn, cfg, client, provider, status) }), errCh)
 	}
-	go acceptRelayConnections(ctx, "hl7", hl7Listener, work, limits, func(conn net.Conn) { serveHL7(workCtx, conn, cfg, clients.secure, provider, status) }, errCh)
+	go acceptRelayConnections(ctx, "hl7", hl7Listener, work, limits, connections.serve(func(conn net.Conn, client *http.Client) { serveHL7(workCtx, conn, cfg, client, provider, status) }), errCh)
 	select {
 	case <-ctx.Done():
 		status.SetIngestReady(false)
-		if err := drainRelayWork(work, dicomListener, hl7Listener); err != nil {
+		if err := drainRelayWork(work, dicomListener, hl7Listener, deliveryListener); err != nil {
 			slog.Warn("relay shutdown drain deadline expired", "activeWork", work.Active())
 		}
 		cancelWork()
@@ -780,6 +807,9 @@ func drainRelayWork(work *workDrainer, listeners ...net.Listener) error {
 func doctor(cfg *config) error { return doctorTo(cfg, os.Stdout) }
 
 func doctorTo(cfg *config, output io.Writer) error {
+	if cfg.gatewayMode() {
+		return gatewayDoctor(cfg, output)
+	}
 	if retrievalEnabledLocal(cfg) {
 		key, err := readPermitSigningKey(cfg)
 		if err != nil {
@@ -801,6 +831,11 @@ func runtimeReady(cfg *config, configPath string) error {
 	}
 	if err := checkRuntimeReady(configPath, time.Now()); err != nil {
 		return err
+	}
+	if cfg.gatewayMode() {
+		if err := gatewayListenersHeld(cfg); err != nil {
+			return err
+		}
 	}
 	fmt.Println("relay ready")
 	return nil
@@ -862,6 +897,9 @@ func loadConfigMode(path string, migrate bool) (*config, error) {
 	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
 		return nil, errors.New("decode relay configuration: multiple JSON values are not allowed")
 	}
+	if err := clearGatewayReportDefaults(cfg, data); err != nil {
+		return nil, err
+	}
 	if err := normalizeManagedCredential(cfg, path); err != nil {
 		return nil, err
 	}
@@ -920,9 +958,18 @@ func applyConnectionDefaults(cfg *config) {
 	if cfg.HL7MaxBytes == 0 {
 		cfg.HL7MaxBytes = 1024 * 1024
 	}
+	if cfg.gatewayMode() && cfg.MaxConnectionsPerPeer == 0 {
+		cfg.MaxConnectionsPerPeer = defaultMaxConnectionsPerPeer
+	}
+	if cfg.gatewayMode() && cfg.MaxConcurrentDeliveries == 0 {
+		cfg.MaxConcurrentDeliveries = defaultMaxConcurrentDeliveries
+	}
 }
 
 func validateConfig(cfg *config, command string) error {
+	if err := validateRelayMode(cfg, command); err != nil {
+		return err
+	}
 	if err := validateRetrievalConfig(cfg); err != nil {
 		return err
 	}
@@ -932,7 +979,11 @@ func validateConfig(cfg *config, command string) error {
 	if net.ParseIP(strings.TrimSpace(cfg.ListenAddress)) == nil {
 		return errors.New("listenAddress must be an explicit IPv4 or IPv6 address")
 	}
-	for name, port := range map[string]int{"dicomPort": cfg.DicomPort, "hl7Port": cfg.HL7Port, "reportPort": cfg.ReportPort} {
+	ports := map[string]int{"dicomPort": cfg.DicomPort, "hl7Port": cfg.HL7Port, "reportPort": cfg.ReportPort}
+	if cfg.gatewayMode() {
+		delete(ports, "reportPort")
+	}
+	for name, port := range ports {
 		if port < 1 || port > 65535 {
 			return fmt.Errorf("%s must be an integer from 1 to 65535", name)
 		}
@@ -957,7 +1008,7 @@ func validateConfig(cfg *config, command string) error {
 	if cfg.DicomIdleTimeoutSeconds > cfg.DicomLifetimeSeconds || (cfg.HL7IdleTimeoutSeconds > 0 && cfg.HL7LifetimeSeconds > 0 && cfg.HL7IdleTimeoutSeconds > cfg.HL7LifetimeSeconds) {
 		return errors.New("enabled protocol idle timeouts cannot exceed their total lifetime")
 	}
-	if strings.TrimSpace(cfg.ReportHost) == "" || strings.TrimSpace(cfg.CredentialPath) == "" {
+	if !cfg.gatewayMode() && strings.TrimSpace(cfg.ReportHost) == "" || strings.TrimSpace(cfg.CredentialPath) == "" {
 		return errors.New("reportHost and credentialPath are required")
 	}
 	if cfg.configPath != "" && filepath.Clean(cfg.configPath) == filepath.Clean(cfg.CredentialPath) {

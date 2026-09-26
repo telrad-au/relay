@@ -66,6 +66,19 @@ func (manager *runtimeStatusManager) SetControlConnected(value bool) {
 	_ = manager.write()
 }
 
+// SetReportReturnAvailable records report return without a control session.
+// A gateway returns reports through its delivery listener.
+func (manager *runtimeStatusManager) SetReportReturnAvailable(value bool) {
+	manager.mu.Lock()
+	if manager.status.ReportReturnAvailable == value {
+		manager.mu.Unlock()
+		return
+	}
+	manager.status.ReportReturnAvailable = value
+	manager.mu.Unlock()
+	_ = manager.write()
+}
+
 func (manager *runtimeStatusManager) SetAuthenticationAttention(value bool) {
 	manager.mu.Lock()
 	if manager.authCloud == value {
