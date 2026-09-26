@@ -19,6 +19,8 @@ func currentReportConfig(cfg *config) (*config, error) {
 	if e != nil || validateConfig(fresh, "run") != nil || fresh.RelayID != cfg.RelayID || fresh.ControlURL != cfg.ControlURL {
 		return nil, retrieval.ErrPolicy
 	}
+	// The Telrad-provided destination belongs to the running Relay, not the file.
+	fresh.reportDestinations = cfg.reportDestinations
 	return fresh, nil
 }
 func signReportAuthorizations(cfg *config, message []byte) ([]string, error) {
@@ -40,6 +42,11 @@ func signReportAuthorizations(cfg *config, message []byte) ([]string, error) {
 	if len(scopes) == 0 {
 		return values, nil
 	}
+	// Without a destination the order is still forwarded, just without report permits.
+	destination, e := effectiveReportDestination(cfg)
+	if e != nil {
+		return nil, e
+	}
 	key, e := readReportSigningKey(cfg)
 	if e != nil {
 		return nil, e
@@ -51,7 +58,7 @@ func signReportAuthorizations(cfg *config, message []byte) ([]string, error) {
 			ConnectorID: p.ConnectorID, SourcePolicyID: p.SourcePolicyID,
 			Examination: p.Examination, Procedure: p.Procedure,
 			HL7SHA256: p.HL7SHA256, IssuedAt: p.IssuedAt,
-			ReportHost: cfg.ReportHost, ReportPort: cfg.ReportPort,
+			ReportHost: destination.Host, ReportPort: destination.Port,
 		}
 		value, e := retrieval.SignReport(grant, permitKeyID(key.Public().(ed25519.PublicKey)), key)
 		if e != nil {
@@ -77,7 +84,15 @@ func authorizeReport(cfg *config, report reportMessage) error {
 	if e != nil {
 		return e
 	}
-	if p.ProcessingID != "P" || p.ReportHost != cfg.ReportHost || p.ReportPort != cfg.ReportPort || p.ConnectorID != current.RelayID || p.ReportHost != current.ReportHost || p.ReportPort != current.ReportPort {
+	destination, e := effectiveReportDestination(cfg)
+	if e != nil {
+		return e
+	}
+	latest, e := effectiveReportDestination(current)
+	if e != nil {
+		return e
+	}
+	if p.ProcessingID != "P" || p.ReportHost != destination.Host || p.ReportPort != destination.Port || p.ConnectorID != current.RelayID || p.ReportHost != latest.Host || p.ReportPort != latest.Port {
 		return retrieval.ErrPolicy
 	}
 	if p.SourcePolicyID != reportSourceID || p.Examination.Issuer != current.RelayID || p.Examination.AccessionSource != "OBR-18" {

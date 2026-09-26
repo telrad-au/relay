@@ -9,8 +9,6 @@
   "listenAddress": "0.0.0.0",
   "dicomPort": 11112,
   "hl7Port": 2575,
-  "reportHost": "127.0.0.1",
-  "reportPort": 2576,
   "maxConnections": 256,
   "maxDicomConnections": 128,
   "maxHl7Connections": 128,

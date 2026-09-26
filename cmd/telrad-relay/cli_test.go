@@ -18,6 +18,9 @@ func pairedTestConfig(directory string) *config {
 	cfg.ControlURL = "https://ingest.dev.app.telrad.com.au/v1/relay/control"
 	cfg.DicomURL = "https://ingest.dev.app.telrad.com.au/v1/relay/ingest/dicom"
 	cfg.HL7URL = "https://ingest.dev.app.telrad.com.au/v1/relay/ingest/hl7"
+	// Most tests exercise a locally pinned report destination.
+	cfg.ReportHost, cfg.ReportPort = "127.0.0.1", 2576
+	cfg.reportDestinations = &reportDestinationHolder{}
 	return cfg
 }
 

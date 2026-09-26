@@ -40,7 +40,15 @@ with socket.socket(socket.AF_UNIX) as connection:
 PY
 ! sudo env GOCOVERDIR="$coverage_directory" /usr/local/bin/telrad run
 sudo env GOCOVERDIR="$coverage_directory" /usr/local/bin/telrad native-action restart
-sudo sed -i 's/"reportPort":2576/"reportPort":32576/' /etc/telrad-relay/relay.json
+sudo python3 - /etc/telrad-relay/relay.json <<'PY'
+import json, sys
+path = sys.argv[1]
+with open(path) as source:
+    configuration = json.load(source)
+configuration['reportHost'], configuration['reportPort'] = '127.0.0.1', 32576
+with open(path, 'w') as target:
+    json.dump(configuration, target, separators=(',', ':'))
+PY
 (cd "$fixture" && sudo env GOCOVERDIR="$coverage_directory" ./install.sh)
 sudo grep -Fq '"reportPort":32576' /etc/telrad-relay/relay.json
 sudo python3 - "$fixture/installation-manifest.json" /usr/local/lib/telrad-relay/installation.json <<'PY'

@@ -46,39 +46,42 @@ const (
 )
 
 type config struct {
-	Retrieval                  *retrievalConfig `json:"retrieval,omitempty"`
-	DisableDICOMListener       bool             `json:"disableDicomListener,omitempty"`
-	commandOutput              io.Writer
-	beforePairingCommit        func() error
-	SchemaVersion              int    `json:"schemaVersion"`
-	PairingURL                 string `json:"pairingUrl"`
-	ControlURL                 string `json:"controlUrl"`
-	DicomURL                   string `json:"dicomUrl"`
-	HL7URL                     string `json:"hl7Url"`
-	RelayID                    string `json:"relayId"`
-	CredentialPath             string `json:"credentialPath"`
-	ListenAddress              string `json:"listenAddress"`
-	DicomPort                  int    `json:"dicomPort"`
-	HL7Port                    int    `json:"hl7Port"`
-	ReportHost                 string `json:"reportHost"`
-	ReportPort                 int    `json:"reportPort"`
-	MaxConnections             int    `json:"maxConnections,omitempty"`
-	MaxDicomConnections        int    `json:"maxDicomConnections,omitempty"`
-	MaxHL7Connections          int    `json:"maxHl7Connections,omitempty"`
-	ConnectTimeoutSeconds      int    `json:"connectTimeoutSeconds,omitempty"`
-	TLSHandshakeTimeoutSeconds int    `json:"tlsHandshakeTimeoutSeconds,omitempty"`
-	ResponseHeaderTimeoutSecs  int    `json:"responseHeaderTimeoutSeconds,omitempty"`
-	DicomIdleTimeoutSeconds    int    `json:"dicomIdleTimeoutSeconds,omitempty"`
-	DicomLifetimeSeconds       int    `json:"dicomLifetimeSeconds,omitempty"`
-	HL7IdleTimeoutSeconds      int    `json:"hl7IdleTimeoutSeconds"`
-	HL7LifetimeSeconds         int    `json:"hl7LifetimeSeconds"`
-	HL7MaxBytes                int64  `json:"hl7MaxBytes,omitempty"`
-	UpdateManifestURL          string `json:"updateManifestUrl,omitempty"`
-	UpdatePublicKey            string `json:"updatePublicKey,omitempty"`
+	Retrieval            *retrievalConfig `json:"retrieval,omitempty"`
+	DisableDICOMListener bool             `json:"disableDicomListener,omitempty"`
+	commandOutput        io.Writer
+	beforePairingCommit  func() error
+	SchemaVersion        int    `json:"schemaVersion"`
+	PairingURL           string `json:"pairingUrl"`
+	ControlURL           string `json:"controlUrl"`
+	DicomURL             string `json:"dicomUrl"`
+	HL7URL               string `json:"hl7Url"`
+	RelayID              string `json:"relayId"`
+	CredentialPath       string `json:"credentialPath"`
+	ListenAddress        string `json:"listenAddress"`
+	DicomPort            int    `json:"dicomPort"`
+	HL7Port              int    `json:"hl7Port"`
+	// Optional pin; when unset the report destination comes from Telrad.
+	ReportHost                    string   `json:"reportHost,omitempty"`
+	ReportPort                    int      `json:"reportPort,omitempty"`
+	ReportDestinationAllowedCIDRs []string `json:"reportDestinationAllowedCidrs,omitempty"`
+	MaxConnections                int      `json:"maxConnections,omitempty"`
+	MaxDicomConnections           int      `json:"maxDicomConnections,omitempty"`
+	MaxHL7Connections             int      `json:"maxHl7Connections,omitempty"`
+	ConnectTimeoutSeconds         int      `json:"connectTimeoutSeconds,omitempty"`
+	TLSHandshakeTimeoutSeconds    int      `json:"tlsHandshakeTimeoutSeconds,omitempty"`
+	ResponseHeaderTimeoutSecs     int      `json:"responseHeaderTimeoutSeconds,omitempty"`
+	DicomIdleTimeoutSeconds       int      `json:"dicomIdleTimeoutSeconds,omitempty"`
+	DicomLifetimeSeconds          int      `json:"dicomLifetimeSeconds,omitempty"`
+	HL7IdleTimeoutSeconds         int      `json:"hl7IdleTimeoutSeconds"`
+	HL7LifetimeSeconds            int      `json:"hl7LifetimeSeconds"`
+	HL7MaxBytes                   int64    `json:"hl7MaxBytes,omitempty"`
+	UpdateManifestURL             string   `json:"updateManifestUrl,omitempty"`
+	UpdatePublicKey               string   `json:"updatePublicKey,omitempty"`
 
 	configPath               string
 	credentialPathConfigured string
 	dockerPairingToken       []byte
+	reportDestinations       *reportDestinationHolder
 }
 
 type pairingResponse struct {
@@ -791,7 +794,7 @@ func doctorTo(cfg *config, output io.Writer) error {
 	if _, err := readCredentialFile(cfg.CredentialPath, time.Now()); err != nil {
 		return errors.New("stored credential is invalid")
 	}
-	fmt.Fprintf(output, "configuration and credential ok; DICOM %s:%d, HL7 %s:%d, reports %s:%d\n", cfg.ListenAddress, cfg.DicomPort, cfg.ListenAddress, cfg.HL7Port, cfg.ReportHost, cfg.ReportPort)
+	fmt.Fprintf(output, "configuration and credential ok; DICOM %s:%d, HL7 %s:%d, reports %s\n", cfg.ListenAddress, cfg.DicomPort, cfg.ListenAddress, cfg.HL7Port, describeReportDestination(cfg))
 	return nil
 }
 
@@ -887,6 +890,10 @@ func loadConfigMode(path string, migrate bool) (*config, error) {
 		}
 		cfg.ReportPort = port
 	}
+	if err := applyReportDestinationEnvironment(cfg); err != nil {
+		return nil, err
+	}
+	cfg.reportDestinations = &reportDestinationHolder{}
 	cfg.configPath = path
 	cfg.credentialPathConfigured = cfg.CredentialPath
 	cfg.CredentialPath = absolute(filepath.Dir(path), cfg.CredentialPath)
@@ -896,7 +903,7 @@ func loadConfigMode(path string, migrate bool) (*config, error) {
 func defaultConfig() *config {
 	return &config{
 		SchemaVersion: currentConfigSchemaVersion, PairingURL: previewPairingURL, CredentialPath: "relay-credential.json",
-		ListenAddress: "0.0.0.0", DicomPort: 11112, HL7Port: 2575, ReportHost: "127.0.0.1", ReportPort: 2576,
+		ListenAddress: "0.0.0.0", DicomPort: 11112, HL7Port: 2575,
 		MaxConnections: 256, MaxDicomConnections: 128, MaxHL7Connections: 128,
 		ConnectTimeoutSeconds: 10, TLSHandshakeTimeoutSeconds: 15, ResponseHeaderTimeoutSecs: 30,
 		DicomIdleTimeoutSeconds: 300, DicomLifetimeSeconds: 7200, HL7MaxBytes: 1024 * 1024,
@@ -932,7 +939,7 @@ func validateConfig(cfg *config, command string) error {
 	if net.ParseIP(strings.TrimSpace(cfg.ListenAddress)) == nil {
 		return errors.New("listenAddress must be an explicit IPv4 or IPv6 address")
 	}
-	for name, port := range map[string]int{"dicomPort": cfg.DicomPort, "hl7Port": cfg.HL7Port, "reportPort": cfg.ReportPort} {
+	for name, port := range map[string]int{"dicomPort": cfg.DicomPort, "hl7Port": cfg.HL7Port} {
 		if port < 1 || port > 65535 {
 			return fmt.Errorf("%s must be an integer from 1 to 65535", name)
 		}
@@ -957,8 +964,11 @@ func validateConfig(cfg *config, command string) error {
 	if cfg.DicomIdleTimeoutSeconds > cfg.DicomLifetimeSeconds || (cfg.HL7IdleTimeoutSeconds > 0 && cfg.HL7LifetimeSeconds > 0 && cfg.HL7IdleTimeoutSeconds > cfg.HL7LifetimeSeconds) {
 		return errors.New("enabled protocol idle timeouts cannot exceed their total lifetime")
 	}
-	if strings.TrimSpace(cfg.ReportHost) == "" || strings.TrimSpace(cfg.CredentialPath) == "" {
-		return errors.New("reportHost and credentialPath are required")
+	if strings.TrimSpace(cfg.CredentialPath) == "" {
+		return errors.New("credentialPath is required")
+	}
+	if err := validateReportDestinationConfig(cfg); err != nil {
+		return err
 	}
 	if cfg.configPath != "" && filepath.Clean(cfg.configPath) == filepath.Clean(cfg.CredentialPath) {
 		return errors.New("credentialPath must differ from the configuration path")

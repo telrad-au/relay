@@ -44,7 +44,11 @@ func deliverReport(ctx context.Context, cfg *config, report reportMessage) repor
 	if !validOpaqueID(report.DeliveryID) || !validOpaqueID(report.Token) || hex.EncodeToString(digest[:]) != report.PayloadSHA256 || err != nil || controlID != report.MessageControlID {
 		return failure("invalid_report", "")
 	}
-	ack, payload, err := sendMLLP(ctx, cfg.ReportHost, cfg.ReportPort, report.Payload)
+	destination, err := effectiveReportDestination(cfg)
+	if err != nil {
+		return failure("invalid_report", "")
+	}
+	ack, payload, err := sendMLLP(ctx, destination.Host, destination.Port, report.Payload)
 	if err == nil && ack == "AA" {
 		return reportResult{Token: report.Token, Outcome: "accepted", AckCode: ack, AckPayload: payload}
 	}

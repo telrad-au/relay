@@ -15,10 +15,12 @@ services:
     environment:
       # Optional override for development or a self-hosted Telrad control plane.
       TELRAD_RELAY_PAIRING_URL: ${TELRAD_RELAY_PAIRING_URL:-}
-      # Hostname or IP address that receives returned reports.
-      TELRAD_RELAY_REPORT_DESTINATION_HOST: ${TELRAD_RELAY_REPORT_DESTINATION_HOST:?Set the report destination hostname or address}
-      # TCP port used by the report destination.
-      TELRAD_RELAY_REPORT_DESTINATION_PORT: ${TELRAD_RELAY_REPORT_DESTINATION_PORT:-2576}
+      # Optional pin for the RIS report receiver. Leave unset to use the receiver
+      # configured in Telrad; when set, Telrad cannot redirect reports elsewhere.
+      TELRAD_RELAY_REPORT_DESTINATION_HOST: ${TELRAD_RELAY_REPORT_DESTINATION_HOST:-}
+      TELRAD_RELAY_REPORT_DESTINATION_PORT: ${TELRAD_RELAY_REPORT_DESTINATION_PORT:-}
+      # Optional comma-separated IPv4 networks Telrad-provided receivers must be in.
+      TELRAD_RELAY_REPORT_DESTINATION_ALLOWED_CIDRS: ${TELRAD_RELAY_REPORT_DESTINATION_ALLOWED_CIDRS:-}
     ports:
       - ${TELRAD_RELAY_BIND_ADDRESS:?Set the clinic-facing host address}:11112:11112/tcp
       - ${TELRAD_RELAY_BIND_ADDRESS:?Set the clinic-facing host address}:2575:2575/tcp

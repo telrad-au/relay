@@ -22,6 +22,8 @@ type readyMessage struct {
 	ConnectorID string                    `json:"connectorId"`
 	IngestMode  string                    `json:"ingestMode"`
 	Transports  map[string]readyTransport `json:"transports"`
+	// Sent only to Relays that advertise reportDestination; absent from older servers.
+	ReportDestination json.RawMessage `json:"reportDestination,omitempty"`
 }
 type readyTransport struct {
 	URL         string `json:"url"`
@@ -130,7 +132,7 @@ func superviseControl(ctx, workCtx context.Context, cfg *config, client *http.Cl
 		var err error
 		if sessionURL == "" {
 			hostname, _ := os.Hostname()
-			hello := map[string]any{"type": "hello", "agentVersion": version, "platform": relayPlatform(), "hostname": hostname, "capabilities": map[string]any{"dicom": !cfg.DisableDICOMListener, "hl7": true, "reportDelivery": true, "httpsIngest": true}}
+			hello := map[string]any{"type": "hello", "agentVersion": version, "platform": relayPlatform(), "hostname": hostname, "capabilities": map[string]any{"dicom": !cfg.DisableDICOMListener, "hl7": true, "reportDelivery": true, "httpsIngest": true, "reportDestination": true}}
 			if retrievalEnabledLocal(cfg) {
 				hello["capabilities"].(map[string]any)["pacsRetrievalV2"] = retrievalCapability(cfg)
 			}
@@ -142,6 +144,7 @@ func superviseControl(ctx, workCtx context.Context, cfg *config, client *http.Cl
 					err = errors.New("invalid_control_response")
 				}
 				if err == nil {
+					applyReadyReportDestination(cfg, ready.ReportDestination)
 					sessionURL = cfg.ControlURL + "/sessions/" + url.PathEscape(ready.SessionID)
 					stopRetrieval = startRetrievalSession(ctx, cfg, ready, sessionURL, client, provider, work, status)
 				}

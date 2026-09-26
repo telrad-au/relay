@@ -13,7 +13,7 @@ are independent of report authorization.
 For an ORM O01 order with an unambiguous local authorization scope, Relay signs
 each OBR-18 accession. Telrad stores the original authorization with the order and returns
 it with the report. Relay verifies its local signature, paired Relay ID, exact
-accession, production processing ID and configured report destination before
+accession, production processing ID and current report destination before
 opening an MLLP connection. Missing or invalid authorization produces
 `invalid_report` without contacting the RIS. Cloud capabilities cannot disable
 this check, and Telrad never claims unsigned report deliveries.
@@ -67,7 +67,27 @@ Telrad records delivery only after the RIS returns its correlated application AA
 A lost result may cause a retransmission, so the RIS must handle duplicates.
 
 Orders without a signed grant require another order submission from the clinic.
-Changing the report destination requires fresh grants and a service restart.
+Changing the report destination requires fresh grants.
+
+## Report destination
+
+One clinic RIS has one HL7 report receiver, configured once in Telrad. Relay
+advertises the `reportDestination` control capability; Telrad then returns the
+receiver in the session ready message and resets the session when it changes, so
+Relay signs new grants for the new receiver and rejects grants for the old one.
+Relays without the capability never receive the field.
+
+Relay only accepts a Telrad-provided receiver that is a canonical IPv4 address in
+`reportDestinationAllowedCidrs` (`TELRAD_RELAY_REPORT_DESTINATION_ALLOWED_CIDRS`),
+which defaults to 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 127.0.0.0/8 and
+100.64.0.0/10. A rejected or absent receiver means no report is sent; orders are
+still forwarded, without report grants.
+
+A local `reportHost`/`reportPort` (`TELRAD_RELAY_REPORT_DESTINATION_HOST`/`_PORT`)
+pins the receiver and may be a host name. Telrad can confirm a pin but never
+redirect it: a different Telrad receiver blocks delivery until one side changes.
+When Telrad has no receiver, or is an older server without the capability, Relay
+uses the pin. Changing a pin requires a service restart.
 Loss or replacement of the key invalidates earlier grants; re-pairing does not
 allow the new Relay identity to use the old identity's grants. Use a fresh HL7
 message control ID for reauthorization: retries of an accepted signed envelope

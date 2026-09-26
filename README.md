@@ -60,10 +60,10 @@ services:
     # Allow active DICOM and HL7 exchanges to finish during shutdown.
     stop_grace_period: 2m
     environment:
-      # Hostname or IP address that receives returned reports.
-      TELRAD_RELAY_REPORT_DESTINATION_HOST: "192.0.2.20"
-      # TCP port used by the report destination.
-      TELRAD_RELAY_REPORT_DESTINATION_PORT: "2576"
+      # Optional pin for the RIS report receiver; by default Relay uses the
+      # receiver configured in Telrad (private IPv4 networks only).
+      # TELRAD_RELAY_REPORT_DESTINATION_HOST: "192.0.2.20"
+      # TELRAD_RELAY_REPORT_DESTINATION_PORT: "2576"
     ports:
       - "11112:11112/tcp"
       - "2575:2575/tcp"
