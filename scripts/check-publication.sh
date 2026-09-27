@@ -9,20 +9,20 @@ required_lines=(
     'Dockerfile:    org.opencontainers.image.source="https://github.com/telrad-au/relay" \'
     'SECURITY.md:reporting](https://github.com/telrad-au/relay/security/advisories/new).'
     'README.md:irm https://github.com/telrad-au/relay/releases/latest/download/install.ps1 | iex'
+    'packaging/install.sh:repository=https://github.com/telrad-au/relay'
+    'packaging/install.ps1:    $defaultUrl = "https://github.com/telrad-au/relay/releases/download/v$Version"'
+    'packaging/install.ps1:    $defaultUrl = '"'"'https://github.com/telrad-au/relay/releases/latest/download'"'"
+    'cmd/telrad-relay/config.go:var defaultEnrolmentURL = "https://ingest.app.telrad.com.au/v1/relay/enrolments"'
+    'packaging/docker-relay.json:  "enrolmentUrl": "https://ingest.app.telrad.com.au/v1/relay/enrolments"'
     '.github/workflows/publish-prerelease.yml:    IMAGE: ghcr.io/telrad-au/relay'
     '.github/workflows/publish-prerelease.yml:    PACKAGE_API_URL: https://api.github.com/orgs/telrad-au/packages/container/relay'
     '.github/workflows/publish-prerelease.yml:                  release_base_url="https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG"'
     '.github/workflows/publish-prerelease.yml:        environment: development-release'
-    'packaging/docker-relay.json:  "pairingUrl": "https://ingest.app.telrad.com.au/v1/relay/pairing-enrollments",'
-    '.github/workflows/publish-testing.yml:        environment: testing-release'
-    'scripts/build-testing-release.sh:release_feed_url="https://api.github.com/repos/$REPOSITORY/releases"'
     '.github/workflows/publish-release.yml:    IMAGE: ghcr.io/telrad-au/relay'
     '.github/workflows/publish-release.yml:    PACKAGE_API_PATH: orgs/telrad-au/packages/container/relay'
+    '.github/workflows/publish-release.yml:        environment: production-release'
     '.github/workflows/publish-release.yml:              uses: azure/login@7ddb5af1ef8758cf1353cf3b42f940aee27ba21c # v3'
     '.github/workflows/publish-release.yml:              uses: azure/artifact-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2'
-    '.github/workflows/publish-release.yml:                  [[ "$ENROLLMENT_URL" == "$container_pairing_url" ]] || {'
-    '.github/workflows/publish-release.yml:                      scripts/finalize-signed-release.sh \'
-    '.github/workflows/publish-release.yml:                  update_manifest_url="https://github.com/$GITHUB_REPOSITORY/releases/latest/download/stable.json"'
 )
 
 for requirement in "${required_lines[@]}"; do

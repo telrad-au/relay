@@ -15,10 +15,9 @@ compatibility change required during an upgrade.
 
 The release workflow produces:
 
-- Linux amd64 and arm64 static binaries for systemd-based installations. Linux
-  prereleases and their GitHub Release installer use a development-only Ed25519
-  trust root and an exact-tag update manifest;
-- Windows amd64 binaries and a PowerShell service installer; and
+- Linux amd64 and arm64 static binaries and an installer for systemd-based
+  installations;
+- a Windows amd64 binary and a PowerShell service installer; and
 - Linux amd64 and arm64 container images.
 
 These artifact targets are not, by themselves, a promise that every operating
@@ -29,12 +28,9 @@ redistributed modified builds. Telrad support covers official releases unless
 a customer agreement states otherwise; this support boundary does not restrict
 the licence rights for modified builds.
 
-The cloud control protocol is designed to remain backward compatible within
-the supported release window. Customers must not assume indefinite
-compatibility for an unmaintained relay. Native installations can use the
-signed update channel; container operators remain responsible for replacing
-the pinned image digest using their normal change process.
-
-Development-signed Linux prereleases are for integration testing only. Their
-trust root must never authorize production updates, and the checksum-only
-Windows prerelease artifact is not a signed installer.
+The Telrad enrolment and listener protocols are designed to remain backward
+compatible within the supported release window. Customers must not assume
+indefinite compatibility for an unmaintained relay. Relay does not update
+itself: native operators update by rerunning the installer for the wanted
+version, and container operators replace the pinned image digest using their
+normal change process.

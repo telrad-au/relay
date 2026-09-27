@@ -1,75 +1,91 @@
 #!/usr/bin/env bash
-# Disposable Linux CI hosts only: installs the managed service at its real paths.
+# Disposable Linux CI hosts only: installs, upgrades and removes the real
+# telrad-relay systemd service with packaging/install.sh against locally built
+# releases. It changes /etc, /usr/local and system users.
 set -euo pipefail
-[[ "${TELRAD_NATIVE_INSTALL_TEST:-}" == 1 ]] || { echo 'Set TELRAD_NATIVE_INSTALL_TEST=1 on a disposable native test host.' >&2; exit 1; }
-fixture="$(mktemp -d)"
-trap 'sudo systemctl stop telrad-relay.service >/dev/null 2>&1 || true; sudo rm -f /etc/systemd/system/telrad-relay.service.d/coverage.conf; sudo systemctl daemon-reload; rm -rf "$fixture"' EXIT
-scripts/build-release.sh 0.0.0-ci.1
-cp packaging/install.sh packaging/relay.example.json "$fixture/"
-cp dist/0.0.0-ci.1/installation-manifest.json "$fixture/"
-cp dist/0.0.0-ci.1/telrad-relay-linux-amd64 "$fixture/telrad-relay"
-coverage_directory="${RELAY_NATIVE_COVERAGE_DIR:-}"
-if [[ -n "$coverage_directory" ]]; then
-    mkdir -p "$coverage_directory"
-    chmod 0777 "$coverage_directory"
-    go build -cover -covermode=atomic -ldflags '-X main.version=0.0.0-ci.1' -o "$fixture/telrad-relay" ./cmd/telrad-relay
-    sudo mkdir -p /etc/systemd/system/telrad-relay.service.d
-    printf '[Service]\nEnvironment="GOCOVERDIR=%s"\nReadWritePaths=%s\n' "$coverage_directory" "$coverage_directory" | sudo tee /etc/systemd/system/telrad-relay.service.d/coverage.conf >/dev/null
-fi
-printf '%s\n' '{"schemaVersion":1,"channel":"stable","manifestUrl":"https://example.invalid/stable.json","publicKey":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}' > "$fixture/update-trust.json"
-(cd "$fixture" && sudo env GOCOVERDIR="$coverage_directory" ./install.sh)
-for attempt in {1..30}; do
-    if sudo -u nobody env GOCOVERDIR="$coverage_directory" /usr/local/bin/telrad status > "$fixture/status"; then break; fi
-    sleep 1
-done
-grep -Fq 'ingest ready: false' "$fixture/status"
+[[ "${TELRAD_NATIVE_INSTALL_TEST:-}" == 1 ]] || {
+    echo 'Set TELRAD_NATIVE_INSTALL_TEST=1 on a disposable native test host.' >&2
+    exit 1
+}
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT_DIR"
+work="$(mktemp -d)"
+chmod 0755 "$work"
+
+uninstall() {
+    sudo systemctl disable --now telrad-relay.service >/dev/null 2>&1 || true
+    sudo rm -rf /etc/systemd/system/telrad-relay.service /usr/local/lib/telrad-relay \
+        /usr/local/bin/telrad /etc/telrad-relay /var/lib/telrad-relay
+    sudo systemctl daemon-reload
+    if getent passwd telrad-relay >/dev/null; then sudo userdel telrad-relay; fi
+}
+trap 'uninstall; rm -rf "$work"' EXIT
+
+# Bash ignores errexit for commands negated with !, so assert failures explicitly.
+refute() {
+    if "$@"; then
+        echo "Unexpectedly succeeded: $*" >&2
+        exit 1
+    fi
+}
+
+# The enrolment endpoint never resolves, so CI never contacts Telrad.
+export RELAY_ENROLMENT_URL=https://enrolment.invalid/v1/relay/enrolments
+RELAY_RELEASE_DIR="$work/first" scripts/build-release.sh 0.0.0-ci.1 >/dev/null
+RELAY_RELEASE_DIR="$work/second" scripts/build-release.sh 0.0.0-ci.2 >/dev/null
+
+install_relay() {
+    local release="$1"
+    shift
+    sudo env TELRAD_RELAY_RELEASE_URL="file://$release" "$@" sh "$ROOT_DIR/packaging/install.sh"
+}
+
+wait_for_status() {
+    for _ in {1..30}; do
+        if sudo -u nobody /usr/local/bin/telrad status > "$work/status" 2>&1 && grep -Fq "$1" "$work/status"; then
+            return 0
+        fi
+        sleep 1
+    done
+    cat "$work/status" >&2
+    echo "telrad status did not report: $1" >&2
+    return 1
+}
+
+# A checksum mismatch installs nothing.
+cp -R "$work/first" "$work/tampered"
+printf 'x' >> "$work/tampered/telrad-relay-linux-amd64"
+refute install_relay "$work/tampered"
+[[ ! -e /usr/local/lib/telrad-relay/telrad && ! -e /etc/systemd/system/telrad-relay.service ]]
+refute getent passwd telrad-relay >/dev/null
+
+install_relay "$work/first" TELRAD_RELAY_REPORT_HOST=127.0.0.1
+wait_for_status 'state: pairing'
+[[ "$(telrad version)" == 0.0.0-ci.1 ]]
+[[ "$(readlink /usr/local/bin/telrad)" == /usr/local/lib/telrad-relay/telrad ]]
 [[ "$(systemctl show -p User --value telrad-relay.service)" == telrad-relay ]]
 [[ "$(systemctl show -p NoNewPrivileges --value telrad-relay.service)" == yes ]]
-! sudo -u nobody test -r /etc/telrad-relay/relay.json
-! sudo -u telrad-relay test -w /usr/local/lib/telrad-relay/telrad
-! sudo -u telrad-relay test -w /usr/local/lib/telrad-relay/update-trust.json
-! sudo -u nobody env GOCOVERDIR="$coverage_directory" /usr/local/bin/telrad native-action enroll
-sudo -u nobody python3 - <<'PY'
-import json, socket
-with socket.socket(socket.AF_UNIX) as connection:
-    connection.settimeout(5)
-    connection.connect('/run/telrad-relay/management.sock')
-    connection.sendall(b'{"version":1,"action":"enroll"}\n')
-    response = json.loads(connection.makefile().readline())
-    assert response['done'] and 'administrator' in response['error'], response
-PY
-! sudo env GOCOVERDIR="$coverage_directory" /usr/local/bin/telrad run
-sudo env GOCOVERDIR="$coverage_directory" /usr/local/bin/telrad native-action restart
-sudo sed -i 's/"reportPort":2576/"reportPort":32576/' /etc/telrad-relay/relay.json
-(cd "$fixture" && sudo env GOCOVERDIR="$coverage_directory" ./install.sh)
-sudo grep -Fq '"reportPort":32576' /etc/telrad-relay/relay.json
-sudo python3 - "$fixture/installation-manifest.json" /usr/local/lib/telrad-relay/installation.json <<'PY'
-import json, sys
-with open(sys.argv[1]) as source, open(sys.argv[2]) as installed:
-    assert json.load(source) == json.load(installed), 'Installed component manifest changed.'
-PY
+systemctl is-enabled --quiet telrad-relay.service
+[[ "$(stat -c '%U:%G %a' /usr/local/lib/telrad-relay/telrad)" == 'root:root 755' ]]
+[[ "$(stat -c '%U:%G %a' /etc/telrad-relay/relay.json)" == 'root:root 644' ]]
+[[ "$(sudo stat -c '%U %a' /var/lib/telrad-relay)" == 'telrad-relay 700' ]]
+grep -Fq '"reportHost": "127.0.0.1"' /etc/telrad-relay/relay.json
+refute sudo -u telrad-relay test -w /usr/local/lib/telrad-relay/telrad
+refute sudo -u telrad-relay test -w /etc/telrad-relay/relay.json
+
+# Upgrade keeps configuration and restarts the running service on the new version.
+sudo sed -i 's/"reportPort": 2576/"reportPort": 32576/' /etc/telrad-relay/relay.json
+install_relay "$work/second"
+wait_for_status 'Telrad Relay 0.0.0-ci.2'
+grep -Fq '"reportPort": 32576' /etc/telrad-relay/relay.json
+
+# A deliberately stopped service stays stopped.
 sudo systemctl stop telrad-relay.service
-(cd "$fixture" && sudo env GOCOVERDIR="$coverage_directory" ./install.sh)
-! systemctl is-active --quiet telrad-relay.service
-# A compromised service can place a link in its state directory. Neither an
-# installation repair nor later elevated diagnostics may follow that link.
-printf '%s' 'outside sentinel' > "$fixture/sentinel"
-sudo mv /etc/telrad-relay/relay.json /etc/telrad-relay/relay.saved
-sudo -u telrad-relay ln -s "$fixture/sentinel" /etc/telrad-relay/relay.json
-if (cd "$fixture" && sudo env GOCOVERDIR="$coverage_directory" ./install.sh); then echo 'Installer accepted a state symlink.' >&2; exit 1; fi
-[[ "$(cat "$fixture/sentinel")" == 'outside sentinel' ]]
-sudo rm /etc/telrad-relay/relay.json
-sudo mv /etc/telrad-relay/relay.saved /etc/telrad-relay/relay.json
-sudo chown telrad-relay:telrad-relay /usr/local/lib/telrad-relay/update-trust.json
-if (cd "$fixture" && sudo env GOCOVERDIR="$coverage_directory" ./install.sh); then echo 'Installer trusted a service-owned rollback input.' >&2; exit 1; fi
-sudo chown root:root /usr/local/lib/telrad-relay/update-trust.json
-next_binary="$fixture/telrad-next"
-if [[ -n "$coverage_directory" ]]; then
-    go build -cover -covermode=atomic -ldflags '-X main.version=0.0.0-ci.2' -o "$next_binary" ./cmd/telrad-relay
-else
-    CGO_ENABLED=0 go build -trimpath -ldflags '-s -w -X main.version=0.0.0-ci.2' -o "$next_binary" ./cmd/telrad-relay
-fi
-go test -c -o "$fixture/native-lifecycle.test" ./cmd/telrad-relay
-sudo env TELRAD_NATIVE_LIFECYCLE_TEST=1 TELRAD_NATIVE_NEXT_BINARY="$next_binary" GOCOVERDIR="$coverage_directory" TELRAD_PERF_LIFECYCLE_OUT="${TELRAD_PERF_LIFECYCLE_OUT:-}" \
-    "$fixture/native-lifecycle.test" -test.run '^TestNative(InstalledLifecycle|SystemRollback)$' -test.v -test.timeout=5m
-echo 'Native Linux installation and privilege boundary checks passed.'
+install_relay "$work/second"
+refute systemctl is-active --quiet telrad-relay.service
+
+# The documented removal leaves nothing behind.
+uninstall
+[[ ! -e /usr/local/lib/telrad-relay && ! -e /usr/local/bin/telrad && ! -e /etc/telrad-relay && ! -e /var/lib/telrad-relay ]]
+refute getent passwd telrad-relay >/dev/null
+echo 'Native Linux installation checks passed.'

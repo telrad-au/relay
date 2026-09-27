@@ -88,7 +88,8 @@ The ledger is the only state Relay keeps beyond its configuration and
 certificate:
 
 - one file, `accessions.ledger`, on the data volume;
-- one accession per line, the exact OBR-18 string, UTF-8, no normalisation;
+- one accession per line: the OBR-18 string with surrounding whitespace
+  removed and no other normalisation;
 - append-only, synced per write, loaded into memory at start;
 - entries are never removed, including on `CA` or `DC`, and there is no
   retention limit. At the tested rate of 200 studies per hour the file grows by
@@ -122,9 +123,9 @@ For each report Relay:
 3. Returns the receiver's reply to Telrad byte for byte, whether `AA`, `AE` or
    `AR`.
 4. If the receiver cannot be reached, closes without a reply, or replies with
-   something that is not one acknowledgement frame for this message, Relay
-   answers Telrad with `AE` and MSA-3 `Report receiver unavailable`. Telrad
-   retries later.
+   something that is not one acknowledgement frame answering this report,
+   Relay answers Telrad with `AE` and MSA-3 `Report receiver unavailable`.
+   Telrad retries later.
 
 Acknowledgements Relay composes itself carry the ORU's MSH-10 in MSA-2, its
 sending and receiving applications swapped, MSH-11 copied, and a fresh MSH-10.
@@ -167,11 +168,16 @@ certificate immediately because the token already names the company.
 
 From 30 days before expiry Relay generates a new key and CSR and posts it to
 the renewal endpoint authenticated with its current certificate. On success it
-swaps key and certificate atomically and closes upstream connections so the new
-certificate is used. A renewal failure is retried daily and shown in `status`.
-An expired certificate cannot renew; the operator pairs again. Telrad revokes a
-Relay by refusing its certificate; short lifetimes bound the exposure of a
-stolen key.
+swaps key and certificate atomically. Every new upstream connection presents
+the new certificate, and the report pickup connection is re-established at
+once; DICOM and HL7 connections already open finish on the old certificate. A
+renewal failure is retried daily and shown in `status`. An expired certificate
+cannot renew. A relay that starts with an expired certificate reports the
+expiry in `status` and returns to pairing exactly as on a fresh install (the
+link flow on a native install, a token in a container). A certificate that
+expires while the service is running is reported in `status`; restarting the
+service begins pairing. Telrad revokes a Relay by refusing its
+certificate; short lifetimes bound the exposure of a stolen key.
 
 ### Enrolment endpoint contract
 
@@ -213,8 +219,10 @@ only) and answers:
   certificate expiry, listener state, time of the last successful connection to
   each Telrad port, report pickup state, and the ledger entry count.
 
-`telrad status` reads `/status` and prints it. No other local management
-channel exists. Nothing on the status endpoint is clinical or secret.
+`telrad status` reads `/status` and prints it. `telrad ready` reads `/readyz`
+and exits non-zero when the relay is not ready; it is the container health
+check. No other local management channel exists. Nothing on the status
+endpoint is clinical or secret.
 
 ## Configuration
 
@@ -237,6 +245,7 @@ path from earlier schemas: Relay has not been released.
 | `hl7MaxBytes` | `1048576` | frame size bound |
 | `hl7FrameSeconds` | `30` | deadline to complete a started frame |
 | `connectTimeoutSeconds` | `10` | upstream and receiver dial timeout |
+| `telradAckSeconds` | `60` | wait for Telrad's acknowledgement of a forwarded order |
 | `receiverAckSeconds` | `30` | wait for the report receiver's acknowledgement |
 | `idleTimeoutSeconds` | `900` | close a clinic connection idle this long |
 
@@ -298,14 +307,16 @@ configuration schema upgrades, or the performance tooling under
 
 ## Tests
 
-- Proxy: bytes in equal bytes out for DICOM and HL7 with real Orthanc and
-  DCMTK fixtures against a loopback TLS listener; connection limits; upstream
-  failure behaviour.
+- Proxy: bytes in equal bytes out for DICOM and HL7 against a loopback
+  mutual-TLS listener standing in for Telrad; connection limits; upstream
+  failure and unauthenticated-client behaviour. Relay never interprets DICOM,
+  so arbitrary bytes are a sufficient fixture.
 - Ledger: AA/AE/AR correlation, NW/XO/CA filtering, multi-OBR orders, fsync
   before forward, append failure closes the connection, reload at start.
 - Report pickup: authorised delivery with receiver AA/AE/AR echoed byte for
   byte, refusal without receiver contact, receiver unreachable, malformed
   receiver reply, reconnect and backoff, duplicate delivery.
 - Pairing: interactive and token flows against a loopback enrolment server,
-  renewal swap, expiry, redirect rejection, file permissions.
+  renewal swap, expired certificate returning to pairing, redirect rejection,
+  file permissions.
 - Installers: the existing bundle contract tests, reduced to the three targets.

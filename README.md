@@ -1,25 +1,21 @@
 # Telrad Relay
 
-Telrad Relay connects a clinic's PACS and RIS to Telrad. It receives DICOM and
-HL7 on the clinic network and sends them securely to Telrad over outbound TCP
-`443`; it does not require an inbound internet firewall rule.
+Telrad Relay connects a clinic's PACS and RIS to Telrad when those systems can
+only speak plain DICOM and plain HL7 over MLLP. It accepts connections on the
+clinic network, wraps them in TLS with a client certificate that identifies the
+clinic, and forwards them to Telrad. It makes outbound connections only; it
+does not require an inbound internet firewall rule.
 
-Relay is an application-specific connector, not a VPN or general-purpose
-network tunnel. It does not give Telrad routable access to the clinic network.
+Relay is a TLS-wrapping TCP proxy plus a report gate. It does not change the
+DICOM or HL7 bytes it forwards, and it is not a VPN or general-purpose tunnel.
+It does not give Telrad routable access to the clinic network.
 
-Relay runs as a Linux service, Windows service, or Linux container.
+Relay runs as a Linux service, a Windows service, or a Linux container.
 
 ## Quickstart
 
 Native installation is the simplest option. After installation, `telrad`
-prints a link that an authorized clinic administrator uses to approve the
-host.
-
-### System requirements
-
-**Tested size:** Linux x64 VM with 2 vCPUs, 512 MiB RAM and 8 GiB disk (AWS `t3a.nano`).
-**Estimated capacity:** approximately **200 mixed studies/hour** at 100 Mbit/s with
-four DICOM connections.
+prints a link that an authorised person uses to approve the Relay.
 
 ### Linux service
 
@@ -36,8 +32,7 @@ Run the installer in PowerShell as Administrator:
 irm https://github.com/telrad-au/relay/releases/latest/download/install.ps1 | iex
 ```
 
-Then run `telrad` from an ordinary terminal. It requests administrator authorization
-for the specific management action; pairing runs inside the unprivileged service.
+Then run `telrad` from an ordinary terminal to see the pairing link.
 
 ### Docker Compose
 
@@ -60,10 +55,10 @@ services:
     # Allow active DICOM and HL7 exchanges to finish during shutdown.
     stop_grace_period: 2m
     environment:
-      # Hostname or IP address that receives returned reports.
-      TELRAD_RELAY_REPORT_DESTINATION_HOST: "192.0.2.20"
-      # TCP port used by the report destination.
-      TELRAD_RELAY_REPORT_DESTINATION_PORT: "2576"
+      # Hostname or IP address of the RIS report receiver.
+      TELRAD_RELAY_REPORT_HOST: "192.0.2.20"
+      # TCP port of the RIS report receiver.
+      TELRAD_RELAY_REPORT_PORT: "2576"
     ports:
       - "11112:11112/tcp"
       - "2575:2575/tcp"
@@ -75,7 +70,7 @@ volumes:
     name: telrad-relay-data
 ```
 
-Docker requires a one-time pairing token from Telrad.
+A container pairs with a one-time pairing token from Telrad.
 
 #### Linux
 
@@ -99,194 +94,135 @@ Remove-Item Env:TELRAD_RELAY_PAIRING_TOKEN
 docker compose up --detach
 ```
 
-Docker retains configuration and authentication in the `telrad-relay-data`
-volume after enrollment.
+The `telrad-relay-data` volume keeps the Relay's key, certificate and accession
+ledger. Keep it for the life of the installation.
 
-Pairing negotiates short-lived credentials when the Telrad service supports
-them. Relay renews those credentials automatically before expiry and migrates
-an existing bearer credential without requiring re-pairing. Keep the protected
-credential volume persistent: it contains the crash-recovery state needed to
-complete an interrupted renewal safely.
+## Pairing
 
-Official images contain the source-controlled production pairing endpoint.
-Development and self-hosted deployments can override it at runtime with
-`TELRAD_RELAY_PAIRING_URL`. Relay derives the fixed control and ingest paths
-from that one administrator-approved origin.
+Pairing gives the Relay a client certificate issued by Telrad. The certificate
+names the Relay; Telrad records which company the Relay belongs to.
 
-## Connect your PACS or RIS
+- **Native services** pair by link. The service asks Telrad for a pairing
+  request and `telrad` prints the verification link. An authorised person opens
+  it, signs in to Telrad, chooses the company and approves. The service then
+  receives its certificate and Telrad's addresses and opens its listeners.
+- **Containers** pair by token. `enroll` sends the token with the certificate
+  request and Telrad issues the certificate immediately, because the token
+  already names the company. The token is used once and never stored.
 
-Relay supports two image transfer modes: **Push** and **Retrieve** (pull).
-Push is the default. Choose the company mode in Telrad under
-**Settings → Data exchange → Image transfer**. Retrieve also requires a
-retrieval-capable Relay build, enabled cloud support and local PACS approval.
+The DICOM and HL7 listeners stay closed until pairing succeeds. Relay renews its
+certificate automatically; see [Security and privacy](#security-and-privacy).
 
-| Mode | Clinic connection | When images are transferred |
+## Connect your PACS and RIS
+
+| Direction | Clinic system | Relay |
 | --- | --- | --- |
-| **Push** | PACS → Relay using DICOM C-STORE | When the PACS sends or routes images to Telrad. |
-| **Retrieve (pull)** | Relay → PACS using C-FIND and C-GET | After an approved HL7 order authorizes retrieval and Telrad schedules the transfer. |
+| Images | PACS sends DICOM C-STORE | listens on TCP `11112` |
+| Orders | RIS sends HL7 orders over MLLP | listens on TCP `2575` |
+| Reports | RIS report receiver listens over MLLP | connects to `reportHost`:`reportPort` (default `2576`) |
 
-In both modes, Relay forwards images to Telrad over outbound HTTPS on TCP `443`.
-The cloud does not connect directly to the PACS, and neither mode requires an
-inbound internet firewall rule.
+Add Relay as a DICOM destination in the PACS, using the Relay host's LAN
+address and port `11112`. Relay passes the association straight through to
+Telrad, so AE titles, presentation contexts and the C-STORE status are
+negotiated between the PACS and Telrad. Validate transfer with approved test
+images before sending clinical data.
 
-### Push mode
+Point the RIS's HL7 order sender at the Relay host's LAN address on port
+`2575`. Relay forwards each message and returns Telrad's acknowledgement
+unchanged.
 
-Add Relay as a DICOM destination in your PACS:
+Configure `reportHost` and `reportPort` to the RIS's MLLP report receiver. The
+receiver opens that listener; Relay connects to it for each report.
 
-- **Host:** the Relay host's LAN address.
-- **Port:** TCP `11112` by default.
-- **Called AE title:** any valid AE title, for example `TELRAD`.
+Restrict each local port to the clinic systems that need it.
 
-Allow the PACS to reach that local port, then configure manual sending or
-automatic routing. C-ECHO checks connectivity; validate actual C-STORE transfer
-with approved test images before sending clinical data. Push mode does not
-query the PACS or fetch images in response to an order.
+## How report authorisation works
 
-### Retrieve mode (pull)
-
-Configure the PACS's query/retrieve host, port and called AE title in Relay,
-with a clinic-approved calling AE title and the Storage SOP classes to receive.
-Allow Relay to reach the PACS on that local port. The PACS must support Study Root
-C-FIND and C-GET and accept Relay's Storage SCP role on the C-GET association.
-
-An approved HL7 order supplies the accession. Relay searches the configured PACS
-within the approved clinic/PACS namespace and retrieves every matching study.
-Patient ID is not required for lookup or authorization. Later retrieval attempts
-query again and can discover additional studies and images under that accession.
-
-C-GET returns images over the connection Relay opened, using C-STORE
-suboperations. No separate PACS-to-Relay callback or C-MOVE destination is needed.
-Retrieve mode can also accept ordinary pushed images; keep Relay's DICOM listener
-and its local firewall rule enabled if you need both.
-
-The current retrieval profile supports native Explicit and Implicit VR Little
-Endian images and ASCII accessions up to 16 bytes. See the
-[retrieval provisioning and qualification guide](docs/pacs-retrieval.md) for local
-signing-key/source approval, PACS configuration and activation checks. Selecting
-Retrieve in Telrad alone does not configure or authorize access to the PACS.
-
-### RIS orders and report return (both modes)
-
-Point the RIS's HL7 sender to the Relay host's LAN address on MLLP TCP `2575`.
-Telrad validates orders and returns the application acknowledgment. Relay checks
-transport and local authorization scope; see the
-[validation boundary](docs/report-authorization.md#validation-boundary).
-Configure Relay to deliver returned reports to the RIS/report receiver's LAN
-address and listening port, TCP `2576` by default. The report receiver opens that
-listener; Relay connects to it. Restrict each local port to the required clinic
-systems and validate the routes with approved test traffic.
-
-Report return requires a clinic-signed permit from an approved HL7 order for the
-report's accession. Relay verifies that permit and the configured RIS destination
-before delivery. This works in both modes; see [report authorization](docs/report-authorization.md).
-Authorization is automatic and requires no additional configuration. This establishes order
-authority; it does not authenticate the clinical report text.
-
-Report return uses outbound HTTPS polling, with up to three seconds of idle
-pickup latency. Telrad retains the delivery queue; Relay has no local delivery
-ledger. If delivery succeeds but its confirmation is lost, the RIS may receive
-the same report and message control ID again. The receiver must handle duplicates.
+Relay delivers a report only for studies the clinic ordered through it. When
+Telrad acknowledges a new order (`ORC-1` `NW` or `XO`) with `AA`, Relay records
+each of the order's accession numbers (`OBR-18`) in a local ledger and writes
+it to disk before passing the `AA` back to the RIS. A report whose accession
+numbers are not all in the ledger is refused without contacting the RIS.
+Relay keeps no delivery record, so if a delivery succeeds but Telrad does not
+receive the acknowledgement, Telrad sends the report again. The RIS must accept
+a duplicate message with the same control ID without duplicate clinical effect.
 
 ## Check and manage Relay
 
 ```text
-telrad status
-telrad doctor
-telrad update
+telrad                  Show status, including the pairing link while unpaired
+telrad status           Show status
+telrad start            Start the service
+telrad stop             Stop the service
+telrad restart          Restart the service
+telrad version          Print the installed version
 ```
 
-`status` shows whether ingest, Telrad connectivity, and report return are
-available. `doctor` checks the installation and configuration. These commands,
-`ready`, and update checks never request elevation or repair state. When the
-service is stopped, credential diagnostics are unavailable.
+`status` shows the state (`pairing`, `ready` or `degraded`), certificate
+expiry, listener state, Telrad connectivity, report pickup, report counts and
+the number of ledger entries. `telrad` never requests elevation; `start`,
+`stop` and `restart` need the same rights as managing the service directly.
 
-A new native installation starts local management under its dedicated service
-identity. DICOM and HL7 listeners remain closed until pairing succeeds. Pairing,
-an immediate credential renewal, service control, and exact update application
-require administrator authorization; the CLI announces each action before sudo
-or UAC. Routine credential renewal is automatic and does not request elevation.
+To update, rerun the installer for the version you want. Containers update by
+pulling a new image. Relay does not update itself.
 
-`telrad update` only checks for an update. It does not change the host. After
-reviewing the release, an administrator can approve that exact version with:
+## Firewall
 
-```text
-telrad update VERSION
-```
+Relay needs no inbound internet rule. Outbound, it needs:
 
-Relay verifies the release, safely restarts, checks readiness, and rolls back
-if the update fails.
+- TCP to Telrad's DICOM, HL7 and report ports. Pairing supplies the host and
+  ports; `telrad status` shows the host.
+- HTTPS on TCP `443` to Telrad's enrolment endpoint, for pairing and
+  certificate renewal.
+
+On the clinic network, allow the PACS to reach TCP `11112`, the RIS to reach
+TCP `2575`, and Relay to reach the report receiver.
 
 ## Why not a VPN?
 
-Connecting a clinic to a reporting provider should be straightforward and give
-the provider only the access needed to exchange studies, orders, and reports.
-Relay is designed around that requirement.
+Relay is for clinics whose PACS and RIS cannot do TLS themselves and that do
+not have a VPN to Telrad.
 
-- **Simpler setup.** Install Relay, approve the host through Telrad, and point
-  your PACS or RIS to its local address. Relay connects over outbound HTTPS on
-  TCP `443`, with no inbound internet firewall rules, public static IP, or
-  site-to-site VPN configuration required. Local firewall rules and any
-  outbound allowlisting still apply.
+- If the clinic's systems support DICOM over TLS and MLLP over TLS with a
+  client certificate, they can connect to Telrad directly without Relay.
+- If the clinic has a site-to-site VPN to Telrad, its systems can send through
+  the tunnel without Relay.
+- Otherwise Relay provides the encryption and identity the clinic systems
+  lack, without a tunnel to configure and maintain. It needs only outbound
+  connections, gives Telrad no route into the clinic network, and handles only
+  DICOM, HL7 orders and returned reports.
 
-- **A narrower security boundary.** Relay handles specific DICOM and HL7
-  exchanges without giving Telrad routable access to the clinic network. There
-  is no general-purpose tunnel through which unrelated services can be
-  reached. A VPN can be tightly restricted, but those restrictions must be
-  configured and maintained separately.
-
-- **Encrypted, authenticated communication.** Traffic between Relay and Telrad
-  uses TLS with certificate verification and credentials specific to the
-  enrolled Relay. Studies and orders travel outbound; returned reports are
-  collected through outbound HTTPS requests and delivered to the configured
-  local receiver.
-
-- **Fewer networking dependencies.** There are no VPN peers, tunnel routes, or
-  cross-site address translations to coordinate. Clinics can use overlapping
-  private address ranges without conflicts between sites, and changing an
-  internet connection does not require renegotiating a VPN peer configuration.
-
-- **Fits existing clinical systems.** Your PACS and RIS continue using
-  familiar DICOM and HL7 interfaces on the local network. Relay handles the
-  connection to Telrad, so those systems do not need native support for cloud
-  APIs or internet-facing endpoints.
-
-- **Easier operation and review.** Built-in status and diagnostic commands
-  distinguish clinical connectivity from Telrad connectivity and
-  authentication problems. Relay is open source, does not persist clinical
-  payloads, and applies verified software updates only when an administrator
-  approves a specific version.
-
-A well-configured VPN can provide secure connectivity. Relay’s advantage is a
-smaller integration to configure, review, and maintain for this particular
-workflow. It still requires a secured host and appropriate local network
-controls, but it removes the need to operate a network tunnel just to exchange
-clinical data.
+Relay works the same way inside a VPN; a tunnel changes only how Telrad's
+addresses route. Relay still needs a secured host and appropriate local
+network controls.
 
 ## Security and privacy
 
-Relay uses encrypted outbound connections and normal operating system
-certificate verification. Credentials are stored with restricted permissions.
+Relay holds one ECDSA P-256 private key, generated on the host and never sent
+anywhere, and a client certificate issued by Telrad with a 90-day lifetime.
+Relay presents the certificate on every DICOM, HL7 and report connection to
+Telrad. From 30 days
+before expiry it renews automatically with a new key. Relay verifies Telrad's
+servers with the operating system's trust store and does not follow redirects.
+The key and certificate are stored with permissions restricted to the service
+account.
 
-Relay does not persist clinical ingest payloads or returned report payloads,
-or write clinical payloads or credentials to operational logs.
+Relay does not persist clinical payloads. The ledger holds accession numbers
+only. Logs contain no message bytes, DICOM UIDs, HL7 control IDs, accession
+numbers, patient identifiers or key material.
 
-Relay is open-source under the Apache License 2.0, allowing clinics and their
-security assessors to inspect its network, data-handling, and update behavior.
-Signed release metadata identifies the corresponding source commit, and Relay
-applies updates only after an administrator approves an exact verified version.
+Relay is open-source under the Apache License 2.0, so clinics and their
+security assessors can inspect its network and data-handling behaviour.
 
 ## Detailed documentation
 
-- [Native service operations](docs/native-operations.md): firewall, proxy,
-  health, authentication, updates, and recovery.
-- [Container operations](docs/container-operations.md): networking, health,
-  upgrades, and rollback.
-- [Release documentation](docs/releases.md): release channels, downloads, and
-  verification.
-- [Configuration reference](packaging/relay.example.json): advanced listener,
-  timeout, and report-return settings.
-- [Gateway mode](docs/gateway-mode.md): in development and not yet released.
-  Telrad runs one Relay on its VPN gateway for clinics that connect over IPsec.
+- [Native service operations](docs/native-operations.md): configuration,
+  pairing, status, renewal, upgrades and removal.
+- [Container operations](docs/container-operations.md): pairing, networking,
+  health, upgrades and backup.
+- [Architecture](docs/architecture.md): the design and the protocols Relay
+  speaks to Telrad.
+- [Release documentation](docs/releases.md): downloads and verification.
 
 ## Licence
 
