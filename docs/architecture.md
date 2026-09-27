@@ -41,8 +41,9 @@ clinic firewall needs no inbound rule. Relay runs identically over the public
 internet and inside a VPN; a tunnel only changes how Telrad's addresses route.
 
 Relay holds one client certificate. That certificate is what associates traffic
-with a company and it is presented on every upstream connection, including over
-a VPN, so Telrad always knows the traffic came through a Relay.
+with a company and it is presented on every connection to Telrad's DICOM, HL7
+and report ports, including over a VPN, so Telrad always knows the traffic came
+through a Relay.
 
 ## DICOM
 
@@ -84,8 +85,9 @@ Telrad returns its stored acknowledgement, and Relay records the accession then.
 This ordering means the RIS never holds an `AA` for an order that the ledger
 does not know.
 
-The ledger is the only state Relay keeps beyond its configuration and
-certificate:
+The ledger is the only clinical state Relay keeps. Beyond it Relay keeps only
+its configuration, its identity and, while one is open, a
+[backlog acceptance](#backlog-acceptance) window. The ledger is:
 
 - one file, `accessions.ledger`, on the data volume;
 - one accession per line: the OBR-18 string with surrounding whitespace
@@ -98,7 +100,8 @@ certificate:
 
 A message with no OBR-18 creates no entry. Telrad rejects such orders, so this
 is not a gap. If the ledger is lost, reports for earlier orders are refused
-until the RIS resends those orders; that is the documented recovery.
+until the RIS resends those orders or the clinic opens a backlog acceptance
+window; see [Recovery after losing the Relay host](#recovery-after-losing-the-relay-host).
 
 Accession values appear in the ledger file and nowhere else. They are never
 logged.
@@ -116,8 +119,12 @@ closes the connection.
 For each report Relay:
 
 1. Reads every OBR-18 in the ORU. If the ORU has none, or any value is absent
-   from the ledger, Relay answers `AR` with MSA-3
-   `Accession not ordered through this Relay` and does not contact the RIS.
+   from the ledger and no backlog acceptance window is open, Relay answers `AR`
+   with MSA-3 `Accession not ordered through this Relay` and does not contact
+   the RIS. While a window is open, Relay appends the absent values to the
+   ledger and syncs it, exactly as for an accepted order, before continuing.
+   If that append fails, Relay closes the pickup connection without an
+   acknowledgement and Telrad retries.
 2. Otherwise connects to the clinic report receiver at `reportHost`:`reportPort`
    (default 2576), writes the ORU frame unchanged, and reads one framed reply.
 3. Returns the receiver's reply to Telrad byte for byte, whether `AA`, `AE` or
@@ -137,6 +144,30 @@ control ID, as it must for any HL7 integration.
 Report pickup does not start until Relay holds a certificate. Loss of the
 pickup connection does not affect order or image forwarding.
 
+### Backlog acceptance
+
+The ledger authorises reports for orders placed through this Relay. After the
+ledger is lost, for example when a Relay host is replaced, Telrad still holds
+reports for orders the new ledger has never seen. The clinic, not Telrad,
+decides to let those through:
+
+```text
+telrad accept-backlog [--hours N]     # N from 1 to 168, default 72
+telrad accept-backlog --cancel
+```
+
+The command writes `accept-backlog.json`, `{ "until": "<RFC3339>" }`, to the
+data volume with permissions restricted to the service account, and prints the
+window. The running service reads the file for every report, so no restart is
+needed. While the current time is before `until`, a report whose OBR-18 values
+are not all in the ledger is accepted: each absent value is appended to the
+ledger and synced before the report is forwarded, and Relay logs one line per
+recorded accession without its value. A report with no OBR-18 is still
+refused. After `until` the gate is normal again and the file is deleted the
+next time Relay finds it expired; `--cancel` deletes it at once. The window is
+shown in `status` and has no environment override: it is a deliberate
+operator action on one host, not configuration.
+
 ## Identity and pairing
 
 At first start Relay generates an ECDSA P-256 private key on the data volume
@@ -147,8 +178,15 @@ authority with the opaque Relay identifier as subject and a 90-day lifetime.
 Company membership lives in Telrad's database and is never read from the
 certificate.
 
-Relay verifies Telrad's server certificates with the operating system's trust
-store. It ships no trust material and never follows redirects.
+Relay trusts two things, for two different connections. The enrolment endpoint
+is a public HTTPS service, verified with the operating system's trust store.
+Telrad's DICOM, HL7 and report ports present certificates from the Telrad Relay
+CA, and Relay verifies them against that CA only, never the operating system's
+roots. The CA certificate arrives in the issued identity (`telrad.caCertificate`)
+over the OS-verified enrolment connection and is stored in `identity.json`; a
+renewal may replace it, which is how Telrad rotates the CA. Relay ships no
+trust material and never follows redirects. An `identity.json` without a CA
+certificate is treated as unpaired and Relay pairs again.
 
 ### Interactive pairing (Linux and Windows services)
 
@@ -167,8 +205,11 @@ certificate immediately because the token already names the company.
 ### Renewal
 
 From 30 days before expiry Relay generates a new key and CSR and posts it to
-the renewal endpoint authenticated with its current certificate. On success it
-swaps key and certificate atomically. Every new upstream connection presents
+the renewal endpoint over plain HTTPS, with no client certificate. The request
+carries the current leaf certificate and a signature by the current private key
+over the new CSR and a timestamp, so Telrad can check that the holder of the
+current key asked for the new certificate. On success Relay swaps key and
+certificate atomically. Every new upstream connection presents
 the new certificate, and the report pickup connection is re-established at
 once; DICOM and HL7 connections already open finish on the old certificate. A
 renewal failure is retried daily and shown in `status`. An expired certificate
@@ -191,7 +232,27 @@ no-store`.
 | `POST {enrolmentUrl}` `{ csr, agentVersion, platform, hostname }` | `201 { enrolmentId, verificationUrl, pollSeconds, expiresAt }` |
 | `POST {enrolmentUrl}` `{ csr, agentVersion, platform, hostname, pairingToken }` | `200` issued (below), or `403` |
 | `GET {enrolmentUrl}/{enrolmentId}` | `202` pending, `200` issued, `410` expired or denied |
-| `POST {enrolmentUrl}/renew` with client certificate `{ csr, agentVersion }` | `200` issued, or `403` |
+| `POST {enrolmentUrl}/renew` `{ csr, agentVersion, certificate, signedAt, signature }` | `200` issued, or `403` |
+
+Renewal is a plain HTTPS request without a client certificate:
+
+```json
+{
+  "csr": "-----BEGIN CERTIFICATE REQUEST-----…",
+  "agentVersion": "1.2.3",
+  "certificate": "-----BEGIN CERTIFICATE-----…",
+  "signedAt": "2026-11-26T00:00:00Z",
+  "signature": "base64"
+}
+```
+
+`csr` is the request for the new key. `certificate` is the current leaf only.
+`signedAt` is the signing time in RFC 3339 UTC. `signature` is the base64 of the
+raw ECDSA P-256 signature, `r || s` as 64 bytes, made with the current private
+key over SHA-256 of the CSR PEM bytes, a line feed, and the `signedAt` bytes.
+Telrad answers `403` unless the certificate chains to the Relay CA, is
+unexpired and unrevoked, the signature verifies with its key, and `signedAt` is
+recent.
 
 Issued:
 
@@ -200,12 +261,23 @@ Issued:
   "relayId": "opaque",
   "certificate": "-----BEGIN CERTIFICATE-----…",
   "notAfter": "2026-12-26T00:00:00Z",
-  "telrad": { "host": "ingest.app.telrad.com.au", "dicomPort": 2762, "hl7Port": 2575, "reportPort": 2580 }
+  "telrad": {
+    "host": "ingest.app.telrad.com.au",
+    "dicomPort": 2762,
+    "hl7Port": 2576,
+    "reportPort": 2578,
+    "caCertificate": "-----BEGIN CERTIFICATE-----…"
+  }
 }
 ```
 
-`certificate` may contain the issuing chain after the leaf. Relay stores
-`telrad` and uses it for every upstream connection; a renewal may change it.
+`certificate` may contain the issuing chain after the leaf. `caCertificate` is
+one or more PEM CA certificates, the Telrad Relay CA that Relay pins for the
+data ports; Relay rejects an issued identity whose `caCertificate` is not at
+least one CA certificate. It is required when pairing. A renewal response may
+omit it to keep the stored CA or carry a new one to replace it. Relay stores
+`telrad` and uses it for every connection to the data ports; a renewal may
+change it.
 
 ## Status
 
@@ -219,7 +291,8 @@ only) and answers:
   certificate expiry, listener state, time of the last successful connection to
   each Telrad port, report pickup state, the ledger entry count, and the
   configured report receiver with a flag that is false while it is still the
-  installer's placeholder `report-receiver.invalid`.
+  installer's placeholder `report-receiver.invalid`, and `acceptBacklogUntil`,
+  the end of an open backlog acceptance window or `null`.
 
 `telrad status` reads `/status` and prints it. `telrad ready` reads `/readyz`
 and exits non-zero when the relay is not ready; it is the container health
@@ -270,6 +343,32 @@ version; Relay does not update itself.
 The service process runs unprivileged. `telrad` never requests elevation; the
 installer is the only privileged step.
 
+## Recovery after losing the Relay host
+
+A lost or rebuilt Relay host is replaced, not restored:
+
+1. If a copy of `accessions.ledger` exists, put it in the new data directory
+   before starting the service. It holds no key material, so it can be backed
+   up and restored like other clinic data. Never restore `identity.json`.
+2. Install Relay on the replacement host and pair it (link or token). It
+   receives a new identity.
+3. A company administrator chooses **Replace** on the old Relay in Telrad's
+   settings. Telrad revokes the old Relay and moves every outstanding and
+   failed report delivery onto the replacement, which it then retries.
+4. On the new host run `telrad accept-backlog` (72 hours by default). While
+   the window is open Relay delivers the moved reports and records their
+   accessions, so later corrected or addended reports pass the normal gate.
+5. The window closes by itself; run `telrad accept-backlog --cancel` once the
+   backlog is delivered to close it early.
+
+Telrad retries a report Relay answers with `AR` or `AE` on its normal backoff,
+about eight attempts over two days, so a report refused before the window
+opened is delivered on a later attempt.
+
+`identity.json` is not a backup item. It is the Relay's private key: a restored
+copy on a second host makes two hosts one Relay, and a stale copy may hold an
+expired certificate. Pair the replacement host instead.
+
 ## Shutdown
 
 On `SIGTERM` Relay stops accepting, lets in-flight DICOM associations and HL7
@@ -293,10 +392,15 @@ For the platform, in its own repository:
   alongside the existing tunnel-address resolution for VPN clinics.
 - A report port speaking the pickup protocol above: hold each report for a
   company whose orders arrived through a Relay, deliver on that company's live
-  pickup connection, retry on `AE`, and treat `AR` with the fixed MSA-3 as a
-  clinic refusal.
+  pickup connection, and retry a report answered `AE` or `AR` on its normal
+  backoff (about eight attempts over two days).
 - The enrolment endpoint, verification page, pairing tokens, the private CA and
-  revocation.
+  revocation. Issued identities carry the Telrad Relay CA in
+  `telrad.caCertificate`, and the renewal endpoint verifies the signed request
+  described above instead of a client certificate.
+- A **Replace** action in Telrad settings for a Relay: it revokes the old
+  Relay and moves every outstanding and failed delivery onto the replacement
+  Relay, then retries them.
 
 ## Removed
 
@@ -317,8 +421,10 @@ configuration schema upgrades, or the performance tooling under
   before forward, append failure closes the connection, reload at start.
 - Report pickup: authorised delivery with receiver AA/AE/AR echoed byte for
   byte, refusal without receiver contact, receiver unreachable, malformed
-  receiver reply, reconnect and backoff, duplicate delivery.
+  receiver reply, reconnect and backoff, duplicate delivery, backlog acceptance
+  recording absent accessions before delivery and ending with its window.
 - Pairing: interactive and token flows against a loopback enrolment server,
-  renewal swap, expired certificate returning to pairing, redirect rejection,
-  file permissions.
+  renewal swap, signed renewal and refusal of a tampered request, CA
+  certificate validation, pinning and rotation, expired certificate returning
+  to pairing, redirect rejection, file permissions.
 - Installers: the existing bundle contract tests, reduced to the three targets.

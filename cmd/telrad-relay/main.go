@@ -41,6 +41,11 @@ Usage:
   telrad ready            Exit 0 when the relay is ready, otherwise print why and exit 1
   telrad run              Run the relay in the foreground (the service entry point)
   telrad enroll           Pair using TELRAD_RELAY_PAIRING_TOKEN (containers)
+  telrad accept-backlog [--hours N]
+                          For N hours (1 to 168, default 72), accept reports for
+                          accessions not in the ledger and record them
+  telrad accept-backlog --cancel
+                          Close the backlog acceptance window
   telrad start            Start the background service
   telrad stop             Stop the background service
   telrad restart          Restart the background service
@@ -66,7 +71,7 @@ func execute(args []string, out io.Writer) error {
 	if flags.NArg() > 0 {
 		command = flags.Arg(0)
 	}
-	if flags.NArg() > 1 {
+	if flags.NArg() > 1 && command != "accept-backlog" {
 		return fmt.Errorf("%s accepts no arguments", command)
 	}
 	switch command {
@@ -101,6 +106,8 @@ func execute(args []string, out io.Writer) error {
 		return nil
 	case "enroll":
 		return enrollCommand(cfg, *configPath, out)
+	case "accept-backlog":
+		return acceptBacklogCommand(cfg, flags.Args()[1:], out)
 	case "run":
 		return runPlatformService(cfg)
 	default:

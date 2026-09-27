@@ -47,6 +47,9 @@ type statusReport struct {
 	// installer placeholder; ReportReceiver (host:port) is then omitted.
 	ReportReceiverConfigured bool   `json:"reportReceiverConfigured"`
 	ReportReceiver           string `json:"reportReceiver,omitempty"`
+	// AcceptBacklogUntil is the end of an open backlog acceptance window, or
+	// null when none is open.
+	AcceptBacklogUntil *time.Time `json:"acceptBacklogUntil"`
 }
 
 type listenerStatus struct {
@@ -76,6 +79,7 @@ type reportCounters struct {
 type statusServer struct {
 	mu            sync.Mutex
 	address       string
+	backlogPath   string
 	store         *identityStore
 	ledger        *ledger
 	report        statusReport
@@ -97,7 +101,7 @@ func newStatusServer(cfg *config, store *identityStore, ledgerStore *ledger) *st
 		report.ReportReceiver = net.JoinHostPort(strings.TrimSpace(cfg.ReportHost), strconv.Itoa(cfg.ReportPort))
 	}
 	return &statusServer{
-		address: cfg.StatusAddress, store: store, ledger: ledgerStore,
+		address: cfg.StatusAddress, backlogPath: cfg.dataPath(acceptBacklogFileName), store: store, ledger: ledgerStore,
 		lastTelrad: make(map[string]time.Time), failed: make(map[string]bool),
 		report: report,
 	}
@@ -147,6 +151,9 @@ func (s *statusServer) snapshot() statusReport {
 	}
 	if s.ledger != nil {
 		report.LedgerEntries = s.ledger.count()
+	}
+	if until, open := acceptBacklogUntil(s.backlogPath, time.Now()); open {
+		report.AcceptBacklogUntil = timePointer(until)
 	}
 	report.Listeners = s.listenerReady
 	report.Telrad.LastDicom = timePointer(s.lastTelrad["dicom"])
@@ -384,6 +391,9 @@ func printStatus(out io.Writer, report *statusReport, configPath string) {
 		fmt.Fprintln(out, "report receiver: NOT CONFIGURED - set TELRAD_RELAY_REPORT_HOST and recreate the container")
 	default:
 		fmt.Fprintf(out, "report receiver: NOT CONFIGURED - edit reportHost in %s and run telrad restart\n", configPath)
+	}
+	if report.AcceptBacklogUntil != nil {
+		fmt.Fprintf(out, "backlog acceptance: open until %s (reports for accessions not in the ledger are accepted)\n", report.AcceptBacklogUntil.Format(time.RFC3339))
 	}
 	if !report.Paired {
 		if report.PairingLink != "" {

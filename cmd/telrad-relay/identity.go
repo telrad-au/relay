@@ -6,14 +6,17 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -40,11 +43,14 @@ const (
 
 type certificatePool = *x509.CertPool
 
+// telradEndpoints is where and how Relay reaches Telrad's data ports.
+// CACertificate is the Telrad Relay CA, the only trust anchor for those ports.
 type telradEndpoints struct {
-	Host       string `json:"host"`
-	DicomPort  int    `json:"dicomPort"`
-	HL7Port    int    `json:"hl7Port"`
-	ReportPort int    `json:"reportPort"`
+	Host          string `json:"host"`
+	DicomPort     int    `json:"dicomPort"`
+	HL7Port       int    `json:"hl7Port"`
+	ReportPort    int    `json:"reportPort"`
+	CACertificate string `json:"caCertificate,omitempty"`
 }
 
 // identityFile is the one file that holds everything pairing produced. Writing
@@ -61,15 +67,15 @@ type identityFile struct {
 type identityStore struct {
 	mu        sync.RWMutex
 	path      string
-	rootCAs   certificatePool
 	current   *identityFile
 	tlsCert   *tls.Certificate
 	leaf      *x509.Certificate
+	telradCAs certificatePool
 	changedCh chan struct{}
 }
 
 func openIdentity(cfg *config) (*identityStore, error) {
-	store := &identityStore{path: cfg.dataPath(identityFileName), rootCAs: cfg.rootCAs, changedCh: make(chan struct{}, 1)}
+	store := &identityStore{path: cfg.dataPath(identityFileName), changedCh: make(chan struct{}, 1)}
 	data, err := os.ReadFile(store.path)
 	if errors.Is(err, os.ErrNotExist) {
 		return store, nil
@@ -80,6 +86,12 @@ func openIdentity(cfg *config) (*identityStore, error) {
 	var file identityFile
 	if err := json.Unmarshal(data, &file); err != nil {
 		return nil, errors.New("stored identity is invalid")
+	}
+	if file.Telrad.CACertificate == "" {
+		// Identities from before the Telrad Relay CA was pinned cannot verify
+		// the data ports. Pairing again replaces the file.
+		slog.Warn("stored identity has no Telrad Relay CA certificate; pairing again")
+		return store, nil
 	}
 	if err := store.adopt(&file); err != nil {
 		return nil, fmt.Errorf("stored identity is invalid: %w", err)
@@ -102,9 +114,13 @@ func (store *identityStore) adopt(file *identityFile) error {
 	if err != nil {
 		return err
 	}
+	pool, err := parseCAPool(file.Telrad.CACertificate)
+	if err != nil {
+		return err
+	}
 	certificate := &tls.Certificate{Certificate: chain, PrivateKey: key, Leaf: leaf}
 	store.mu.Lock()
-	store.current, store.tlsCert, store.leaf = file, certificate, leaf
+	store.current, store.tlsCert, store.leaf, store.telradCAs = file, certificate, leaf, pool
 	store.mu.Unlock()
 	return nil
 }
@@ -163,13 +179,21 @@ func (store *identityStore) clientCertificate() (*tls.Certificate, error) {
 	return store.tlsCert, nil
 }
 
-// clientTLS returns the configuration used for every upstream connection. The
-// certificate is resolved per handshake so a renewal applies to the next dial.
+// clientTLS returns the configuration used for every connection to Telrad's
+// data ports. Telrad is verified against the pinned Telrad Relay CA only, never
+// the operating system's roots. The certificate is resolved per handshake so a
+// renewal applies to the next dial.
 func (store *identityStore) clientTLS(serverName string) *tls.Config {
+	store.mu.RLock()
+	pool := store.telradCAs
+	store.mu.RUnlock()
+	if pool == nil {
+		pool = x509.NewCertPool() // unpaired: trust nothing rather than the system roots
+	}
 	return &tls.Config{
 		MinVersion: tls.VersionTLS12,
 		ServerName: serverName,
-		RootCAs:    store.rootCAs,
+		RootCAs:    pool,
 		GetClientCertificate: func(*tls.CertificateRequestInfo) (*tls.Certificate, error) {
 			return store.clientCertificate()
 		},
@@ -255,6 +279,34 @@ func parseCertificateChain(value string, key *ecdsa.PrivateKey) ([][]byte, *x509
 	return chain, leaf, nil
 }
 
+// parseCAPool accepts a PEM bundle of one or more CA certificates: the Telrad
+// Relay CA that Relay pins for the data ports.
+func parseCAPool(value string) (*x509.CertPool, error) {
+	pool := x509.NewCertPool()
+	count := 0
+	rest := []byte(value)
+	for {
+		var block *pem.Block
+		block, rest = pem.Decode(rest)
+		if block == nil {
+			break
+		}
+		if block.Type != "CERTIFICATE" {
+			return nil, errors.New("telrad CA bundle contains a non-certificate block")
+		}
+		certificate, err := x509.ParseCertificate(block.Bytes)
+		if err != nil || !certificate.BasicConstraintsValid || !certificate.IsCA {
+			return nil, errors.New("telrad CA bundle contains a certificate that is not a CA")
+		}
+		pool.AddCert(certificate)
+		count++
+	}
+	if count == 0 || len(bytes.TrimSpace(rest)) != 0 {
+		return nil, errors.New("telrad CA certificate is missing or invalid")
+	}
+	return pool, nil
+}
+
 func validOpaqueID(value string) bool {
 	if len(value) < 1 || len(value) > 200 {
 		return false
@@ -312,11 +364,10 @@ type enrolmentClient struct {
 	client *http.Client
 }
 
-func newEnrolmentClient(cfg *config, certificate *tls.Certificate) *enrolmentClient {
+// newEnrolmentClient verifies Telrad's enrolment endpoint with the operating
+// system's roots and presents no client certificate; renewal is signed instead.
+func newEnrolmentClient(cfg *config) *enrolmentClient {
 	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: cfg.rootCAs}
-	if certificate != nil {
-		tlsConfig.Certificates = []tls.Certificate{*certificate}
-	}
 	transport := &http.Transport{
 		Proxy:                 http.ProxyFromEnvironment,
 		TLSClientConfig:       tlsConfig,
@@ -385,10 +436,19 @@ func decodeJSONResponse(response *http.Response, target any) error {
 	return nil
 }
 
-func (client *enrolmentClient) issuedFrom(response *http.Response, key *ecdsa.PrivateKey) (*issuedIdentity, error) {
+// issuedFrom validates an issued identity for key. A response without
+// caCertificate keeps currentCA, which is empty when pairing, so pairing must
+// supply one and a renewal may replace it.
+func (client *enrolmentClient) issuedFrom(response *http.Response, key *ecdsa.PrivateKey, currentCA string) (*issuedIdentity, error) {
 	var issued issuedIdentity
 	if err := decodeJSONResponse(response, &issued); err != nil {
 		return nil, err
+	}
+	if issued.Telrad.CACertificate == "" {
+		issued.Telrad.CACertificate = currentCA
+	}
+	if _, err := parseCAPool(issued.Telrad.CACertificate); err != nil {
+		return nil, fmt.Errorf("enrolment response: %w", err)
 	}
 	if !validOpaqueID(issued.RelayID) {
 		return nil, errors.New("enrolment response has an invalid relay identifier")
@@ -445,7 +505,7 @@ func (client *enrolmentClient) poll(ctx context.Context, pending *pendingEnrolme
 	}
 	switch response.StatusCode {
 	case http.StatusOK:
-		return client.issuedFrom(response, key)
+		return client.issuedFrom(response, key, "")
 	case http.StatusAccepted:
 		response.Body.Close()
 		return nil, errEnrolmentPending
@@ -481,12 +541,51 @@ func (client *enrolmentClient) withToken(ctx context.Context, csr string, token 
 		}
 		return nil, fmt.Errorf("enrolment failed: http_%d", response.StatusCode)
 	}
-	return client.issuedFrom(response, key)
+	return client.issuedFrom(response, key, "")
 }
 
-// renew obtains a certificate for a fresh key, authenticated by the current one.
-func (client *enrolmentClient) renew(ctx context.Context, csr string, key *ecdsa.PrivateKey) (*issuedIdentity, error) {
-	body, err := enrolmentBody(csr, nil)
+// renewalRequest is the body of POST {enrolmentUrl}/renew. The current key
+// signs the new CSR, so the request needs no client certificate.
+type renewalRequest struct {
+	CSR          string `json:"csr"`
+	AgentVersion string `json:"agentVersion"`
+	Certificate  string `json:"certificate"`
+	SignedAt     string `json:"signedAt"`
+	Signature    string `json:"signature"`
+}
+
+// renewalSigningInput is what the current key signs: csr || "\n" || signedAt.
+func renewalSigningInput(csr, signedAt string) []byte {
+	digest := sha256.Sum256([]byte(csr + "\n" + signedAt))
+	return digest[:]
+}
+
+// signRenewal builds a renewal request for csr, signed with the current key as
+// a raw P-256 signature (r || s, 32 bytes each) and carrying the current leaf.
+func signRenewal(csr string, current *tls.Certificate, now time.Time) (*renewalRequest, error) {
+	key, ok := current.PrivateKey.(*ecdsa.PrivateKey)
+	if !ok || current.Leaf == nil {
+		return nil, errors.New("current identity cannot sign a renewal")
+	}
+	signedAt := now.UTC().Format(time.RFC3339)
+	r, s, err := ecdsa.Sign(rand.Reader, key, renewalSigningInput(csr, signedAt))
+	if err != nil {
+		return nil, err
+	}
+	signature := make([]byte, 64)
+	r.FillBytes(signature[:32])
+	s.FillBytes(signature[32:])
+	return &renewalRequest{
+		CSR: csr, AgentVersion: version, SignedAt: signedAt,
+		Certificate: string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: current.Leaf.Raw})),
+		Signature:   base64.StdEncoding.EncodeToString(signature),
+	}, nil
+}
+
+// renew obtains a certificate for a fresh key with a request signed by the
+// current one. currentCA is kept unless the response carries a new CA.
+func (client *enrolmentClient) renew(ctx context.Context, request *renewalRequest, key *ecdsa.PrivateKey, currentCA string) (*issuedIdentity, error) {
+	body, err := json.Marshal(request)
 	if err != nil {
 		return nil, err
 	}
@@ -498,13 +597,13 @@ func (client *enrolmentClient) renew(ctx context.Context, csr string, key *ecdsa
 		response.Body.Close()
 		return nil, fmt.Errorf("renewal failed: http_%d", response.StatusCode)
 	}
-	return client.issuedFrom(response, key)
+	return client.issuedFrom(response, key, currentCA)
 }
 
 // pairInteractively runs the link flow until a certificate is issued or ctx ends.
 // An expired or denied link is replaced by a new one; a network failure is retried.
 func pairInteractively(ctx context.Context, cfg *config, store *identityStore, status *statusServer) error {
-	client := newEnrolmentClient(cfg, nil)
+	client := newEnrolmentClient(cfg)
 	// problem survives a replacement link so status says why a new one appeared.
 	problem := ""
 	for ctx.Err() == nil {
@@ -559,7 +658,7 @@ func pairWithToken(ctx context.Context, cfg *config, store *identityStore, token
 	if err != nil {
 		return err
 	}
-	issued, err := newEnrolmentClient(cfg, nil).withToken(ctx, csr, token, key)
+	issued, err := newEnrolmentClient(cfg).withToken(ctx, csr, token, key)
 	if err != nil {
 		return err
 	}
@@ -575,7 +674,11 @@ func renewIdentity(ctx context.Context, cfg *config, store *identityStore) error
 	if err != nil {
 		return err
 	}
-	issued, err := newEnrolmentClient(cfg, current).renew(ctx, csr, key)
+	request, err := signRenewal(csr, current, time.Now())
+	if err != nil {
+		return err
+	}
+	issued, err := newEnrolmentClient(cfg).renew(ctx, request, key, store.endpoints().CACertificate)
 	if err != nil {
 		return err
 	}

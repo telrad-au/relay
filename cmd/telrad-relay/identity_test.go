@@ -2,9 +2,15 @@ package main
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/sha256"
 	"crypto/tls"
+	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
+	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -19,31 +25,33 @@ import (
 
 // fakeEnrolment is Telrad's enrolment endpoint: link flow, token flow and renewal.
 type fakeEnrolment struct {
-	pki        *testPKI
-	server     *httptest.Server
-	mu         sync.Mutex
-	approved   map[string]bool
-	denied     map[string]bool
-	nextID     int
-	csrs       map[string]string
-	token      string
-	renewals   int
-	endpoints  telradEndpoints
-	lifetime   time.Duration
-	redirectTo string
+	pki       *testPKI
+	server    *httptest.Server
+	mu        sync.Mutex
+	approved  map[string]bool
+	denied    map[string]bool
+	nextID    int
+	csrs      map[string]string
+	token     string
+	renewals  int
+	endpoints telradEndpoints
+	// renewEndpoints, when set, is what a renewal returns instead of endpoints.
+	renewEndpoints *telradEndpoints
+	lifetime       time.Duration
+	redirectTo     string
 }
 
 func newFakeEnrolment(t *testing.T, pki *testPKI) *fakeEnrolment {
 	t.Helper()
 	fake := &fakeEnrolment{pki: pki, approved: map[string]bool{}, denied: map[string]bool{}, csrs: map[string]string{}, token: "token-0123456789abcdef", lifetime: 90 * 24 * time.Hour,
-		endpoints: telradEndpoints{Host: "ingest.example.invalid", DicomPort: 2762, HL7Port: 2575, ReportPort: 2580}}
+		endpoints: telradEndpoints{Host: "ingest.example.invalid", DicomPort: 2762, HL7Port: 2575, ReportPort: 2580, CACertificate: pki.caPEM()}}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/relay/enrolments", fake.handleEnrol)
 	mux.HandleFunc("/v1/relay/enrolments/renew", fake.handleRenew)
 	mux.HandleFunc("/v1/relay/enrolments/", fake.handlePoll)
 	mux.HandleFunc("/elsewhere", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 	fake.server = httptest.NewUnstartedServer(mux)
-	fake.server.TLS = &tls.Config{Certificates: []tls.Certificate{pki.serverCertificate(t)}, ClientAuth: tls.VerifyClientCertIfGiven, ClientCAs: pki.pool, MinVersion: tls.VersionTLS12}
+	fake.server.TLS = &tls.Config{Certificates: []tls.Certificate{pki.serverCertificate(t)}, MinVersion: tls.VersionTLS12}
 	fake.server.StartTLS()
 	t.Cleanup(fake.server.Close)
 	return fake
@@ -52,8 +60,12 @@ func newFakeEnrolment(t *testing.T, pki *testPKI) *fakeEnrolment {
 func (fake *fakeEnrolment) url() string { return fake.server.URL + "/v1/relay/enrolments" }
 
 func (fake *fakeEnrolment) issue(w http.ResponseWriter, csr string, relayID string) {
+	fake.issueWith(w, csr, relayID, fake.endpoints)
+}
+
+func (fake *fakeEnrolment) issueWith(w http.ResponseWriter, csr string, relayID string, endpoints telradEndpoints) {
 	certificate := fake.pki.issueClient(&testing.T{}, csr, relayID, fake.lifetime)
-	writeJSON(w, http.StatusOK, issuedIdentity{RelayID: relayID, Certificate: certificate, NotAfter: time.Now().Add(fake.lifetime), Telrad: fake.endpoints})
+	writeJSON(w, http.StatusOK, issuedIdentity{RelayID: relayID, Certificate: certificate, NotAfter: time.Now().Add(fake.lifetime), Telrad: endpoints})
 }
 
 func (fake *fakeEnrolment) handleEnrol(w http.ResponseWriter, r *http.Request) {
@@ -105,17 +117,63 @@ func (fake *fakeEnrolment) handlePoll(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// handleRenew authenticates a renewal the way Telrad does: the certificate
+// must chain to the Relay CA and still be valid, and its key must have signed
+// csr || "\n" || signedAt within the last few minutes.
 func (fake *fakeEnrolment) handleRenew(w http.ResponseWriter, r *http.Request) {
-	if r.TLS == nil || len(r.TLS.VerifiedChains) == 0 {
+	if r.Header.Get("X-Telrad-Relay-Protocol") != "2" || r.Method != http.MethodPost || len(r.TLS.PeerCertificates) != 0 {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	var body renewalRequest
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&body); err != nil || body.CSR == "" || body.AgentVersion == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+	relayID, ok := fake.verifyRenewal(&body)
+	if !ok {
 		w.WriteHeader(http.StatusForbidden)
 		return
 	}
-	var body map[string]string
-	_ = json.NewDecoder(r.Body).Decode(&body)
 	fake.mu.Lock()
 	fake.renewals++
+	endpoints := fake.renewEndpoints
 	fake.mu.Unlock()
-	fake.issue(w, body["csr"], r.TLS.VerifiedChains[0][0].Subject.CommonName)
+	if endpoints == nil {
+		endpoints = &fake.endpoints
+	}
+	fake.issueWith(w, body.CSR, relayID, *endpoints)
+}
+
+func (fake *fakeEnrolment) verifyRenewal(body *renewalRequest) (string, bool) {
+	block, _ := pem.Decode([]byte(body.Certificate))
+	if block == nil || block.Type != "CERTIFICATE" {
+		return "", false
+	}
+	leaf, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return "", false
+	}
+	if _, err := leaf.Verify(x509.VerifyOptions{Roots: fake.pki.pool, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}}); err != nil {
+		return "", false
+	}
+	signedAt, err := time.Parse(time.RFC3339, body.SignedAt)
+	if err != nil || time.Since(signedAt).Abs() > 5*time.Minute {
+		return "", false
+	}
+	signature, err := base64.StdEncoding.DecodeString(body.Signature)
+	public, isECDSA := leaf.PublicKey.(*ecdsa.PublicKey)
+	if err != nil || len(signature) != 64 || !isECDSA {
+		return "", false
+	}
+	r, s := new(big.Int).SetBytes(signature[:32]), new(big.Int).SetBytes(signature[32:])
+	digest := sha256.Sum256([]byte(body.CSR + "\n" + body.SignedAt))
+	if !ecdsa.Verify(public, digest[:], r, s) {
+		return "", false
+	}
+	return leaf.Subject.CommonName, true
 }
 
 func (fake *fakeEnrolment) approveAll() {
@@ -282,7 +340,7 @@ func TestEnrolmentRefusesRedirectsAndBadResponses(t *testing.T) {
 
 func TestOpenIdentityRejectsCorruptFile(t *testing.T) {
 	cfg := testConfig(t, nil)
-	if err := os.WriteFile(filepath.Join(cfg.DataDir, identityFileName), []byte(`{"schemaVersion":1,"relayId":"x","privateKey":"nope"}`), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(cfg.DataDir, identityFileName), []byte(`{"schemaVersion":1,"relayId":"x","privateKey":"nope","telrad":{"caCertificate":"nope"}}`), 0600); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := openIdentity(cfg); err == nil {
@@ -295,7 +353,7 @@ func TestPollDistinguishesDeniedFromExpired(t *testing.T) {
 	fake := newFakeEnrolment(t, pki)
 	cfg := testConfig(t, pki)
 	cfg.EnrolmentURL = fake.url()
-	client := newEnrolmentClient(cfg, nil)
+	client := newEnrolmentClient(cfg)
 	key, csr, _ := generateKeyAndCSR()
 	pending, err := client.begin(context.Background(), csr)
 	if err != nil {
@@ -331,7 +389,7 @@ func installExpiredIdentity(t *testing.T, cfg *config, pki *testPKI) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	endpoints := telradEndpoints{Host: "127.0.0.1", DicomPort: 1, HL7Port: 1, ReportPort: 1}
+	endpoints := telradEndpoints{Host: "127.0.0.1", DicomPort: 1, HL7Port: 1, ReportPort: 1, CACertificate: pki.caPEM()}
 	if err := store.install(key, &issuedIdentity{RelayID: "relay-old", Certificate: certificate, Telrad: endpoints, leaf: leaf}); err != nil {
 		t.Fatal(err)
 	}
@@ -418,5 +476,152 @@ func TestRunRelayInContainerWithExpiredIdentityRequiresToken(t *testing.T) {
 	t.Setenv(pairingTokenVariable, "")
 	if err := runRelay(context.Background(), cfg); err == nil || !strings.Contains(err.Error(), pairingTokenVariable) {
 		t.Fatalf("err=%v", err)
+	}
+}
+
+// Renewal is a plain HTTPS POST signed by the current key. Telrad refuses a
+// body whose signed fields were altered, a signature by another key and a
+// stale signing time.
+func TestRenewalIsSignedByCurrentKeyAndTamperingIsRefused(t *testing.T) {
+	pki := newTestPKI(t)
+	fake := newFakeEnrolment(t, pki)
+	cfg := testConfig(t, pki)
+	cfg.EnrolmentURL = fake.url()
+	store, _ := openIdentity(cfg)
+	if err := pairWithToken(context.Background(), cfg, store, fake.token); err != nil {
+		t.Fatal(err)
+	}
+	current, _ := store.clientCertificate()
+	client := newEnrolmentClient(cfg)
+	caPEM := store.endpoints().CACertificate
+	signed := func(t *testing.T) (*renewalRequest, *ecdsa.PrivateKey) {
+		t.Helper()
+		key, csr, _ := generateKeyAndCSR()
+		request, err := signRenewal(csr, current, time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		return request, key
+	}
+	request, _ := signed(t)
+	signature, _ := base64.StdEncoding.DecodeString(request.Signature)
+	if len(signature) != 64 || request.Certificate == "" || strings.Count(request.Certificate, "BEGIN CERTIFICATE") != 1 || request.AgentVersion != version {
+		t.Fatalf("renewal request malformed: %d-byte signature", len(signature))
+	}
+	if _, err := time.Parse(time.RFC3339, request.SignedAt); err != nil || !strings.HasSuffix(request.SignedAt, "Z") {
+		t.Fatalf("signedAt=%q", request.SignedAt)
+	}
+
+	_, otherCSR, _ := generateKeyAndCSR()
+	otherKey, _, _ := generateKeyAndCSR()
+	tampered := map[string]func(*renewalRequest){
+		"csr replaced":     func(r *renewalRequest) { r.CSR = otherCSR },
+		"signedAt changed": func(r *renewalRequest) { r.SignedAt = time.Now().Add(time.Second).UTC().Format(time.RFC3339) },
+		"signature by other": func(r *renewalRequest) {
+			*r = *mustSign(t, r.CSR, &tls.Certificate{PrivateKey: otherKey, Leaf: current.Leaf}, time.Now())
+		},
+		"stale signature": func(r *renewalRequest) { *r = *mustSign(t, r.CSR, current, time.Now().Add(-time.Hour)) },
+		"no certificate":  func(r *renewalRequest) { r.Certificate = "" },
+	}
+	for name, tamper := range tampered {
+		request, key := signed(t)
+		tamper(request)
+		if _, err := client.renew(context.Background(), request, key, caPEM); err == nil || !strings.Contains(err.Error(), "http_403") {
+			t.Fatalf("%s: err=%v", name, err)
+		}
+	}
+	if fake.renewals != 0 {
+		t.Fatalf("renewals=%d after tampered requests", fake.renewals)
+	}
+	request, key := signed(t)
+	issued, err := client.renew(context.Background(), request, key, caPEM)
+	if err != nil || issued.RelayID != "relay-token" {
+		t.Fatalf("valid renewal: %v", err)
+	}
+}
+
+func mustSign(t *testing.T, csr string, current *tls.Certificate, at time.Time) *renewalRequest {
+	t.Helper()
+	request, err := signRenewal(csr, current, at)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return request
+}
+
+// Pairing must deliver the Telrad Relay CA; a renewal may rotate it and
+// otherwise keeps the stored one.
+func TestTelradCACertificateIsRequiredAndRotatedByRenewal(t *testing.T) {
+	pki := newTestPKI(t)
+	fake := newFakeEnrolment(t, pki)
+	cfg := testConfig(t, pki)
+	cfg.EnrolmentURL = fake.url()
+	store, _ := openIdentity(cfg)
+	leaf := pki.serverCertificate(t)
+	_, request, _ := generateKeyAndCSR()
+	for name, value := range map[string]string{
+		"missing":  "",
+		"garbage":  "not a certificate",
+		"not a CA": string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: leaf.Certificate[0]})),
+		"request":  request,
+	} {
+		fake.endpoints.CACertificate = value
+		if err := pairWithToken(context.Background(), cfg, store, fake.token); err == nil || store.paired() {
+			t.Fatalf("%s CA accepted", name)
+		}
+	}
+	fake.endpoints.CACertificate = pki.caPEM()
+	if err := pairWithToken(context.Background(), cfg, store, fake.token); err != nil {
+		t.Fatal(err)
+	}
+
+	withoutCA := fake.endpoints
+	withoutCA.CACertificate = ""
+	fake.renewEndpoints = &withoutCA
+	if err := renewIdentity(context.Background(), cfg, store); err != nil {
+		t.Fatal(err)
+	}
+	if store.endpoints().CACertificate != pki.caPEM() {
+		t.Fatal("renewal without caCertificate dropped the stored CA")
+	}
+
+	rotated := fake.endpoints
+	rotated.CACertificate = newTestPKI(t).caPEM() + pki.caPEM()
+	fake.renewEndpoints = &rotated
+	if err := renewIdentity(context.Background(), cfg, store); err != nil {
+		t.Fatal(err)
+	}
+	reloaded, err := openIdentity(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reloaded.endpoints().CACertificate != rotated.CACertificate {
+		t.Fatal("renewal did not replace the stored CA")
+	}
+}
+
+// An identity written before the CA was pinned cannot verify the data ports,
+// so it is treated as unpaired rather than trusted or rejected.
+func TestOpenIdentityWithoutTelradCAIsUnpaired(t *testing.T) {
+	pki := newTestPKI(t)
+	cfg := testConfig(t, pki)
+	pairedStore(t, cfg, pki, telradEndpoints{Host: "127.0.0.1", DicomPort: 1, HL7Port: 1, ReportPort: 1})
+	path := filepath.Join(cfg.DataDir, identityFileName)
+	data, _ := os.ReadFile(path)
+	var file map[string]any
+	if err := json.Unmarshal(data, &file); err != nil {
+		t.Fatal(err)
+	}
+	delete(file["telrad"].(map[string]any), "caCertificate")
+	data, _ = json.Marshal(file)
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	store, err := openIdentity(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if store.paired() || store.expired() || store.relayID() != "" {
+		t.Fatal("identity without a Telrad CA treated as paired")
 	}
 }

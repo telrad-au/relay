@@ -154,7 +154,15 @@ Relay delivers a report only for studies the clinic ordered through it. When
 Telrad acknowledges a new order (`ORC-1` `NW` or `XO`) with `AA`, Relay records
 each of the order's accession numbers (`OBR-18`) in a local ledger and writes
 it to disk before passing the `AA` back to the RIS. A report whose accession
-numbers are not all in the ledger is refused without contacting the RIS.
+numbers are not all in the ledger is refused without contacting the RIS, unless
+the clinic has opened a backlog acceptance window with `telrad accept-backlog`
+to recover after losing the ledger. Telrad retries a refused or failed report
+on its normal backoff, about eight attempts over two days. To replace a lost
+Relay host, restore any ledger backup (never `identity.json`), pair the new
+host, have a company administrator choose **Replace** on the old Relay in
+Telrad, which revokes it and moves its outstanding deliveries to the new one,
+and run `telrad accept-backlog` there; see
+[architecture](docs/architecture.md#recovery-after-losing-the-relay-host).
 Relay keeps no delivery record, so if a delivery succeeds but Telrad does not
 receive the acknowledgement, Telrad sends the report again. The RIS must accept
 a duplicate message with the same control ID without duplicate clinical effect.
@@ -164,6 +172,7 @@ a duplicate message with the same control ID without duplicate clinical effect.
 ```text
 telrad                  Show status, including the pairing link while unpaired
 telrad status           Show status
+telrad accept-backlog   Accept reports missing from the ledger for 72 hours
 telrad start            Start the service
 telrad stop             Stop the service
 telrad restart          Restart the service
@@ -215,8 +224,11 @@ Relay holds one ECDSA P-256 private key, generated on the host and never sent
 anywhere, and a client certificate issued by Telrad with a 90-day lifetime.
 Relay presents the certificate on every DICOM, HL7 and report connection to
 Telrad. From 30 days
-before expiry it renews automatically with a new key. Relay verifies Telrad's
-servers with the operating system's trust store and does not follow redirects.
+before expiry it renews automatically with a new key, signing the renewal
+request with the current one. Relay verifies Telrad's enrolment endpoint with
+the operating system's trust store and Telrad's DICOM, HL7 and report ports
+against the Telrad Relay CA only, which it receives when pairing. It does not
+follow redirects.
 The key and certificate are stored with permissions restricted to the service
 account.
 

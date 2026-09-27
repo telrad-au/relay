@@ -9,7 +9,8 @@ to Telrad.
 Relay needs no inbound internet rule. Its outbound connections are:
 
 - TCP to Telrad's DICOM, HL7 and report ports, using TLS with Relay's client
-  certificate. Pairing supplies the host and ports; they are not configuration.
+  certificate. Pairing supplies the host, the ports and the Telrad Relay CA
+  certificate; they are not configuration.
   These connections are made directly and do not use an HTTP proxy.
 - HTTPS on TCP `443` to the enrolment endpoint, for pairing and renewal. These
   requests honour the standard `HTTPS_PROXY` and `NO_PROXY` variables. A
@@ -24,8 +25,11 @@ receiver connection is plain MLLP on the clinic network.
 on every interface, so restrict the two ports in the host firewall to the PACS
 and RIS source addresses. The status endpoint listens on loopback only.
 
-Relay verifies Telrad's certificates with the operating system's trust store,
-requires TLS 1.2 or later, and ships no trust material of its own.
+Relay verifies the enrolment endpoint with the operating system's trust store.
+It verifies Telrad's DICOM, HL7 and report ports against the Telrad Relay CA
+only, which it receives when pairing and stores in `identity.json`; a TLS
+inspection proxy or an operating system root cannot stand in for it. Relay
+requires TLS 1.2 or later and ships no trust material of its own.
 
 ## Configuration
 
@@ -74,13 +78,17 @@ Every field can be overridden by an environment variable named
 overrides are intended for containers; on a native install, prefer the file.
 `TELRAD_RELAY_ENROLMENT_URL` is for development only.
 
-The data directory holds two files, both readable only by the service account:
+The data directory holds these files, all readable only by the service account:
 
-- `identity.json`: the private key, certificate, Relay identifier and Telrad's
-  host and ports;
-- `accessions.ledger`: the accession numbers of accepted orders, one per line.
+- `identity.json`: the private key, certificate, Relay identifier, Telrad's
+  host and ports, and the Telrad Relay CA certificate;
+- `accessions.ledger`: the accession numbers of accepted orders, one per line;
+- `accept-backlog.json`: present only while a
+  [backlog acceptance](#backlog-acceptance) window is open.
 
-Do not copy either file to another host. Pair a replacement host instead.
+`accessions.ledger` holds no key material; back it up like other clinic data.
+Never copy `identity.json` to another host or restore it from a backup. See
+[replacing the Relay host](#replacing-the-relay-host).
 
 ## Pairing
 
@@ -111,6 +119,7 @@ telrad status
 - the report receiver as `host:port`, or `report receiver: NOT CONFIGURED`
   with the file to edit while `reportHost` is the installer placeholder (the
   JSON field `reportReceiverConfigured` is then `false`);
+- the end of an open backlog acceptance window;
 - the pairing link and any pairing problem while unpaired;
 - the Relay identifier, certificate expiry and any renewal problem;
 - whether the DICOM and HL7 listeners are open;
@@ -195,17 +204,69 @@ acknowledgement did not reach Telrad, Telrad sends the report again. The RIS
 must tolerate a duplicate message with the same `MSH-10`.
 
 If the ledger is lost, reports for earlier orders are refused until the RIS
-resends those orders.
+resends those orders or the clinic opens a backlog acceptance window.
+
+## Backlog acceptance
+
+To let Telrad deliver reports for orders the ledger does not know, for example
+after the Relay host is replaced, open a backlog acceptance window:
+
+```bash
+sudo telrad accept-backlog --hours 72
+```
+
+On Windows, run `telrad accept-backlog --hours 72` from an Administrator
+PowerShell. `--hours` is 1 to 168 and defaults to 72. The command writes
+`accept-backlog.json` to the data directory and prints when the window ends;
+the running service picks it up with the next report, without a restart. Until
+then a report whose accession numbers are not all in the ledger is delivered,
+and each missing accession number is appended to `accessions.ledger` and synced
+before the report is sent to the RIS. The service logs one line per accession
+recorded this way, without the accession number. A report with no `OBR-18` is
+still refused. `telrad status` shows the window while it is open.
+
+The window closes by itself. To close it early:
+
+```bash
+sudo telrad accept-backlog --cancel
+```
+
+Open a window only when the clinic expects Telrad to deliver a backlog: while
+it is open, Relay accepts every report Telrad sends for the company, not only
+those ordered through this Relay.
+
+## Replacing the Relay host
+
+If the Relay host is lost or rebuilt, replace it; never restore
+`identity.json`:
+
+1. Install Relay on the replacement. If a backup of `accessions.ledger`
+   exists, stop the service, copy it into the data directory owned by the
+   service account with mode `0600`, and start the service again.
+2. Pair the replacement as new.
+3. Have a company administrator choose **Replace** on the old Relay in
+   Telrad's settings. Telrad revokes the old Relay and moves every outstanding
+   and failed report delivery onto the replacement, which it retries.
+4. Run `sudo telrad accept-backlog` on the new host so those reports are
+   accepted and their accessions recorded.
+
+Telrad retries a report Relay answers with `AR` or `AE` on its normal backoff,
+about eight attempts over two days.
 
 ## Certificate renewal and re-pairing
 
 The certificate lasts 90 days. From 30 days before expiry the service generates
-a new key and requests a new certificate, authenticated with the current one.
+a new key and requests a new certificate over HTTPS, signing the request with
+the current key. The response may also replace the Telrad Relay CA
+certificate.
 On success it replaces key and certificate together. A failure is retried daily
 and shown in `status` as a renewal problem. Keep the enrolment endpoint
 reachable so renewal can succeed.
 
-An expired certificate cannot be renewed; the Relay must be paired again. Stop
+An expired certificate cannot be renewed; the Relay must be paired again. An
+`identity.json` written by an earlier version without the Telrad Relay CA
+certificate is also treated as unpaired: the service logs why and shows a new
+pairing link. Stop
 the service, delete `identity.json` from the data directory (keep
 `accessions.ledger`), start the service and run `telrad` for a new link.
 Telrad revokes a Relay by refusing its certificate; pairing again is also the

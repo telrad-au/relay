@@ -85,7 +85,8 @@ Before changing any of these, identify the compatibility impact:
 - the `/status` and `/readyz` endpoints;
 - configuration schema, `TELRAD_RELAY_<FIELD>` environment variables, and
   packaged defaults;
-- `identity.json` and `accessions.ledger` on the data volume;
+- `identity.json`, `accessions.ledger` and `accept-backlog.json` on the data
+  volume;
 - the enrolment endpoint contract (`X-Telrad-Relay-Protocol`), pairing link and
   token flows, and renewal;
 - the TLS connections to Telrad's DICOM, HL7 and report ports, and the report
@@ -118,11 +119,14 @@ contract changes.
   HL7 control IDs, patient identifiers, pairing tokens, or key material to logs.
 - The outbound report pickup connection is the only report path. Do not add a
   report listener. A report is delivered only when every `OBR-18` is in the
-  ledger.
-- Every connection to Telrad is outbound and presents the Relay's client
-  certificate, except pairing requests made before a certificate exists.
-- Enrolment and renewal requests never follow redirects. Relay verifies Telrad
-  with the operating system trust store and ships no trust material.
+  ledger, or while a clinic-opened `accept-backlog` window is open, in which
+  case the missing accessions are appended and synced before delivery.
+- Every connection to Telrad is outbound. Connections to the DICOM, HL7 and
+  report ports present the Relay's client certificate. Enrolment and renewal
+  requests present none; renewal is signed with the current key.
+- Enrolment and renewal requests never follow redirects and verify Telrad with
+  the operating system trust store. The data ports are verified against the
+  Telrad Relay CA from the issued identity only. Relay ships no trust material.
 - The status endpoint binds to loopback only and carries nothing clinical or
   secret.
 

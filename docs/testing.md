@@ -45,15 +45,24 @@ is checked in; all are generated at run time.
   missing accessions are refused with `AR` without contacting the receiver; an
   unreachable receiver or an invalid acknowledgement produces `AE`; pickup
   reconnects after a dropped connection and after certificate renewal; a
-  protocol error closes the connection.
+  protocol error closes the connection. With a backlog acceptance window open
+  in the running service, reports for unknown accessions are delivered after
+  those accessions are appended to the ledger; a failed append closes the
+  connection without delivery; an expired window refuses again and its file is
+  removed.
 - **Pairing and renewal.** Token and link pairing against a loopback enrolment
-  server, identity reload and file mode, renewal authenticated by the current
-  certificate, renewal inside the 30-day window, rejection of redirects and bad
-  responses, and rejection of a corrupt identity file.
+  server, identity reload and file mode, renewal signed by the current key with
+  the fake endpoint refusing a tampered body, another key's signature and a
+  stale signing time, renewal inside the 30-day window, rejection of redirects
+  and bad responses, and rejection of a corrupt identity file. The Telrad Relay
+  CA certificate is required and must be a CA, a renewal keeps or replaces it,
+  an identity without it is unpaired, and the data ports refuse a server the
+  enrolment trust store accepts but the pinned CA does not.
 - **Configuration and CLI.** Defaults, file and environment precedence,
   environment variable names, validation, unknown-field rejection, `version`,
   `help`, `status` against a stopped service, the status and readiness
-  endpoints, container pairing with `enroll`, and a container that is unpaired
+  endpoints, `accept-backlog` opening, bounding and cancelling its window and
+  the window in status, container pairing with `enroll`, and a container that is unpaired
   without a token.
 - **End to end.** `runRelay` against fake Telrad listeners: it reaches `ready`,
   forwards an order and records its accession, delivers the matching report,

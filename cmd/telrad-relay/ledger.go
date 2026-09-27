@@ -119,6 +119,17 @@ func (store *ledger) append(accessions []string) error {
 	return nil
 }
 
+// recordAccessions appends accessions durably and publishes the outcome. The
+// caller forwards nothing that depends on them unless it returns nil.
+func (r *relay) recordAccessions(accessions []string) error {
+	if err := r.ledger.append(accessions); err != nil {
+		r.status.ledgerFailure(err)
+		return err
+	}
+	r.status.ledgerUpdated(r.ledger.count())
+	return nil
+}
+
 func (store *ledger) count() int {
 	store.mu.Lock()
 	defer store.mu.Unlock()

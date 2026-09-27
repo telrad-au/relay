@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"strconv"
@@ -147,17 +148,26 @@ func (r *relay) handleReport(ctx context.Context, message []byte) ([]byte, error
 		return nil, errors.New("report has no MSH-10")
 	}
 	accessions := report.accessions()
-	authorised := len(accessions) > 0
+	var unlisted []string
 	for _, accession := range accessions {
 		if !r.ledger.contains(accession) {
-			authorised = false
-			break
+			unlisted = append(unlisted, accession)
 		}
 	}
-	if !authorised {
+	if len(accessions) == 0 || (len(unlisted) > 0 && !r.acceptBacklog(unlisted)) {
 		r.status.reportRefused()
 		slog.Warn("report refused: accession not in ledger")
 		return composeAck(report, "AR", refusalText), nil
+	}
+	if len(unlisted) > 0 {
+		// Durable before the report reaches the RIS, as for an accepted order.
+		if err := r.recordAccessions(unlisted); err != nil {
+			slog.Error("ledger append failed; closing report pickup connection", "error", err)
+			return nil, fmt.Errorf("ledger append failed: %w", err)
+		}
+		for range unlisted {
+			slog.Info("report accepted under backlog acceptance; accession recorded in ledger")
+		}
 	}
 	reply, err := r.deliverReport(ctx, report, message)
 	if err != nil {
@@ -167,6 +177,16 @@ func (r *relay) handleReport(ctx context.Context, message []byte) ([]byte, error
 	}
 	r.status.reportDelivered()
 	return reply, nil
+}
+
+// acceptBacklog reports whether a clinic-opened backlog window admits
+// accessions that are not in the ledger. Values the ledger cannot hold are
+// never admitted.
+func (r *relay) acceptBacklog(accessions []string) bool {
+	if _, open := acceptBacklogUntil(r.cfg.dataPath(acceptBacklogFileName), time.Now()); !open {
+		return false
+	}
+	return len(recordableAccessions(accessions)) == len(accessions)
 }
 
 var errInvalidReceiverAck = errors.New("invalid receiver acknowledgement")
