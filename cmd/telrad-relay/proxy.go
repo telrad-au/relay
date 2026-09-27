@@ -252,12 +252,10 @@ func (r *relay) serveHL7(ctx context.Context, clinic net.Conn) {
 			mu.Unlock()
 			if known && code == "AA" && isOrderPlacement(order.orderControl) && len(order.accessions) > 0 {
 				// Durable before the RIS learns the order was accepted.
-				if err := r.ledger.append(order.accessions); err != nil {
+				if err := r.recordAccessions(order.accessions); err != nil {
 					slog.Error("ledger append failed; closing HL7 connection", "error", err)
-					r.status.ledgerFailure(err)
 					return
 				}
-				r.status.ledgerUpdated(r.ledger.count())
 			}
 			_ = clinic.SetWriteDeadline(time.Now().Add(frameTimeout))
 			if _, err := clinic.Write(frame); err != nil {

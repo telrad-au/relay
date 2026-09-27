@@ -49,6 +49,11 @@ func newTestPKI(t *testing.T) *testPKI {
 	return &testPKI{caKey: key, caCert: cert, pool: pool, serial: 1}
 }
 
+// caPEM is the CA certificate as Telrad sends it in telrad.caCertificate.
+func (pki *testPKI) caPEM() string {
+	return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: pki.caCert.Raw}))
+}
+
 func (pki *testPKI) serverCertificate(t *testing.T) tls.Certificate {
 	t.Helper()
 	key, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -132,9 +137,13 @@ func testConfig(t *testing.T, pki *testPKI) *config {
 	return cfg
 }
 
-// pairedStore writes an identity as if pairing had completed.
+// pairedStore writes an identity as if pairing had completed. Unless the
+// endpoints name a CA, the test CA is pinned for the data ports.
 func pairedStore(t *testing.T, cfg *config, pki *testPKI, endpoints telradEndpoints) *identityStore {
 	t.Helper()
+	if endpoints.CACertificate == "" {
+		endpoints.CACertificate = pki.caPEM()
+	}
 	store, err := openIdentity(cfg)
 	if err != nil {
 		t.Fatal(err)

@@ -6,6 +6,8 @@ import (
 	"context"
 	"crypto/tls"
 	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -364,5 +366,95 @@ func TestPickupShutdownFinishesReportInFlight(t *testing.T) {
 	}
 	if _, err := reader.ReadByte(); err == nil {
 		t.Fatal("pickup connection stayed open after shutdown")
+	}
+}
+
+// While the clinic's backlog window is open, the running pickup accepts a
+// report for accessions not in the ledger, records them durably first and
+// delivers the report unchanged. Once the window ends the gate is normal again
+// and the expired file is removed.
+func TestPickupAcceptBacklogRecordsUnlistedAccessions(t *testing.T) {
+	pki := newTestPKI(t)
+	port := newReportPort(t, pki)
+	r := newTestRelay(t, pki, nil, nil, port.listener)
+	receiver, received := startReceiver(t, func(message []byte) []byte { return ackFor(message, "AA") })
+	r.cfg.ReportPort = listenerPort(t, receiver)
+	if err := r.ledger.append([]string{"ACC0001"}); err != nil {
+		t.Fatal(err)
+	}
+	startPickup(t, r)
+	telrad := port.accept(t)
+	reader := bufio.NewReader(telrad)
+	unlisted := withControlID(strings.Replace(testReport, "|ACC0001|", "|ACC0002|", 1), "RPT0002")
+	if ack := mllpExchange(t, telrad, reader, []byte(unlisted)); !strings.Contains(string(ack), "MSA|AR|RPT0002|"+refusalText) {
+		t.Fatalf("unlisted report accepted without a window: %q", ack)
+	}
+
+	// Opened while the service runs; no restart.
+	backlog := filepath.Join(r.cfg.DataDir, acceptBacklogFileName)
+	if _, err := openAcceptBacklog(backlog, 1, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if ack := mllpExchange(t, telrad, reader, []byte(unlisted)); !bytes.Equal(ack, ackFor([]byte(unlisted), "AA")) {
+		t.Fatalf("backlog report not delivered: %q", ack)
+	}
+	if !bytes.Equal(received.last(), []byte(unlisted)) {
+		t.Fatal("backlog report altered on the way to the receiver")
+	}
+	multi := withControlID(testReport+"OBR|2|PLACER0003|FILLER0003|CT003^CT Neck||||||||||||||ACC0003|||||||F\r", "RPT0003")
+	if ack := mllpExchange(t, telrad, reader, []byte(multi)); !bytes.Equal(ack, ackFor([]byte(multi), "AA")) {
+		t.Fatalf("partly listed backlog report not delivered: %q", ack)
+	}
+	noAccession := strings.Replace(testReport, "|ACC0001|", "||", 1)
+	if ack := mllpExchange(t, telrad, reader, []byte(noAccession)); !strings.Contains(string(ack), "MSA|AR|") {
+		t.Fatalf("report without accession accepted under backlog: %q", ack)
+	}
+	data, err := os.ReadFile(filepath.Join(r.cfg.DataDir, ledgerFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "ACC0001\nACC0002\nACC0003\n" || r.status.snapshot().LedgerEntries != 3 {
+		t.Fatalf("ledger=%q", data)
+	}
+
+	// An expired window admits nothing and is removed when found.
+	if err := os.WriteFile(backlog, []byte(`{"until":"`+time.Now().Add(-time.Minute).UTC().Format(time.RFC3339)+`"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	late := withControlID(strings.Replace(testReport, "|ACC0001|", "|ACC0004|", 1), "RPT0004")
+	if ack := mllpExchange(t, telrad, reader, []byte(late)); !strings.Contains(string(ack), "MSA|AR|RPT0004|"+refusalText) {
+		t.Fatalf("report accepted after the window: %q", ack)
+	}
+	if _, err := os.Stat(backlog); !os.IsNotExist(err) {
+		t.Fatalf("expired window file kept: %v", err)
+	}
+	if received.count() != 2 || r.ledger.contains("ACC0004") {
+		t.Fatalf("receiver saw %d reports", received.count())
+	}
+}
+
+// A backlog accession that cannot be recorded is never delivered: the pickup
+// connection closes without an acknowledgement and Telrad retries.
+func TestPickupAcceptBacklogLedgerFailureClosesWithoutDelivery(t *testing.T) {
+	pki := newTestPKI(t)
+	port := newReportPort(t, pki)
+	r := newTestRelay(t, pki, nil, nil, port.listener)
+	receiver, received := startReceiver(t, func(message []byte) []byte { return ackFor(message, "AA") })
+	r.cfg.ReportPort = listenerPort(t, receiver)
+	if _, err := openAcceptBacklog(filepath.Join(r.cfg.DataDir, acceptBacklogFileName), 1, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	r.ledger.file.Close()
+	startPickup(t, r)
+	telrad := port.accept(t)
+	if _, err := telrad.Write(frameMessage([]byte(testReport))); err != nil {
+		t.Fatal(err)
+	}
+	_ = telrad.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if _, err := telrad.Read(make([]byte, 1)); err == nil {
+		t.Fatal("report acknowledged although its accession was not recorded")
+	}
+	if received.count() != 0 || r.status.snapshot().LedgerError == "" {
+		t.Fatal("report delivered or ledger failure not shown")
 	}
 }

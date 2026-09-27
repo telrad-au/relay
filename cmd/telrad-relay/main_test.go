@@ -226,3 +226,87 @@ func TestEnrollCommandPairsContainer(t *testing.T) {
 		t.Fatalf("second enroll: %v %q", err, out.String())
 	}
 }
+
+func writeTestConfig(t *testing.T, dataDir string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "relay.json")
+	config := `{"schemaVersion":6,"reportHost":"ris.local","dataDir":` + strconv.Quote(dataDir) + `}`
+	if err := os.WriteFile(path, []byte(config), 0600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestAcceptBacklogCommandOpensAndCancelsWindow(t *testing.T) {
+	dataDir := t.TempDir()
+	path := writeTestConfig(t, dataDir)
+	backlog := filepath.Join(dataDir, acceptBacklogFileName)
+	var out bytes.Buffer
+	before := time.Now()
+	if err := execute([]string{"--config", path, "accept-backlog"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	until, open := acceptBacklogUntil(backlog, time.Now())
+	if !open || until.Before(before.Add(72*time.Hour-time.Second)) || until.After(time.Now().Add(72*time.Hour)) {
+		t.Fatalf("default window ends %v", until)
+	}
+	if !strings.Contains(out.String(), "open until "+until.Format(time.RFC3339)+" (72 hours)") {
+		t.Fatalf("out=%q", out.String())
+	}
+	assertPrivateFileMode(t, backlog)
+	var stored map[string]string
+	data, _ := os.ReadFile(backlog)
+	if err := json.Unmarshal(data, &stored); err != nil || len(stored) != 1 || stored["until"] != until.Format(time.RFC3339) {
+		t.Fatalf("file=%s", data)
+	}
+
+	out.Reset()
+	if err := execute([]string{"--config", path, "accept-backlog", "--hours", "5"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	if until, _ := acceptBacklogUntil(backlog, time.Now()); time.Until(until) > 5*time.Hour {
+		t.Fatalf("--hours 5 window ends %v", until)
+	}
+	for _, args := range [][]string{{"--hours", "0"}, {"--hours", "169"}, {"--hours", "5", "--cancel"}, {"extra"}, {"--hours", "x"}} {
+		if err := execute(append([]string{"--config", path, "accept-backlog"}, args...), &bytes.Buffer{}); err == nil {
+			t.Fatalf("accept-backlog %v accepted", args)
+		}
+	}
+	out.Reset()
+	if err := execute([]string{"--config", path, "accept-backlog", "--cancel"}, &out); err != nil || !strings.Contains(out.String(), "closed") {
+		t.Fatalf("cancel: %v %q", err, out.String())
+	}
+	if _, err := os.Stat(backlog); !os.IsNotExist(err) {
+		t.Fatal("cancel left the window file")
+	}
+	if err := execute([]string{"--config", path, "accept-backlog", "--cancel"}, &bytes.Buffer{}); err != nil {
+		t.Fatalf("cancel without a window: %v", err)
+	}
+}
+
+func TestStatusShowsAcceptBacklogWindow(t *testing.T) {
+	pki := newTestPKI(t)
+	r := newTestRelay(t, pki, nil, nil, nil)
+	encoded, _ := json.Marshal(r.status.snapshot())
+	if !strings.Contains(string(encoded), `"acceptBacklogUntil":null`) {
+		t.Fatalf("status without a window: %s", encoded)
+	}
+	until, err := openAcceptBacklog(filepath.Join(r.cfg.DataDir, acceptBacklogFileName), 72, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	report := r.status.snapshot()
+	if report.AcceptBacklogUntil == nil || !report.AcceptBacklogUntil.Equal(until) {
+		t.Fatalf("acceptBacklogUntil=%v", report.AcceptBacklogUntil)
+	}
+	var out bytes.Buffer
+	printStatus(&out, &report, "relay.json")
+	if !strings.Contains(out.String(), "backlog acceptance: open until "+until.Format(time.RFC3339)) {
+		t.Fatalf("status output:\n%s", out.String())
+	}
+	out.Reset()
+	printStatus(&out, &statusReport{State: "ready", Paired: true}, "relay.json")
+	if strings.Contains(out.String(), "backlog") {
+		t.Fatal("closed window printed")
+	}
+}

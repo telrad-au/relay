@@ -52,8 +52,10 @@ The report receiver must be reachable from the container:
 - add `host.docker.internal:host-gateway` on Linux when that topology is
   explicitly chosen.
 
-Relay verifies Telrad's certificates with the CA roots in the image. Do not add
-a private CA to bypass certificate errors.
+Relay verifies the enrolment endpoint with the CA roots in the image, and
+Telrad's DICOM, HL7 and report ports against the Telrad Relay CA only, which it
+receives when pairing and keeps in the volume. Do not add a private CA to the
+image to bypass certificate errors.
 
 ## Health
 
@@ -66,7 +68,8 @@ docker compose exec relay telrad-relay status
 
 The command prints the state (`pairing`, `ready` or `degraded`), the report
 receiver (`NOT CONFIGURED` if `TELRAD_RELAY_REPORT_HOST` is the placeholder
-`report-receiver.invalid`), certificate expiry, listener and pickup state, report counts and the ledger entry count. It
+`report-receiver.invalid`), the end of an open backlog acceptance window,
+certificate expiry, listener and pickup state, report counts and the ledger entry count. It
 exits non-zero when the service's status endpoint cannot be reached; it does
 not exit non-zero for `degraded`.
 
@@ -80,10 +83,39 @@ report delivery already under way finish for up to 90 seconds. Keep
 `stop_grace_period` above that. Relay does not replay an interrupted DICOM
 association; the PACS resends.
 
+## Backlog acceptance
+
+To let Telrad deliver reports for orders the ledger does not know, for example
+after the Relay host is replaced, open a backlog acceptance window against the
+same volume while the service runs:
+
+```bash
+docker compose run --rm relay accept-backlog --hours 72
+```
+
+`--hours` is 1 to 168 and defaults to 72. The command writes
+`accept-backlog.json` to the volume and prints when the window ends; the
+running container picks it up with the next report, without a restart. Until
+then a report whose accession numbers are not all in the ledger is delivered,
+and each missing accession number is appended to `accessions.ledger` and synced
+before the report is sent to the RIS. `status` shows the window while it is
+open. It closes by itself; close it early with:
+
+```bash
+docker compose run --rm relay accept-backlog --cancel
+```
+
+There is no environment variable for this: opening a window is a deliberate
+operator action. While it is open Relay accepts every report Telrad sends for
+the company, so open it only when a backlog is expected.
+
 ## Certificate renewal
 
 Renewal is automatic from 30 days before the 90-day certificate expires and is
-retried daily after a failure. If the certificate expires, the Relay must be
+retried daily after a failure. Renewal requests are signed with the current key
+and may also replace the Telrad Relay CA certificate. A volume whose
+`identity.json` predates the pinned CA is treated as unpaired; pair it with a
+new token. If the certificate expires, the Relay must be
 paired again: stop the container, remove `identity.json` from the volume (keep
 `accessions.ledger`), and repeat [first pairing](#first-pairing) with a new
 token.
@@ -106,17 +138,28 @@ recreate the service the same way.
 
 ## Backup
 
-Back up the `telrad-relay-data` volume. It contains:
+Back up `accessions.ledger` from the `telrad-relay-data` volume. It is the
+report authorisation record and holds no key material. If it is lost, reports
+for orders placed before the loss are refused until the RIS resends those
+orders or the clinic opens a [backlog acceptance](#backlog-acceptance) window.
 
-- `identity.json`: the Relay's private key and certificate. Protect the backup
-  as a secret. Restoring it on another host makes that host this Relay; run
-  only one container per identity.
-- `accessions.ledger`: the report authorisation record. If it is lost, reports
-  for orders placed before the loss are refused until the RIS resends those
-  orders.
+Do not back up or restore `identity.json`. It is the Relay's private key: a
+restored copy on another host makes two hosts one Relay, and an old copy may
+hold an expired certificate.
 
-A backup older than the current certificate may hold an expired certificate;
-the Relay then has to be paired again, but the ledger remains useful.
+To replace a lost host:
+
+1. Copy any ledger backup into the new volume before starting the container.
+   Never restore `identity.json`.
+2. Pair the new container with a new token.
+3. Have a company administrator choose **Replace** on the old Relay in
+   Telrad's settings. Telrad revokes the old Relay and moves every outstanding
+   and failed report delivery onto the replacement, which it retries.
+4. Run `docker compose run --rm relay accept-backlog --hours 72` so those
+   reports are accepted and their accessions recorded.
+
+Telrad retries a report Relay answers with `AR` or `AE` on its normal backoff,
+about eight attempts over two days.
 
 ## Removal
 

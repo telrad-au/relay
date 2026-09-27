@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/x509"
 	"net"
 	"os"
 	"path/filepath"
@@ -402,4 +403,34 @@ func TestHL7Latin1OrderIsForwardedUnchangedAndRecorded(t *testing.T) {
 	if !r.ledger.contains("ACC0001") {
 		t.Fatal("ISO 8859-1 order not recorded")
 	}
+}
+
+// The data ports trust only the Telrad Relay CA pinned at pairing: a server
+// the enrolment trust store accepts is refused when the pinned CA differs.
+func TestDataPortsTrustOnlyThePinnedTelradCA(t *testing.T) {
+	pki := newTestPKI(t)
+	dicom := pki.mutualTLSListener(t)
+	echoServer(t, dicom)
+	cfg := testConfig(t, pki) // the enrolment roots trust the listener
+	other := newTestPKI(t)
+	endpoints := telradEndpoints{Host: "127.0.0.1", DicomPort: listenerPort(t, dicom), HL7Port: 1, ReportPort: 1, CACertificate: other.caPEM()}
+	store := pairedStore(t, cfg, pki, endpoints)
+	r := &relay{cfg: cfg, store: store, status: newStatusServer(cfg, store, nil)}
+	conn, err := r.dialTelrad(context.Background(), endpoints.DicomPort, "dicom")
+	if err == nil {
+		conn.Close()
+		t.Fatal("data port accepted a server outside the pinned CA")
+	}
+	if got := safeNetworkError(err).Error(); got != "tls_verification_failed" {
+		t.Fatalf("err=%s", got)
+	}
+
+	cfg.rootCAs = x509.NewCertPool() // enrolment roots trust nothing; the pin suffices
+	pinned := pairedStore(t, cfg, pki, telradEndpoints{Host: "127.0.0.1", DicomPort: endpoints.DicomPort, HL7Port: 1, ReportPort: 1})
+	r = &relay{cfg: cfg, store: pinned, status: newStatusServer(cfg, pinned, nil)}
+	conn, err = r.dialTelrad(context.Background(), endpoints.DicomPort, "dicom")
+	if err != nil {
+		t.Fatalf("pinned CA refused: %v", err)
+	}
+	conn.Close()
 }
