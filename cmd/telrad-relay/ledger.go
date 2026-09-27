@@ -24,8 +24,12 @@ type ledger struct {
 // openLedger loads every complete line. A final line without its newline is
 // the remains of an append that never synced, so its acknowledgement was
 // never forwarded; it is truncated rather than trusted or extended.
+//
+// The file is deliberately not opened with O_APPEND: on Windows such a handle
+// lacks write-data access and cannot be truncated. Appends instead write at the
+// tracked end offset under the mutex, and this process is the only writer.
 func openLedger(path string) (*ledger, error) {
-	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE|os.O_APPEND, 0600)
+	file, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0600)
 	if err != nil {
 		return nil, err
 	}
@@ -99,7 +103,7 @@ func (store *ledger) append(accessions []string) error {
 		builder.WriteString(accession)
 		builder.WriteByte('\n')
 	}
-	written, err := store.file.WriteString(builder.String())
+	written, err := store.file.WriteAt([]byte(builder.String()), store.size)
 	if err == nil {
 		err = store.file.Sync()
 	}

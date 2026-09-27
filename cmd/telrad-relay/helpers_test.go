@@ -12,7 +12,9 @@ import (
 	"encoding/pem"
 	"math/big"
 	"net"
+	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -346,3 +348,19 @@ func waitFor(t *testing.T, condition func() bool) {
 }
 
 func bufioReader(conn net.Conn) *bufio.Reader { return bufio.NewReader(conn) }
+
+// assertPrivateFileMode checks that path is readable by its owner only. Windows
+// reports ACL-governed files as 0666, so the Unix mode bits are not checked there.
+func assertPrivateFileMode(t *testing.T, path string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		return
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perm := info.Mode().Perm(); perm != 0600 {
+		t.Fatalf("%s permissions=%o", filepath.Base(path), perm)
+	}
+}

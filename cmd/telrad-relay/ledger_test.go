@@ -29,10 +29,7 @@ func TestLedgerAppendReloadAndDuplicates(t *testing.T) {
 	if string(data) != "ACC1\nACC2\n" {
 		t.Fatalf("file=%q", data)
 	}
-	info, _ := os.Stat(path)
-	if perm := info.Mode().Perm(); perm != 0600 {
-		t.Fatalf("permissions=%o", perm)
-	}
+	assertPrivateFileMode(t, path)
 	reloaded, err := openLedger(path)
 	if err != nil {
 		t.Fatal(err)
@@ -53,7 +50,7 @@ func TestLedgerAppendReloadAndDuplicates(t *testing.T) {
 // never forwarded. It must not authorise anything or absorb the next entry.
 func TestLedgerTruncatesUnsyncedPartialLine(t *testing.T) {
 	path := filepath.Join(t.TempDir(), ledgerFileName)
-	if err := os.WriteFile(path, []byte("ACC1\nACC2\nACC12"), 0600); err != nil {
+	if err := os.WriteFile(path, []byte("ACC1\nACC2\nACC12345"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	store, err := openLedger(path)
@@ -61,8 +58,11 @@ func TestLedgerTruncatesUnsyncedPartialLine(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.close()
-	if !store.contains("ACC1") || !store.contains("ACC2") || store.contains("ACC12") || store.count() != 2 {
+	if !store.contains("ACC1") || !store.contains("ACC2") || store.contains("ACC12345") || store.count() != 2 {
 		t.Fatal("partial line trusted")
+	}
+	if data, _ := os.ReadFile(path); string(data) != "ACC1\nACC2\n" {
+		t.Fatalf("partial line kept: file=%q", data)
 	}
 	if err := store.append([]string{"ACC3"}); err != nil {
 		t.Fatal(err)

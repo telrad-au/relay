@@ -147,13 +147,7 @@ func TestPairWithTokenAndReload(t *testing.T) {
 	if !store.paired() || store.relayID() != "relay-token" || store.endpoints() != fake.endpoints {
 		t.Fatalf("store=%+v", store.current)
 	}
-	info, err := os.Stat(filepath.Join(cfg.DataDir, identityFileName))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if info.Mode().Perm() != 0600 {
-		t.Fatalf("identity permissions=%o", info.Mode().Perm())
-	}
+	assertPrivateFileMode(t, filepath.Join(cfg.DataDir, identityFileName))
 	reloaded, err := openIdentity(cfg)
 	if err != nil {
 		t.Fatal(err)
