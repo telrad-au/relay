@@ -222,7 +222,7 @@ func TestStableWorkflowUsesOIDCBackedArtifactSigning(t *testing.T) {
 		"secrets.AZURE_ARTIFACT_SIGNING_CERTIFICATE_PROFILE_NAME",
 		"timestamp-rfc3161: http://timestamp.acs.microsoft.com",
 		"scripts/verify-windows-signature.ps1",
-		"scripts/finalize-signed-release.sh",
+		"scripts/write-checksums.sh",
 	} {
 		if !strings.Contains(workflow, required) {
 			t.Fatalf("stable workflow does not contain Azure Artifact Signing contract %q", required)
@@ -247,7 +247,6 @@ func TestWorkflowsDoNotPersistCheckoutCredentials(t *testing.T) {
 		"../../.github/workflows/codeql.yml",
 		"../../.github/workflows/publish-prerelease.yml",
 		"../../.github/workflows/publish-release.yml",
-		"../../.github/workflows/publish-testing.yml",
 	} {
 		content, err := os.ReadFile(relativePath)
 		if err != nil {
@@ -269,9 +268,7 @@ func TestReleaseSigningJobsCannotPublish(t *testing.T) {
 		publishingJob string
 		secret        string
 	}{
-		{"../../.github/workflows/publish-release.yml", "    sign-native:", "    publish:", "secrets.RELAY_UPDATE_SIGNING_KEY_BASE64"},
-		{"../../.github/workflows/publish-prerelease.yml", "    build_native:", "    publish:", "secrets.RELAY_DEV_UPDATE_SIGNING_KEY_BASE64"},
-		{"../../.github/workflows/publish-testing.yml", "    build:", "    publish:", "secrets.RELAY_TESTING_UPDATE_SIGNING_KEY_BASE64"},
+		{"../../.github/workflows/publish-release.yml", "    sign-native:", "    publish:", "secrets.AZURE_ARTIFACT_SIGNING_CLIENT_ID"},
 	}
 	for _, test := range tests {
 		content, err := os.ReadFile(test.path)
@@ -292,8 +289,8 @@ func TestReleaseSigningJobsCannotPublish(t *testing.T) {
 		if strings.Contains(signing, "contents: write") || strings.Contains(signing, "packages: write") {
 			t.Fatalf("%s signing job has publication permissions", test.path)
 		}
-		if strings.Contains(publishing, "secrets.RELAY_") {
-			t.Fatalf("%s publication job receives a Relay private key", test.path)
+		if strings.Contains(publishing, "secrets.") {
+			t.Fatalf("%s publication job receives a signing secret", test.path)
 		}
 	}
 }
@@ -302,7 +299,6 @@ func TestMutableReleaseChannelsAreSerialized(t *testing.T) {
 	for path, group := range map[string]string{
 		"../../.github/workflows/publish-prerelease.yml": "group: publish-prerelease",
 		"../../.github/workflows/publish-release.yml":    "group: publish-stable",
-		"../../.github/workflows/publish-testing.yml":    "group: publish-testing-main",
 	} {
 		content, err := os.ReadFile(path)
 		if err != nil {

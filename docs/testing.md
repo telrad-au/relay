@@ -1,18 +1,7 @@
 # Relay testing
 
-The optional AWS runner has local tests that create no cloud resources or traffic:
-
-```bash
-npm ci --ignore-scripts --prefix tools/relay-perf/aws
-npm test --prefix tools/relay-perf/aws
-python3 -m unittest discover -s tools/relay-perf/aws -p 'test_*.py'
-```
-
-See [performance qualification](performance.md#disposable-aws-screening) for the
-explicit command that provisions, measures and removes two isolated AWS VMs.
-
-The default suite uses local loopback TLS/HTTP, MLLP, and byte-level DICOM
-fixtures. Tests contain synthetic identifiers only.
+The Go suite runs entirely on loopback. It needs no Docker, cloud account or
+network access, and uses synthetic identifiers and payloads only.
 
 ```bash
 go test -race ./...
@@ -22,263 +11,61 @@ scripts/check-licenses.sh
 scripts/check-publication.sh
 ```
 
-Some managed development environments require permission for loopback sockets;
-that is an environment restriction, not a product failure.
+Use the Go version pinned by `.github/workflows/ci.yml`. Some managed
+development environments restrict loopback sockets; that is an environment
+restriction, not a product failure.
 
-## Performance measurements
+## Fake Telrad
 
-[Performance qualification](performance.md) defines the frozen synthetic profile,
-benchmark commands, constrained release-container smoke, fault checks, native
-observations and the evidence required before publishing minimum requirements.
-CI includes benchmark smoke execution and a bounded constrained-resource check;
-long qualification is explicit and has no shared-runner throughput gate. The
-shared HL7 fixtures live in `internal/synthetic/hl7` and remain independently
-validated with HAPI.
+Each test creates a throwaway certificate authority standing in for Telrad's.
+It issues the fake Telrad listeners' server certificates and signs Relay's
+certificate requests the way the enrolment endpoint would. The fake DICOM, HL7
+and report listeners require a client certificate from that authority, so every
+test that forwards traffic exercises mutual TLS. No private key or certificate
+is checked in; all are generated at run time.
 
-## Contract coverage
+## What the tests cover
 
-Pairing and credentials cover HTTP `201`, locally derived endpoint paths,
-legacy endpoint equality, content types, redirect rejection, authorization
-cardinality, response body bounds, secret-safe errors, file modes, transaction
-recovery, legacy migration, durable renewal-operation recovery, concurrent
-renewal serialization, expiry scheduling, atomic generation replacement, and
-live provider adoption without canceling active work.
+- **Pass-through.** DICOM bytes out equal DICOM bytes in over mutual TLS,
+  including half-close; a clinic connection is closed when Telrad cannot be
+  reached; Telrad refuses a client without a Relay certificate; connections
+  beyond the limit are refused at accept.
+- **HL7 orders and the ledger.** Accessions are recorded only after `AA` to an
+  `NW` or `XO` order; `AE`, `AR` and other order controls record nothing, and a
+  cancellation does not remove an entry; multi-`OBR` orders record every
+  accession; pipelined messages correlate by `MSA-2` rather than arrival
+  order; a ledger write failure closes the connection without
+  forwarding the `AA`; malformed frames close both sides. MLLP framing, frame
+  limits, field parsing with custom separators and multiple `OBR` segments, and
+  composed acknowledgements are tested directly.
+- **Ledger file.** Appends, duplicate suppression, reload at start and file
+  mode `0600`.
+- **Report pickup.** An authorised report reaches the receiver unchanged and the
+  receiver's `AA` or `AR` is returned byte for byte; unknown, partly known and
+  missing accessions are refused with `AR` without contacting the receiver; an
+  unreachable receiver or an invalid acknowledgement produces `AE`; pickup
+  reconnects after a dropped connection and after certificate renewal; a
+  protocol error closes the connection.
+- **Pairing and renewal.** Token and link pairing against a loopback enrolment
+  server, identity reload and file mode, renewal authenticated by the current
+  certificate, renewal inside the 30-day window, rejection of redirects and bad
+  responses, and rejection of a corrupt identity file.
+- **Configuration and CLI.** Defaults, file and environment precedence,
+  environment variable names, validation, unknown-field rejection, `version`,
+  `help`, `status` against a stopped service, the status and readiness
+  endpoints, container pairing with `enroll`, and a container that is unpaired
+  without a token.
+- **End to end.** `runRelay` against fake Telrad listeners: it reaches `ready`,
+  forwards an order and records its accession, delivers the matching report,
+  forwards DICOM bytes and shuts down cleanly.
 
-HL7 coverage keeps one clinic MLLP socket across sequential exchanges and
-asserts one HTTPS request per message. It checks exact framing, UTF-8,
-`MSH-10`/`MSA-2` correlation, `AA`/`AE`/`AR`, byte-for-byte ACK return, limits,
-concurrency, cancellation, retryable statuses, both `Retry-After` forms, and
-reuse of the exact request body and idempotency key.
+## CI only
 
-MLLP framing and HL7 field-parser benchmarks cover the 1 KiB through 8 MiB
-configuration range, plus representative ACK sizes up to the 64 KiB cloud
-response limit:
+The Windows service, the Linux and Windows installers and the container image
+are exercised in CI on disposable runners, not by `go test` on a development
+machine. Cross-compiling for Windows does not exercise the Service Control
+Manager, and the Linux suite does not exercise systemd. Do not run installer
+tests on a clinic host.
 
-```bash
-go test ./cmd/telrad-relay -run '^$' \
-  -bench '^(BenchmarkReadMLLPFrame|BenchmarkHL7ControlID|BenchmarkHL7Acknowledgement)$' \
-  -benchmem
-```
-
-Report-return coverage checks authenticated HTTPS session creation, trusted
-transport metadata, lost result responses, identical result replay without
-another MLLP send, retransmission under a new cloud claim, correlated application
-ACKs, shutdown draining, and absence of a local ledger. Schema upgrade tests
-check credential preservation, idempotence and rejection of foreign endpoints.
-The Telrad API conformance suite separately covers atomic claims, lease expiry,
-late and superseded results, idempotent failure accounting, session replacement,
-TEST mode, and manual retry routing.
-
-DICOM fixtures construct UL PDUs and DIMSE command sets directly. Tests cover
-acceptance of arbitrary valid called AE titles, existing whitespace-padding
-tolerance, rejection of blank titles and invalid characters within titles,
-exact AE title echo in association responses, presentation-context choice, C-ECHO,
-C-STORE, release/abort, multiple sequential stores, command and PDU bounds,
-deterministic Part 10 file meta, every supported transfer syntax, unchanged
-dataset bytes, repeated identical and byte-different arrivals sharing a SOP
-Instance UID, the absence of DICOM idempotency headers or hidden retries, fresh
-HTTP `201` receipts, DIMSE status mappings, backpressure, disconnect
-cancellation, total size accounting, drain behavior, and the rule that success
-cannot precede a valid cloud receipt.
-
-CI also runs a blocking Orthanc-backed interoperability test in the required
-`Test and build` job. It uses the test-only image
-`jodogne/orthanc-plugins:1.12.11@sha256:e7bffe0351cd391eacab8e78098e236efe6cafed987830e9b462b2050a0eae4a`,
-creates deterministic PHI-free Secondary Capture fixtures, and sends Explicit
-VR Little Endian plus JPEG Lossless SV1 over a real TCP C-STORE association
-addressed to `CLINIC_ARCHIVE` to exercise a called AE title other than `TELRAD`.
-The harness records fragmented dataset PDVs before Relay, compares them
-byte-for-byte with the dataset in Relay's HTTPS Part 10 body, and imports the
-result into a second clean Orthanc instance to validate the SOP identifiers,
-transfer syntax, and representative tags. A separate test-only dcm4che
-5.33.1 image pinned at
-`dcm4che/dcm4che-tools:5.33.1@sha256:c8fbede4a6cf6047370ad21ce12fcc6be7ab013ff4996f1d032eb55239f870ed`
-validates the captured objects against the checked-in Secondary Capture IOD
-profile and independently decodes both transfer syntaxes. The decoded pixels
-must exactly match the deterministic 512x512 source image. Relay returns
-C-STORE success only after the fake HTTPS cloud supplies a valid receipt.
-
-The Docker-backed test is opt-in locally and has bounded startup, execution,
-and cleanup timeouts:
-
-```bash
-TELRAD_ORTHANC_INTEROP_TEST=1 \
-go test -race ./cmd/telrad-relay \
-  -run '^TestOrthancDICOMPayloadIntegrity$' -count=1 -timeout=5m
-```
-
-HL7 listener coverage sends a non-trivial synthetic UTF-8 message through a
-real TCP/MLLP connection and asserts that the HTTPS request body is exactly the
-original message without its MLLP envelope. Retry coverage separately asserts
-that the first HTTPS body and every retry remain byte-identical to that original
-message while retaining the same idempotency key. CI also validates the shared
-ORU^R01 and ACK fixtures against checked-in HL7 v2.5 conformance profiles with
-HAPI HL7 2.6.0 in the test-only image
-`maven:3.9.11-eclipse-temurin-21@sha256:6fdc855a6ed81d288ca7ca37ac6ff5e9308b612485c0801d70b25a858c83d237`.
-The validator checks the report and application acknowledgements, and proves
-that the previous missing and shifted OBR/OBX fields are rejected.
-
-Run the independent fixture validation locally with:
-
-```bash
-scripts/check-hl7-fixtures.sh
-```
-
-The integration cloud uses HTTPS bearer authentication. No fixture contains a
-private certificate authority, client identity, custom ALPN, or raw TCP ingest
-proxy.
-
-## Preview conformance
-
-Preview conformance is opt-in and PHI-free:
-
-```bash
-TELRAD_RELAY_PREVIEW_TEST=1 \
-TELRAD_RELAY_PREVIEW_CREDENTIAL='trr_v1_...' \
-go test ./cmd/telrad-relay -run TestPreviewConformance -count=1
-```
-
-If the credential is absent or malformed, the test explicitly reports that it
-was unavailable and skips. Never place the credential in source, shell history,
-CI logs, or a checked-in environment file.
-
-## Release matrix
-
-Before a release, also verify CGO-disabled Linux amd64, Linux arm64, and Windows
-amd64 builds; Docker build and Compose rendering; hosted installer tests;
-signed and unsigned bundle rejection/acceptance; piped Windows installer
-execution and current-session PATH activation; the Windows Authenticode,
-timestamp, and signer-pin verifier; Ed25519 manifest verification; and
-publication/licence audits. These
-checks build artifacts only and do not authorize publishing, tagging, deploying,
-or promoting an image.
-
-CI exercises `scripts/build-signed-release.sh` with an ephemeral self-signed PFX
-only to test the Authenticode, installer-pin, and bundle-finalization contracts.
-The production workflow never uses that PFX path: Azure Artifact Signing signs
-the Windows executable before `scripts/finalize-signed-release.sh` applies the
-Relay update signatures.
-
-## Native privilege boundaries
-
-The suite covers malformed and injected recovery paths, link replacement races,
-read-only command behavior, unauthorized/malformed local IPC, serialized credential
-operations, unpaired management startup, and independent signature verification at
-the update privilege boundary. Windows adds Known Folder environment isolation,
-ancestor-junction rejection, private backup creation ACLs, replacement while the
-original CLI image remains running, and identification-only named-pipe client tests.
-Fresh Windows directory tests use a parent with inherited public write access and
-verify that managed directories are protected at creation; existing unsafe
-installation directories and junctions remain rejected without permission changes.
-ACL repair tests cover real file and directory handles, reject hard-linked targets,
-and verify that directory repair does not change existing child permissions.
-A real PowerShell subprocess test verifies that nested installation errors remain
-plain text so an outer PowerShell installer can capture the failure.
-
-CI uses `scripts/check-native-installation.sh` on its disposable Linux runner and
-`packaging/install-native.Tests.ps1` on its disposable Windows runner. These install
-at the real managed paths and exercise service identities, unpaired startup,
-configuration preservation, stopped-service repair, and malicious state links.
-The installed lifecycle test pairs against a synthetic HTTPS server, renews and
-replaces the live identity, installs a signed candidate, and verifies rollback
-and enrollment preservation when a signed candidate reports the wrong version.
-The failing update must finish rollback before returning a nonzero result. Native
-tests also exercise service-setting/link restoration and fresh Windows installation
-rollback after firewall setup fails.
-The Windows rollback check requires the firewall-specific error so an earlier
-installation failure cannot pass it. The disposable Ubuntu CI runner restores
-root ownership and mode `0755` on `/usr/local/bin`, which its image makes
-world-writable for npm. The production installer still rejects writable paths.
-The lifecycle test's temporary CA stays on the disposable host and is removed afterward.
-They require `TELRAD_NATIVE_INSTALL_TEST=1`; do not run them on a clinic host.
-Cross-compilation alone does not validate SCM, UAC, Windows ACLs, or systemd.
-
-The Linux coverage gate combines race-enabled unit, installed-process and
-performance-helper coverage using Go's `covdata merge -pcombine` command. All collect binary coverage data;
-the existing 69% total threshold still applies.
-
-Container builds use `-tags relay_container`. CI checks the dependency exclusion,
-non-root UID, read-only root filesystem, and absence of native-service assumptions.
-
-## Retrieval v2
-
-The default race suite exercises the real strict Go verifier with the shared
-synthetic v2 vectors, independently signed malformed data, trust retirement,
-source-IP restrictions, multiple OBRs, cancellation, exact MLLP ACKs, immutable
-transport retries, per-attempt study confirmation, DIMSE/object validation,
-separate duplicate uploads, failed receipts, expiry cancellation and restart
-with later matching Study UIDs. Configuration migration keeps push defaults.
-Fixtures contain synthetic public verification vectors only; private test keys
-are generated at runtime. The vector seed is intentionally excluded.
-
-Run actual-binary Orthanc interoperability on a disposable Linux Docker host:
-
-```sh
-TELRAD_RETRIEVAL_ORTHANC_TEST=1 go test -race ./cmd/telrad-relay \
-  -run '^TestRetrievalOrthancBinaryRestart$' -count=1 -timeout=4m -v
-```
-
-This builds and starts the actual Relay process, runs real Orthanc C-FIND/C-GET
-over loopback DICOM associations, sends an MLLP referral, receives the ACK, observes
-study selection and uploads, stops Relay, adds another matching study, and repeats
-using the original permit. Relay's inbound DICOM port is deliberately unavailable;
-the listener is disabled. Only credentials, configuration, key and nonclinical
-runtime status survive. The container uses the pinned Orthanc image documented
-above with DICOM on a dynamically published loopback port. It retrieves both
-native little-endian transfer syntaxes without patient or issuer tags.
-All fixture containers are removed. This test uses a synthetic cloud HTTP server.
-
-**Activation gate:** passing this harness and the real cloud conformance suite
-separately does not qualify their combined deployment. Before enabling retrieval,
-run the actual Relay against the real cloud HTTPS ingestion/definitive receipt
-pipeline and this PACS profile, including restart and late studies. Verify cloud
-readiness, not merely an uploaded result. Record the exact source commit, binary
-version/digest, PACS version/configuration, study/inventory outcomes and recovery
-review. Qualify vendor completion evidence, in-progress/error states and expected
-SOP mismatch on any adapter that provides that information; the DIMSE
-profile supports only completion-unavailable/order fallback.
-
-The native Linux/Windows install-and-rollback jobs and container build remain
-required before release. Cross-builds and simulated installer tests do not prove
-Windows SCM/ACL or installed systemd behavior on a production clinic host.
-
-## Report authorization
-
-The race suite checks source approval in Push mode, cancellations, local trust
-retirement, changed destinations, TEST isolation, cross-purpose signatures,
-accession mismatch, alternate identifiers, multiple orders and message injection.
-Forbidden reports must fail before any RIS TCP connection. Existing polling and
-benchmark fixtures carry independently generated report permits. The container
-performance harness generates a separate ephemeral signing authority in its
-private worker configuration and protected synthetic Relay state. Exported
-configuration contains no key or authorization settings. Its report fixture
-uses OBR-18; the inbound HL7 integrity fixture retains its original identifiers.
-
-The cloud conformance suite includes an opt-in actual-binary test. Build Relay,
-then run in the Telrad cloud checkout:
-
-```sh
-RELAY_REPORT_TEST_BINARY=/absolute/path/to/telrad \
-scripts/test-api-conformance.sh apps/api/src/conformance/suite-relay-report-binary.test.ts
-```
-
-The harness uses disposable PostgreSQL/Redis, real cloud routes behind a temporary
-TLS adapter, an actual Relay subprocess and a loopback MLLP RIS. It verifies an
-order AA, signature preservation through the report queue, RIS AA delivery and
-rejection of a cloud-forged accession with a matching payload digest. No clinic
-traffic or production data is used. The adapter changes only advertised transport
-origins to its temporary HTTPS listener.
-
-`TestHL7CloudOwnsValidationAndAcknowledgements` exercises Push and Retrieve over
-real loopback MLLP with a synthetic TLS cloud: HL7 version and duplicate PID
-validation are deferred, missing/invalid or ambiguous scopes get no grants,
-source policy and TEST/P isolation remain enforced, original bytes and cloud AR
-are preserved, and a subsequent corrected order receives the exact cloud AA on
-the same connection. The mock's negative ACK does not qualify the deployed API's
-HTTP-422 paths; see the [validation boundary](report-authorization.md#validation-boundary).
-
-`TestReportResultPreservesValidatedRISACK` verifies exact AA/AE/AR payload return,
-UTF-8 and ERR text preservation, unchanged outbound reports and exclusion of
-mismatched responses. Joint qualification additionally uses a real Relay binary
-and real platform routes with a RIS AE followed by AA: both original ACKs must
-remain in distinct delivery-attempt records after success.
+Building and testing release artifacts does not authorise publishing, tagging
+or promoting them.

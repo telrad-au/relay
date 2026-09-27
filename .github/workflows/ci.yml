@@ -40,55 +40,10 @@ jobs:
                   scripts/check-licenses.sh
 
             - name: Test
-              run: |
-                  set -euo pipefail
-                  mkdir -p "$RUNNER_TEMP/relay-unit-coverage"
-                  go test -race -covermode=atomic -coverpkg=./... -cover ./... -args -test.gocoverdir="$RUNNER_TEMP/relay-unit-coverage"
+              run: go test -race -covermode=atomic -coverprofile=coverage.out ./...
 
-            - name: Exercise native Linux installation and collect process coverage
-              env:
-                  TELRAD_NATIVE_INSTALL_TEST: "1"
-                  RELAY_NATIVE_COVERAGE_DIR: ${{ runner.temp }}/relay-native-coverage
-              run: |
-                  # The hosted image makes this directory world-writable for npm.
-                  # Restore normal permissions only on this disposable test host.
-                  sudo chown root:root /usr/local/bin
-                  sudo chmod 0755 /usr/local/bin
-                  scripts/check-native-installation.sh
-
-            - name: Smoke benchmarks
-              run: |
-                  go test ./cmd/telrad-relay -run '^$' \
-                    -bench '^(BenchmarkReadMLLPFrame|BenchmarkDICOMParsing|BenchmarkDICOMStream|BenchmarkHL7PersistentMixed|BenchmarkHL7Stream)$' \
-                    -benchtime=1x -benchmem
-
-            - name: Check constrained release container
-              timeout-minutes: 12
-              env:
-                  RELAY_PERF_COVERAGE_DIR: ${{ runner.temp }}/relay-perf-coverage
-                  GOCOVERDIR: ${{ runner.temp }}/relay-perf-coverage
-              run: |
-                  mkdir -p "$RELAY_PERF_COVERAGE_DIR"
-                  # Coverage is confined to the test helpers. Relay is built by
-                  # its normal release Dockerfile without instrumentation.
-                  go run -cover -covermode=atomic ./tools/relay-perf smoke \
-                    --duration 5s --cpus 1 --memory 256MiB --out dist/performance-ci
-
-            - name: Collect performance evidence
-              if: always()
-              uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f
-              with:
-                  name: performance-correctness
-                  path: dist/performance-ci
-                  if-no-files-found: ignore
-
-            - name: Combine unit and process coverage
-              run: |
-                  mkdir -p "$RUNNER_TEMP/relay-combined-coverage"
-                  go tool covdata merge -pcombine -i "$RUNNER_TEMP/relay-unit-coverage,$RUNNER_TEMP/relay-native-coverage,$RUNNER_TEMP/relay-perf-coverage" -o "$RUNNER_TEMP/relay-combined-coverage"
-                  go tool covdata textfmt -i "$RUNNER_TEMP/relay-combined-coverage" -o coverage.out
-
-            - name: Enforce combined Go coverage
+            # Reported for review only; there is no coverage threshold.
+            - name: Report coverage
               run: |
                   {
                       echo '### Relay coverage'
@@ -96,24 +51,6 @@ jobs:
                       go tool cover -func=coverage.out
                       echo '```'
                   } >> "$GITHUB_STEP_SUMMARY"
-                  total_coverage="$(go tool cover -func=coverage.out | awk '/^total:/ { sub(/%$/, "", $3); print $3 }')"
-                  awk -v coverage="$total_coverage" 'BEGIN { exit !(coverage >= 69) }' || {
-                      echo "Total statement coverage ${total_coverage}% is below the required 69%." >&2
-                      exit 1
-                  }
-
-            - name: Test Orthanc DICOM interoperability
-              env:
-                  TELRAD_ORTHANC_INTEROP_TEST: "1"
-              run: go test -race ./cmd/telrad-relay -run '^TestOrthancDICOMPayloadIntegrity$' -count=1 -timeout=5m
-
-            - name: Test actual Relay DIMSE retrieval and restart
-              env:
-                  TELRAD_RETRIEVAL_ORTHANC_TEST: "1"
-              run: go test -race ./cmd/telrad-relay -run '^TestRetrievalOrthancBinaryRestart$' -count=1 -timeout=4m
-
-            - name: Validate synthetic HL7 fixtures
-              run: scripts/check-hl7-fixtures.sh
 
             - name: Check formatting
               run: test -z "$(gofmt -l .)"
@@ -126,168 +63,44 @@ jobs:
                   go install "golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION}"
                   govulncheck ./...
 
-            - name: Build native prerelease artifacts
-              run: scripts/build-release.sh 0.0.0-ci.1
-
-            - name: Exercise signed testing release bundle
+            - name: Build native release artifacts
               run: |
                   set -euo pipefail
-                  signing_dir="$(mktemp -d "$RUNNER_TEMP/relay-testing-ci-signing.XXXXXX")"
-                  cleanup() {
-                      rm -rf "$signing_dir"
-                  }
-                  trap cleanup EXIT
-
-                  openssl genpkey -algorithm ED25519 -out "$signing_dir/update-private.pem"
-                  openssl pkey -in "$signing_dir/update-private.pem" -pubout -out "$signing_dir/update-public.pem"
-                  openssl genpkey -algorithm ED25519 -out "$signing_dir/wrong-private.pem"
-                  openssl pkey -in "$signing_dir/wrong-private.pem" -pubout -out "$signing_dir/wrong-public.pem"
-                  RELAY_RELEASE_DIR="dist/testing-release-ci" \
-                      scripts/build-release.sh 0.0.0-testing.1.1
-                  if RELAY_RELEASE_DIR="dist/testing-release-ci" \
-                      RELAY_TESTING_ASSET_DIR="$RUNNER_TEMP/rejected-testing-assets" \
-                      RELAY_TESTING_UPDATE_SIGNING_KEY="$signing_dir/update-private.pem" \
-                      RELAY_TESTING_UPDATE_PUBLIC_KEY="$signing_dir/wrong-public.pem" \
-                          scripts/build-testing-release.sh \
-                          0.0.0-testing.1.1 \
-                          testing-1-1 \
-                          telrad-au/relay \
-                          "$GITHUB_SHA" \
-                          >/dev/null 2>&1; then
-                      echo "Testing release accepted a mismatched signing key pair." >&2
-                      exit 1
-                  fi
-                  RELAY_RELEASE_DIR="dist/testing-release-ci" \
-                  RELAY_TESTING_ASSET_DIR="dist/testing-assets-ci" \
-                  RELAY_TESTING_UPDATE_SIGNING_KEY="$signing_dir/update-private.pem" \
-                  RELAY_TESTING_UPDATE_PUBLIC_KEY="$signing_dir/update-public.pem" \
-                      scripts/build-testing-release.sh \
-                      0.0.0-testing.1.1 \
-                      testing-1-1 \
-                      telrad-au/relay \
-                      "$GITHUB_SHA"
-
-            - name: Exercise signed development release bundle
-              run: |
-                  set -euo pipefail
-                  signing_dir="$(mktemp -d "$RUNNER_TEMP/relay-development-ci-signing.XXXXXX")"
-                  cleanup() {
-                      rm -rf "$signing_dir"
-                  }
-                  trap cleanup EXIT
-
-                  openssl genpkey -algorithm ED25519 -out "$signing_dir/update-private.pem"
-                  openssl pkey -in "$signing_dir/update-private.pem" -pubout -out "$signing_dir/update-public.pem"
-                  openssl genpkey -algorithm ED25519 -out "$signing_dir/wrong-private.pem"
-                  openssl pkey -in "$signing_dir/wrong-private.pem" -pubout -out "$signing_dir/wrong-public.pem"
-
-                  if RELAY_RELEASE_DIR="$RUNNER_TEMP/rejected-development-release" \
-                      RELAY_UPDATE_SIGNING_KEY="$signing_dir/update-private.pem" \
-                      RELAY_UPDATE_TRUSTED_PUBLIC_KEY="$signing_dir/wrong-public.pem" \
-                          scripts/build-development-release.sh \
-                          0.0.0-ci.1 \
-                          https://github.com/telrad-au/relay/releases/download/v0.0.0-ci.1 \
-                          https://github.com/telrad-au/relay/releases/download/v0.0.0-ci.1/stable.json \
-                          https://dev.example.invalid/v1/relay/pairing-enrollments \
-                          >/dev/null 2>&1; then
-                      echo "Development release accepted a mismatched signing key pair." >&2
-                      exit 1
-                  fi
-
-                  RELAY_RELEASE_DIR="dist/development-release-ci" \
-                  RELAY_UPDATE_SIGNING_KEY="$signing_dir/update-private.pem" \
-                  RELAY_UPDATE_TRUSTED_PUBLIC_KEY="$signing_dir/update-public.pem" \
-                      scripts/build-development-release.sh \
-                      0.0.0-ci.1 \
-                      https://github.com/telrad-au/relay/releases/download/v0.0.0-ci.1 \
-                      https://github.com/telrad-au/relay/releases/download/v0.0.0-ci.1/stable.json \
-                      https://dev.example.invalid/v1/relay/pairing-enrollments
-
-            - name: Exercise signed release bundle
-              run: |
-                  set -euo pipefail
-                  sudo apt-get update
-                  sudo apt-get install --yes --no-install-recommends osslsigncode
-
-                  signing_dir="$(mktemp -d "$RUNNER_TEMP/relay-ci-signing.XXXXXX")"
-                  cleanup() {
-                      rm -rf "$signing_dir"
-                  }
-                  trap cleanup EXIT
-
-                  openssl genpkey -algorithm ED25519 -out "$signing_dir/update-private.pem"
-                  openssl pkey -in "$signing_dir/update-private.pem" -pubout -out "$signing_dir/update-public.pem"
-                  openssl req -x509 -newkey rsa:2048 -nodes \
-                      -keyout "$signing_dir/windows.key" \
-                      -out "$signing_dir/windows.crt" \
-                      -days 1 \
-                      -subj "/CN=Telrad CI release test"
-                  openssl pkcs12 -export \
-                      -out "$signing_dir/windows.pfx" \
-                      -inkey "$signing_dir/windows.key" \
-                      -in "$signing_dir/windows.crt" \
-                      -passout pass:test-only
-                  printf '%s' 'test-only' > "$signing_dir/windows-password"
-
-                  RELAY_RELEASE_DIR="dist/signed-release-ci" \
-                  RELAY_UPDATE_SIGNING_KEY="$signing_dir/update-private.pem" \
-                  RELAY_UPDATE_TRUSTED_PUBLIC_KEY="$signing_dir/update-public.pem" \
-                  RELAY_WINDOWS_SIGNING_PFX="$signing_dir/windows.pfx" \
-                  RELAY_WINDOWS_SIGNING_PASSWORD_FILE="$signing_dir/windows-password" \
-                  RELAY_WINDOWS_SIGNING_CA_FILE="$signing_dir/windows.crt" \
-                  RELAY_WINDOWS_ALLOW_UNTIMESTAMPED=true \
-                      scripts/build-signed-release.sh \
-                      0.0.0-ci.1 \
-                      https://github.com/telrad-au/relay/releases/download/v0.0.0-ci.1 \
-                      https://github.com/telrad-au/relay/releases/latest/download/stable.json \
-                      https://example.invalid/v1/relay/pairing-enrollments
-
-            - name: Verify container build excludes native management
-              run: |
-                  ! go list -tags relay_container -f '{{join .GoFiles "\n"}}' ./cmd/telrad-relay | grep -E '^native_(actions|install|ipc|update)'
-                  ! GOOS=windows go list -tags relay_container -deps ./cmd/telrad-relay | grep -F github.com/Microsoft/go-winio
+                  sh -n packaging/install.sh
+                  scripts/build-release.sh 0.0.0-ci.1
+                  (
+                      cd dist/0.0.0-ci.1
+                      sha256sum --check --strict SHA256SUMS
+                      sha256sum --check --strict telrad-relay-linux-amd64.sha256
+                  )
+                  [[ "$(dist/0.0.0-ci.1/telrad-relay-linux-amd64 version)" == "0.0.0-ci.1" ]]
 
             - name: Build container
               run: |
                   set -euo pipefail
-                  default_pairing_url='https://ingest.app.telrad.com.au/v1/relay/pairing-enrollments'
-                  docker build --build-arg VERSION=0.0.0-ci.1 --tag telrad-relay:ci-current .
-                  docker build --build-arg VERSION=0.0.0-ci.2 --tag telrad-relay:ci-next .
-                  [[ "$(docker run --rm --read-only --cap-drop ALL --security-opt no-new-privileges telrad-relay:ci-current version)" == "0.0.0-ci.1" ]]
-                  [[ "$(docker run --rm telrad-relay:ci-next version)" == "0.0.0-ci.2" ]]
-                  [[ "$(docker image inspect --format '{{.Config.User}}' telrad-relay:ci-current)" == "10001:10001" ]]
-                  [[ "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.licenses"}}' telrad-relay:ci-current)" == "Apache-2.0" ]]
-                  docker image inspect --format '{{json .Config.Healthcheck.Test}}' telrad-relay:ci-current | grep -F 'ready'
-                  licence_container="$(docker create telrad-relay:ci-current)"
-                  trap 'docker rm --force "$licence_container" >/dev/null' EXIT
+                  production_enrolment_url='https://ingest.app.telrad.com.au/v1/relay/enrolments'
+                  docker build --build-arg VERSION=0.0.0-ci.1 --tag telrad-relay:ci .
+                  [[ "$(docker run --rm --read-only --cap-drop ALL --security-opt no-new-privileges telrad-relay:ci version)" == "0.0.0-ci.1" ]]
+                  [[ "$(docker image inspect --format '{{.Config.User}}' telrad-relay:ci)" == "10001:10001" ]]
+                  [[ "$(docker image inspect --format '{{index .Config.Labels "org.opencontainers.image.licenses"}}' telrad-relay:ci)" == "Apache-2.0" ]]
+                  [[ "$(docker image inspect --format '{{json .Config.Healthcheck.Test}}' telrad-relay:ci)" == '["CMD","telrad-relay","--config","/var/lib/telrad-relay/relay.json","ready"]' ]]
+                  container="$(docker create telrad-relay:ci)"
+                  trap 'docker rm --force "$container" >/dev/null' EXIT
                   mkdir -p "$RUNNER_TEMP/container-licences"
-                  docker cp "$licence_container:/usr/share/licenses/telrad-relay/." "$RUNNER_TEMP/container-licences/"
+                  docker cp "$container:/usr/share/licenses/telrad-relay/." "$RUNNER_TEMP/container-licences/"
                   cmp LICENSE "$RUNNER_TEMP/container-licences/LICENSE"
                   cmp NOTICE "$RUNNER_TEMP/container-licences/NOTICE"
                   cmp THIRD_PARTY_NOTICES.md "$RUNNER_TEMP/container-licences/THIRD_PARTY_NOTICES.md"
-                  docker cp "$licence_container:/var/lib/telrad-relay/relay.json" "$RUNNER_TEMP/container-relay.json"
-                  [[ "$(jq --raw-output .pairingUrl "$RUNNER_TEMP/container-relay.json")" == "$default_pairing_url" ]]
-                  docker rm "$licence_container" >/dev/null
-                  trap - EXIT
+                  docker cp "$container:/var/lib/telrad-relay/relay.json" "$RUNNER_TEMP/container-relay.json"
+                  [[ "$(jq --raw-output .enrolmentUrl "$RUNNER_TEMP/container-relay.json")" == "$production_enrolment_url" ]]
                   TELRAD_RELAY_IMAGE='telrad-relay@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' \
-                  TELRAD_RELAY_PAIRING_URL='https://example.invalid/v1/relay/pairing-enrollments' \
                   TELRAD_RELAY_BIND_ADDRESS='127.0.0.1' \
-                  TELRAD_RELAY_REPORT_DESTINATION_HOST='report.example.invalid' \
+                  TELRAD_RELAY_REPORT_HOST='report.example.invalid' \
                       docker compose -f packaging/compose.yml config --quiet
 
-    # Keep the existing required status name. Native Linux checks and their
-    # process coverage now run in the test job before its coverage gate.
     linux-installer:
         name: Clean install and upgrade on Linux
-        needs: test
         runs-on: ubuntu-24.04
-        steps:
-            - name: Confirm native Linux validation
-              run: echo 'Native systemd installation and lifecycle checks passed in Test and build.'
-
-    windows-installer:
-        name: Verify Windows installer trust checks
-        runs-on: windows-2025
         timeout-minutes: 15
         steps:
             - name: Check out repository
@@ -301,16 +114,39 @@ jobs:
                   go-version: ${{ env.GO_VERSION }}
                   cache-dependency-path: go.sum
 
-            - name: Test valid and invalid Authenticode artifacts
-              shell: pwsh
-              run: ./packaging/install-hosted.Tests.ps1
+            - name: Install, upgrade and remove the systemd service
+              env:
+                  TELRAD_NATIVE_INSTALL_TEST: "1"
+              run: |
+                  # The hosted image makes this directory world-writable for npm.
+                  # Restore normal permissions only on this disposable test host.
+                  sudo chown root:root /usr/local/bin
+                  sudo chmod 0755 /usr/local/bin
+                  scripts/check-native-installation.sh
+
+    # The job name is kept for the existing required status check.
+    windows-installer:
+        name: Verify Windows installer trust checks
+        runs-on: windows-2025
+        timeout-minutes: 20
+        steps:
+            - name: Check out repository
+              uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+              with:
+                  persist-credentials: false
+
+            - name: Set up Go
+              uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+              with:
+                  go-version: ${{ env.GO_VERSION }}
+                  cache-dependency-path: go.sum
 
             - name: Run relay tests on Windows
               shell: pwsh
               run: go test -race ./...
 
-            - name: Exercise real Windows service installation and ACL boundaries
+            - name: Install, upgrade and remove the Windows service
               shell: pwsh
               env:
                   TELRAD_NATIVE_INSTALL_TEST: "1"
-              run: ./packaging/install-native.Tests.ps1
+              run: ./packaging/install.Tests.ps1

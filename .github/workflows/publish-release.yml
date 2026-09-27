@@ -172,7 +172,7 @@ jobs:
                   retention-days: 14
 
     sign-native:
-        name: Sign and finalize native release
+        name: Sign Windows native binary
         needs:
             - plan
             - build-native
@@ -189,12 +189,6 @@ jobs:
                   fetch-depth: 0
                   persist-credentials: false
 
-            - name: Set up Go
-              uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
-              with:
-                  go-version: ${{ env.GO_VERSION }}
-                  cache-dependency-path: go.sum
-
             - name: Download unsigned native release
               uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
               with:
@@ -210,9 +204,6 @@ jobs:
                   AZURE_ARTIFACT_SIGNING_ENDPOINT: ${{ secrets.AZURE_ARTIFACT_SIGNING_ENDPOINT }}
                   AZURE_ARTIFACT_SIGNING_SUBSCRIPTION_ID: ${{ secrets.AZURE_ARTIFACT_SIGNING_SUBSCRIPTION_ID }}
                   AZURE_ARTIFACT_SIGNING_TENANT_ID: ${{ secrets.AZURE_ARTIFACT_SIGNING_TENANT_ID }}
-                  ENROLLMENT_URL: ${{ vars.RELAY_ENROLLMENT_URL }}
-                  UPDATE_SIGNING_KEY_BASE64: ${{ secrets.RELAY_UPDATE_SIGNING_KEY_BASE64 }}
-                  UPDATE_TRUSTED_PUBLIC_KEY_BASE64: ${{ secrets.RELAY_UPDATE_TRUSTED_PUBLIC_KEY_BASE64 }}
               run: |
                   set -euo pipefail
                   for required in \
@@ -221,10 +212,7 @@ jobs:
                       AZURE_ARTIFACT_SIGNING_CLIENT_ID \
                       AZURE_ARTIFACT_SIGNING_ENDPOINT \
                       AZURE_ARTIFACT_SIGNING_SUBSCRIPTION_ID \
-                      AZURE_ARTIFACT_SIGNING_TENANT_ID \
-                      ENROLLMENT_URL \
-                      UPDATE_SIGNING_KEY_BASE64 \
-                      UPDATE_TRUSTED_PUBLIC_KEY_BASE64; do
+                      AZURE_ARTIFACT_SIGNING_TENANT_ID; do
                       [[ -n "${!required:-}" ]] || {
                           echo "production-release must define $required." >&2
                           exit 1
@@ -232,11 +220,6 @@ jobs:
                   done
                   [[ "$AZURE_ARTIFACT_SIGNING_ENDPOINT" =~ ^https://[a-z0-9-]+\.codesigning\.azure\.net/?$ ]] || {
                       echo "Azure Artifact Signing endpoint is not a regional codesigning.azure.net HTTPS endpoint." >&2
-                      exit 1
-                  }
-                  container_pairing_url="$(jq --raw-output .pairingUrl packaging/docker-relay.json)"
-                  [[ "$ENROLLMENT_URL" == "$container_pairing_url" ]] || {
-                      echo "Production native and container pairing endpoints do not match." >&2
                       exit 1
                   }
 
@@ -267,40 +250,7 @@ jobs:
               run: |
                   ./scripts/verify-windows-signature.ps1 `
                       -Path '${{ github.workspace }}\dist\${{ github.ref_name }}\telrad-relay-windows-amd64.exe' `
-                      -SignerPinOutputPath '${{ github.workspace }}\dist\${{ github.ref_name }}\windows-signer-certificate-sha256.txt'
-
-            - name: Finalize and verify signed native bundle
-              shell: bash
-              env:
-                  ENROLLMENT_URL: ${{ vars.RELAY_ENROLLMENT_URL }}
-                  TAG: ${{ github.ref_name }}
-                  UPDATE_SIGNING_KEY_BASE64: ${{ secrets.RELAY_UPDATE_SIGNING_KEY_BASE64 }}
-                  UPDATE_TRUSTED_PUBLIC_KEY_BASE64: ${{ secrets.RELAY_UPDATE_TRUSTED_PUBLIC_KEY_BASE64 }}
-              run: |
-                  set -euo pipefail
-                  signing_dir="$(mktemp -d)"
-                  cleanup() {
-                      rm -rf "$signing_dir"
-                  }
-                  trap cleanup EXIT
-                  chmod 0700 "$signing_dir"
-                  printf '%s' "$UPDATE_SIGNING_KEY_BASE64" | base64 --decode > "$signing_dir/update-private.pem"
-                  printf '%s' "$UPDATE_TRUSTED_PUBLIC_KEY_BASE64" | base64 --decode > "$signing_dir/update-public.pem"
-                  chmod 0600 "$signing_dir"/*
-
-                  version="${TAG#v}"
-                  release_base_url="https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG"
-                  update_manifest_url="https://github.com/$GITHUB_REPOSITORY/releases/latest/download/stable.json"
-                  RELAY_UPDATE_SIGNING_KEY="$signing_dir/update-private.pem" \
-                  RELAY_UPDATE_TRUSTED_PUBLIC_KEY="$signing_dir/update-public.pem" \
-                  RELAY_WINDOWS_SIGNER_CERTIFICATE_SHA256_FILE="dist/$TAG/windows-signer-certificate-sha256.txt" \
-                  RELAY_WINDOWS_SIGNATURE_VERIFIED=true \
-                  RELAY_RELEASE_DIR="dist/$TAG" \
-                      scripts/finalize-signed-release.sh \
-                      "$version" \
-                      "$release_base_url" \
-                      "$update_manifest_url" \
-                      "$ENROLLMENT_URL"
+                      -SignerPinOutputPath '${{ runner.temp }}\windows-signer-certificate-sha256.txt'
 
             - name: Upload signed native release
               uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
@@ -321,6 +271,11 @@ jobs:
             contents: read
             id-token: write
         steps:
+            - name: Check out tagged source without persisted credentials
+              uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+              with:
+                  persist-credentials: false
+
             - name: Download signed native release
               uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
               with:
@@ -357,16 +312,8 @@ jobs:
             - name: Generate release checksums
               env:
                   TAG: ${{ github.ref_name }}
-              run: |
-                  set -euo pipefail
-                  release_dir="dist/$TAG"
-                  (
-                      cd "$release_dir"
-                      for artifact in *; do
-                          [[ -f "$artifact" ]] || continue
-                          sha256sum "$artifact"
-                      done | LC_ALL=C sort --key=2 > SHA256SUMS
-                  )
+              # Authenticode signing changed the Windows binary after build.
+              run: scripts/write-checksums.sh "dist/$TAG"
 
             - name: Attest native build provenance
               id: native-provenance
@@ -419,7 +366,7 @@ jobs:
                   retention-days: 14
 
     publish:
-        name: Publish immutable release and finalize channels
+        name: Publish immutable release and advance latest
         needs:
             - plan
             - attest-native
@@ -584,7 +531,7 @@ jobs:
                       echo "Linux installer: https://github.com/$GITHUB_REPOSITORY/releases/latest/download/install.sh"
                       echo "Windows installer: https://github.com/$GITHUB_REPOSITORY/releases/latest/download/install.ps1"
                       echo
-                      echo "Verify a downloaded native artifact with \`sha256sum --check SHA256SUMS\` and \`gh attestation verify FILE --repo $GITHUB_REPOSITORY\`. The relay also verifies the Ed25519 signatures before applying native updates."
+                      echo "Verify a downloaded native artifact with \`sha256sum --check SHA256SUMS\` and \`gh attestation verify FILE --repo $GITHUB_REPOSITORY\`. Upgrade by rerunning the installer."
                   } > "$notes_file"
                   gh release create "$TAG" "dist/$TAG/"* \
                       --draft \
@@ -644,6 +591,5 @@ jobs:
                       echo "- Platforms: \`$PLATFORMS\`"
                       echo "- Linux installer: \`https://github.com/$GITHUB_REPOSITORY/releases/latest/download/install.sh\`"
                       echo "- Windows installer: \`https://github.com/$GITHUB_REPOSITORY/releases/latest/download/install.ps1\`"
-                      echo "- Update manifest: \`https://github.com/$GITHUB_REPOSITORY/releases/latest/download/stable.json\`"
                       echo "- Visibility: public"
                   } >> "$GITHUB_STEP_SUMMARY"
