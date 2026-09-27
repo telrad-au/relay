@@ -64,8 +64,9 @@ published. Check it with:
 docker compose exec relay telrad-relay status
 ```
 
-The command prints the state (`pairing`, `ready` or `degraded`), certificate
-expiry, listener and pickup state, report counts and the ledger entry count. It
+The command prints the state (`pairing`, `ready` or `degraded`), the report
+receiver (`NOT CONFIGURED` if `TELRAD_RELAY_REPORT_HOST` is the placeholder
+`report-receiver.invalid`), certificate expiry, listener and pickup state, report counts and the ledger entry count. It
 exits non-zero when the service's status endpoint cannot be reached; it does
 not exit non-zero for `degraded`.
 

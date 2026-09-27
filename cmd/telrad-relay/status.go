@@ -9,12 +9,18 @@ import (
 	"net"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
 
 const pickupReadyWindow = 5 * time.Minute
+
+// reportHostPlaceholder is what the installers write when no report receiver
+// was given. It never resolves (RFC 6761), so the service starts and pairs and
+// every report is answered AE until the operator sets the real receiver.
+const reportHostPlaceholder = "report-receiver.invalid"
 
 // statusReport is what the local status endpoint publishes. Nothing in it is
 // clinical or secret; accession counts are the only ledger detail.
@@ -37,6 +43,10 @@ type statusReport struct {
 	Connections         map[string]int  `json:"activeConnections"`
 	RefusedConnections  map[string]int  `json:"refusedConnections"`
 	LastTelradFailure   map[string]bool `json:"telradFailure,omitempty"`
+	// ReportReceiverConfigured is false while reportHost is empty or the
+	// installer placeholder; ReportReceiver (host:port) is then omitted.
+	ReportReceiverConfigured bool   `json:"reportReceiverConfigured"`
+	ReportReceiver           string `json:"reportReceiver,omitempty"`
 }
 
 type listenerStatus struct {
@@ -80,12 +90,24 @@ type statusServer struct {
 	listener      net.Listener
 }
 
-func newStatusServer(address string, store *identityStore, ledgerStore *ledger) *statusServer {
-	return &statusServer{
-		address: address, store: store, ledger: ledgerStore,
-		lastTelrad: make(map[string]time.Time), failed: make(map[string]bool),
-		report: statusReport{Version: version, Connections: map[string]int{"dicom": 0, "hl7": 0}, RefusedConnections: map[string]int{"dicom": 0, "hl7": 0}},
+func newStatusServer(cfg *config, store *identityStore, ledgerStore *ledger) *statusServer {
+	report := statusReport{Version: version, Connections: map[string]int{"dicom": 0, "hl7": 0}, RefusedConnections: map[string]int{"dicom": 0, "hl7": 0}}
+	if reportReceiverConfigured(cfg.ReportHost) {
+		report.ReportReceiverConfigured = true
+		report.ReportReceiver = net.JoinHostPort(strings.TrimSpace(cfg.ReportHost), strconv.Itoa(cfg.ReportPort))
 	}
+	return &statusServer{
+		address: cfg.StatusAddress, store: store, ledger: ledgerStore,
+		lastTelrad: make(map[string]time.Time), failed: make(map[string]bool),
+		report: report,
+	}
+}
+
+// reportReceiverConfigured reports whether reportHost names a real receiver
+// rather than the installer placeholder.
+func reportReceiverConfigured(host string) bool {
+	host = strings.TrimSpace(host)
+	return host != "" && !strings.EqualFold(strings.TrimSuffix(host, "."), reportHostPlaceholder)
 }
 
 func (s *statusServer) start(ctx context.Context) error {
@@ -350,9 +372,19 @@ func fetchStatus(address string) (*statusReport, error) {
 	return &report, nil
 }
 
-func printStatus(out io.Writer, report *statusReport) {
+// printStatus renders a status report. configPath names the configuration
+// file the operator edits when the report receiver is not configured.
+func printStatus(out io.Writer, report *statusReport, configPath string) {
 	fmt.Fprintf(out, "Telrad Relay %s\n", report.Version)
 	fmt.Fprintf(out, "state: %s\n", report.State)
+	switch {
+	case report.ReportReceiverConfigured:
+		fmt.Fprintf(out, "report receiver: %s\n", report.ReportReceiver)
+	case distribution == "docker":
+		fmt.Fprintln(out, "report receiver: NOT CONFIGURED - set TELRAD_RELAY_REPORT_HOST and recreate the container")
+	default:
+		fmt.Fprintf(out, "report receiver: NOT CONFIGURED - edit reportHost in %s and run telrad restart\n", configPath)
+	}
 	if !report.Paired {
 		if report.PairingLink != "" {
 			fmt.Fprintf(out, "\nApprove this Relay in your browser:\n\n  %s\n\n", report.PairingLink)

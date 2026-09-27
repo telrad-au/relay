@@ -91,8 +91,8 @@ func TestStatusEndpointAndReadiness(t *testing.T) {
 		t.Fatalf("report=%+v", report)
 	}
 	var out bytes.Buffer
-	printStatus(&out, report)
-	for _, want := range []string{"state: ready", "relay: relay-test", "report pickup: connected=true", "ledger entries: 0"} {
+	printStatus(&out, report, "relay.json")
+	for _, want := range []string{"state: ready", "report receiver: 127.0.0.1:", "relay: relay-test", "report pickup: connected=true", "ledger entries: 0"} {
 		if !strings.Contains(out.String(), want) {
 			t.Fatalf("status output missing %q:\n%s", want, out.String())
 		}
@@ -107,7 +107,7 @@ func TestStatusEndpointAndReadiness(t *testing.T) {
 	// The CLI status output for an unpaired relay shows the link.
 	unpaired := &statusReport{State: "pairing", PairingLink: "https://app.example.invalid/approve/x"}
 	out.Reset()
-	printStatus(&out, unpaired)
+	printStatus(&out, unpaired, "relay.json")
 	if !strings.Contains(out.String(), "https://app.example.invalid/approve/x") {
 		t.Fatal("pairing link not printed")
 	}
@@ -212,7 +212,7 @@ func TestEnrollCommandPairsContainer(t *testing.T) {
 	cfg.EnrolmentURL = fake.url()
 	t.Setenv(pairingTokenVariable, fake.token)
 	var out bytes.Buffer
-	if err := enrollCommand(cfg, &out); err != nil {
+	if err := enrollCommand(cfg, "", &out); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(out.String(), "Paired relay relay-token") {
@@ -222,7 +222,7 @@ func TestEnrollCommandPairsContainer(t *testing.T) {
 		t.Fatal("pairing token left in the environment")
 	}
 	out.Reset()
-	if err := enrollCommand(cfg, &out); err != nil || !strings.Contains(out.String(), "already paired") {
+	if err := enrollCommand(cfg, "", &out); err != nil || !strings.Contains(out.String(), "already paired") {
 		t.Fatalf("second enroll: %v %q", err, out.String())
 	}
 }

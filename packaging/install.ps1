@@ -21,12 +21,15 @@
 # any New-NetFirewallRule -RemoteAddress value). Existing rules are left as the
 # operator configured them unless -ClinicRemoteAddress is passed again.
 #
-# relay.json is written only when absent and never changed afterwards. Set the
-# clinic report receiver with -ReportHost (or $env:TELRAD_RELAY_REPORT_HOST) on
-# the first install. Without it the installer writes report-receiver.invalid,
-# a name that never resolves: pairing and order forwarding work and every
-# report is answered AE, so Telrad keeps it and retries until the operator sets
-# reportHost and runs telrad restart.
+# relay.json is written only when absent and never changed afterwards. On the
+# first install an interactive session is asked for the clinic report
+# receiver; -ReportHost and -ReportPort (or $env:TELRAD_RELAY_REPORT_HOST and
+# $env:TELRAD_RELAY_REPORT_PORT, default 2576) set it without asking. With no
+# interactive session and no -ReportHost, or when the question is left empty,
+# the installer writes report-receiver.invalid, a name that never resolves:
+# pairing and order forwarding work and every report is answered AE, so Telrad
+# keeps it and retries until the operator sets reportHost and runs telrad
+# restart. telrad status shows the receiver as NOT CONFIGURED.
 #
 # -ReleaseUrl (or $env:TELRAD_RELAY_RELEASE_URL) replaces the GitHub release
 # directory with another https URL or a local directory, for installer tests.
@@ -39,6 +42,7 @@
 param(
     [string]$Version = $env:TELRAD_RELAY_VERSION,
     [string]$ReportHost = $env:TELRAD_RELAY_REPORT_HOST,
+    [string]$ReportPort = $env:TELRAD_RELAY_REPORT_PORT,
     [string[]]$ClinicRemoteAddress = @('LocalSubnet'),
     [string]$ReleaseUrl = $env:TELRAD_RELAY_RELEASE_URL
 )
@@ -76,8 +80,45 @@ if ($Version) {
     $defaultUrl = 'https://github.com/telrad-au/relay/releases/latest/download'
 }
 if (-not $ReleaseUrl) { $ReleaseUrl = $defaultUrl }
-if (-not $ReportHost) { $ReportHost = $placeholder }
-if ($ReportHost -notmatch '^[A-Za-z0-9.:_-]+$') { Fail 'ReportHost must be a hostname or IP address' }
+function Test-ReportHost([string]$value) { $value.Length -le 253 -and $value -match '^[A-Za-z0-9:_][A-Za-z0-9.:_-]*\z' }
+function Test-ReportPort([string]$value) { $value -match '^[1-9][0-9]{0,4}\z' -and [int]$value -le 65535 }
+$ReportHost = "$ReportHost".Trim()
+$ReportPort = "$ReportPort".Trim()
+$receiverGiven = [bool]($ReportHost -or $ReportPort)
+if ($ReportHost -and -not (Test-ReportHost $ReportHost)) { Fail 'ReportHost must be a hostname or IP address' }
+if (-not $ReportPort) { $ReportPort = '2576' }
+if (-not (Test-ReportPort $ReportPort)) { Fail 'ReportPort must be a port from 1 to 65535' }
+
+# Read-Host needs an interactive user session; -NonInteractive, service and CI
+# sessions write the placeholder instead of waiting for an answer.
+function Test-Interactive {
+    if (-not [Environment]::UserInteractive -or $Host.Name -eq 'Default Host' -or $null -eq $Host.UI.RawUI) { return $false }
+    foreach ($argument in [Environment]::GetCommandLineArgs()) { if ($argument -like '-NonI*') { return $false } }
+    return $true
+}
+
+# Asks for the clinic report receiver, re-asking until the answer is valid.
+# Returns $null when the host is left empty or the host cannot prompt.
+function Read-ReportReceiver([string]$defaultPort) {
+    try {
+        Write-Host 'Relay delivers reports to the clinic RIS report receiver (MLLP).'
+        while ($true) {
+            $answer = "$(Read-Host 'Report receiver host or IP address (leave empty to set it later)')".Trim()
+            if (-not $answer) { return $null }
+            if (Test-ReportHost $answer) { break }
+            Write-Host 'Enter a hostname or IP address, for example ris.clinic.local or 192.0.2.20.'
+        }
+        $receiverHost = $answer
+        while ($true) {
+            $answer = "$(Read-Host "Report receiver port [$defaultPort]")".Trim()
+            if (-not $answer) { return @{ Host = $receiverHost; Port = $defaultPort } }
+            if (Test-ReportPort $answer) { return @{ Host = $receiverHost; Port = $answer } }
+            Write-Host 'Enter a port from 1 to 65535.'
+        }
+    } catch [Management.Automation.PSInvalidOperationException] {
+        return $null
+    }
+}
 
 function Get-ReleaseFile([string]$name, [string]$destination) {
     if ($ReleaseUrl -match '^https://') {
@@ -121,6 +162,15 @@ try {
     if ((Get-FileHash -Algorithm SHA256 -LiteralPath $download).Hash.ToLowerInvariant() -ne $expected[0]) {
         Fail 'checksum verification failed; nothing was installed'
     }
+
+    # Ask only when relay.json will be written; it is never changed afterwards.
+    if (Test-Path -LiteralPath $config) {
+        if ($receiverGiven) { Write-Host "$config already exists; ReportHost and ReportPort were ignored." }
+    } elseif (-not $ReportHost -and (Test-Interactive)) {
+        $receiver = Read-ReportReceiver $ReportPort
+        if ($receiver) { $ReportHost = $receiver.Host; $ReportPort = $receiver.Port }
+    }
+    if (-not $ReportHost) { $ReportHost = $placeholder }
 
     # Stage and run the new binary before touching the installed service.
     New-Item -ItemType Directory -Path $installDir -Force | Out-Null
@@ -172,12 +222,10 @@ try {
         @{ Sid = $administrators; Rights = 'FullControl' },
         @{ Sid = $serviceSid; Rights = 'Modify' })
 
-    $wroteConfig = $false
     if (-not (Test-Path -LiteralPath $config)) {
         # Only reportHost is required; every other field takes its default.
-        $json = "{`n  `"schemaVersion`": 6,`n  `"reportHost`": `"$ReportHost`",`n  `"reportPort`": 2576`n}`n"
+        $json = "{`n  `"schemaVersion`": 6,`n  `"reportHost`": `"$ReportHost`",`n  `"reportPort`": $ReportPort`n}`n"
         [IO.File]::WriteAllText($config, $json, (New-Object Text.UTF8Encoding($false)))
-        $wroteConfig = $true
     }
 
     # Keep Path as REG_EXPAND_SZ, then broadcast the change by setting and
@@ -212,8 +260,9 @@ try {
         Write-Host "The $serviceName service was stopped and has been left stopped; start it with: telrad start"
     }
     Write-Host "Telrad Relay $installedVersion installed."
-    if ($wroteConfig -and $ReportHost -eq $placeholder) {
-        Write-Host "Set reportHost in $config to the clinic report receiver, then run: telrad restart"
+    if ([IO.File]::ReadAllText($config).Contains("`"$placeholder`"")) {
+        Write-Host 'WARNING: no report receiver is configured, so reports cannot be delivered.'
+        Write-Host "Set reportHost (and reportPort) in $config to the clinic report receiver, then run: telrad restart"
     }
     Write-Host 'Run telrad in an elevated prompt to see the pairing link.'
 } finally {

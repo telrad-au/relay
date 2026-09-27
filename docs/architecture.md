@@ -217,7 +217,9 @@ only) and answers:
   the container health check.
 - `GET /status`: JSON with pairing state, the verification link while unpaired,
   certificate expiry, listener state, time of the last successful connection to
-  each Telrad port, report pickup state, and the ledger entry count.
+  each Telrad port, report pickup state, the ledger entry count, and the
+  configured report receiver with a flag that is false while it is still the
+  installer's placeholder `report-receiver.invalid`.
 
 `telrad status` reads `/status` and prints it. `telrad ready` reads `/readyz`
 and exits non-zero when the relay is not ready; it is the container health
@@ -237,7 +239,7 @@ path from earlier schemas: Relay has not been released.
 | `listenAddress` | `0.0.0.0` | clinic-facing bind address |
 | `dicomPort` | `11112` | clinic DICOM listener |
 | `hl7Port` | `2575` | clinic HL7 listener |
-| `reportHost` | required | clinic report receiver |
+| `reportHost` | required | clinic report receiver; the installer prompts for it on a terminal, accepts `TELRAD_RELAY_REPORT_HOST`, and otherwise writes the placeholder `report-receiver.invalid`, which `status` flags |
 | `reportPort` | `2576` | clinic report receiver port |
 | `statusAddress` | `127.0.0.1:8425` | local status endpoint |
 | `maxDicomConnections` | `128` | concurrent associations |

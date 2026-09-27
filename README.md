@@ -24,6 +24,11 @@ curl -fsSL https://github.com/telrad-au/relay/releases/latest/download/install.s
 telrad
 ```
 
+On a first install the installer asks for the RIS report receiver's host and
+port (default `2576`). To install unattended, set `TELRAD_RELAY_REPORT_HOST`
+and optionally `TELRAD_RELAY_REPORT_PORT`, for example
+`curl -fsSL .../install.sh | sudo TELRAD_RELAY_REPORT_HOST=192.0.2.20 sh`.
+
 ### Windows service
 
 Run the installer in PowerShell as Administrator:
@@ -32,7 +37,14 @@ Run the installer in PowerShell as Administrator:
 irm https://github.com/telrad-au/relay/releases/latest/download/install.ps1 | iex
 ```
 
-Then run `telrad` from an ordinary terminal to see the pairing link.
+It asks for the report receiver the same way; pass `-ReportHost` and
+`-ReportPort` to install unattended. Then run `telrad` from an ordinary
+terminal to see the pairing link.
+
+Without an answer or a variable, either installer writes the placeholder
+`report-receiver.invalid`: Relay pairs and forwards orders, but every report is
+answered `AE` and retried by Telrad until you set `reportHost` in `relay.json`
+and run `telrad restart`.
 
 ### Docker Compose
 
@@ -158,7 +170,8 @@ telrad restart          Restart the service
 telrad version          Print the installed version
 ```
 
-`status` shows the state (`pairing`, `ready` or `degraded`), certificate
+`status` shows the state (`pairing`, `ready` or `degraded`), the report
+receiver (`NOT CONFIGURED` while `reportHost` is the placeholder), certificate
 expiry, listener state, Telrad connectivity, report pickup, report counts and
 the number of ledger entries. `telrad` never requests elevation; `start`,
 `stop` and `restart` need the same rights as managing the service directly.

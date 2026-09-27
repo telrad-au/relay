@@ -181,7 +181,7 @@ func newTestRelay(t *testing.T, pki *testPKI, dicom, hl7, report net.Listener) *
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { ledgerStore.close() })
-	status := newStatusServer(cfg.StatusAddress, store, ledgerStore)
+	status := newStatusServer(cfg, store, ledgerStore)
 	return &testRelay{relay: &relay{cfg: cfg, store: store, ledger: ledgerStore, status: status}, pki: pki, report: report}
 }
 

@@ -173,7 +173,7 @@ func TestPairInteractivelyPublishesLinkThenInstalls(t *testing.T) {
 	cfg := testConfig(t, pki)
 	cfg.EnrolmentURL = fake.url()
 	store, _ := openIdentity(cfg)
-	status := newStatusServer(cfg.StatusAddress, store, nil)
+	status := newStatusServer(cfg, store, nil)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	done := make(chan error, 1)
@@ -241,7 +241,7 @@ func TestMaintainIdentityRenewsInsideWindow(t *testing.T) {
 		t.Fatal(err)
 	}
 	fake.lifetime = 90 * 24 * time.Hour
-	status := newStatusServer(cfg.StatusAddress, store, nil)
+	status := newStatusServer(cfg, store, nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { defer close(done); maintainIdentity(ctx, cfg, store, status) }()
@@ -364,7 +364,7 @@ func TestExpiredIdentityLoadsAndIsReportedAsNeedingPairing(t *testing.T) {
 	if store.paired() || !store.expired() {
 		t.Fatal("expired identity treated as paired")
 	}
-	report := newStatusServer(cfg.StatusAddress, store, nil).snapshot()
+	report := newStatusServer(cfg, store, nil).snapshot()
 	if report.Paired || report.State != "pairing" || report.CertificateNotAfter == nil || !report.CertificateNotAfter.Before(time.Now()) || report.RenewalError != certificateExpiredText {
 		t.Fatalf("report=%+v", report)
 	}

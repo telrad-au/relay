@@ -97,10 +97,10 @@ func execute(args []string, out io.Writer) error {
 		if err != nil {
 			return err
 		}
-		printStatus(out, report)
+		printStatus(out, report, *configPath)
 		return nil
 	case "enroll":
-		return enrollCommand(cfg, out)
+		return enrollCommand(cfg, *configPath, out)
 	case "run":
 		return runPlatformService(cfg)
 	default:
@@ -110,13 +110,13 @@ func execute(args []string, out io.Writer) error {
 
 // enrollCommand pairs a container with a token. On a native install pairing is
 // interactive through the running service, so the command shows the link.
-func enrollCommand(cfg *config, out io.Writer) error {
+func enrollCommand(cfg *config, configPath string, out io.Writer) error {
 	if distribution != "docker" {
 		report, err := fetchStatus(cfg.StatusAddress)
 		if err != nil {
 			return err
 		}
-		printStatus(out, report)
+		printStatus(out, report, configPath)
 		return nil
 	}
 	if err := os.MkdirAll(cfg.DataDir, 0700); err != nil {
@@ -168,7 +168,7 @@ func runRelay(ctx context.Context, cfg *config) error {
 	if err != nil {
 		return err
 	}
-	status := newStatusServer(cfg.StatusAddress, store, ledgerStore)
+	status := newStatusServer(cfg, store, ledgerStore)
 	if err := status.start(ctx); err != nil {
 		return err
 	}

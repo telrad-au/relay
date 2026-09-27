@@ -38,6 +38,16 @@ requires TLS 1.2 or later, and ships no trust material of its own.
 with any other `schemaVersion` is refused; there is no migration from earlier
 schemas. Change the file and run `telrad restart` to apply it.
 
+The installer writes `relay.json` only when it is absent and never changes it
+on a reinstall. On that first install it asks on the terminal for the report
+receiver host and port (default `2576`), re-asking until the answer is valid,
+or takes them from `TELRAD_RELAY_REPORT_HOST` and `TELRAD_RELAY_REPORT_PORT`
+(`-ReportHost` and `-ReportPort` on Windows). With no terminal and no host
+given, or when the question is left empty, it writes the placeholder
+`report-receiver.invalid` and prints a warning: Relay still pairs and forwards
+orders, but every report is answered `AE` and retried by Telrad until
+`reportHost` is set and the service restarted.
+
 | Field | Default | Meaning |
 | --- | --- | --- |
 | `schemaVersion` | `6` | must be `6` |
@@ -98,6 +108,9 @@ telrad status
 `/status` endpoint and prints:
 
 - the state: `pairing` until paired, `ready`, or `degraded`;
+- the report receiver as `host:port`, or `report receiver: NOT CONFIGURED`
+  with the file to edit while `reportHost` is the installer placeholder (the
+  JSON field `reportReceiverConfigured` is then `false`);
 - the pairing link and any pairing problem while unpaired;
 - the Relay identifier, certificate expiry and any renewal problem;
 - whether the DICOM and HL7 listeners are open;

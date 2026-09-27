@@ -34,10 +34,13 @@ export RELAY_ENROLMENT_URL=https://enrolment.invalid/v1/relay/enrolments
 RELAY_RELEASE_DIR="$work/first" scripts/build-release.sh 0.0.0-ci.1 >/dev/null
 RELAY_RELEASE_DIR="$work/second" scripts/build-release.sh 0.0.0-ci.2 >/dev/null
 
+# setsid detaches the installer from any terminal, so it never asks for the
+# report receiver and a run from an interactive shell behaves like CI.
 install_relay() {
     local release="$1"
     shift
-    sudo env TELRAD_RELAY_RELEASE_URL="file://$release" "$@" sh "$ROOT_DIR/packaging/install.sh"
+    sudo env TELRAD_RELAY_RELEASE_URL="file://$release" "$@" \
+        setsid -w sh "$ROOT_DIR/packaging/install.sh" </dev/null
 }
 
 wait_for_status() {
@@ -59,8 +62,9 @@ refute install_relay "$work/tampered"
 [[ ! -e /usr/local/lib/telrad-relay/telrad && ! -e /etc/systemd/system/telrad-relay.service ]]
 refute getent passwd telrad-relay >/dev/null
 
-install_relay "$work/first" TELRAD_RELAY_REPORT_HOST=127.0.0.1
+install_relay "$work/first" TELRAD_RELAY_REPORT_HOST=127.0.0.1 TELRAD_RELAY_REPORT_PORT=12576
 wait_for_status 'state: pairing'
+wait_for_status 'report receiver: 127.0.0.1:12576'
 [[ "$(telrad version)" == 0.0.0-ci.1 ]]
 [[ "$(readlink /usr/local/bin/telrad)" == /usr/local/lib/telrad-relay/telrad ]]
 [[ "$(systemctl show -p User --value telrad-relay.service)" == telrad-relay ]]
@@ -70,19 +74,32 @@ systemctl is-enabled --quiet telrad-relay.service
 [[ "$(stat -c '%U:%G %a' /etc/telrad-relay/relay.json)" == 'root:root 644' ]]
 [[ "$(sudo stat -c '%U %a' /var/lib/telrad-relay)" == 'telrad-relay 700' ]]
 grep -Fq '"reportHost": "127.0.0.1"' /etc/telrad-relay/relay.json
+grep -Fq '"reportPort": 12576' /etc/telrad-relay/relay.json
 refute sudo -u telrad-relay test -w /usr/local/lib/telrad-relay/telrad
 refute sudo -u telrad-relay test -w /etc/telrad-relay/relay.json
 
-# Upgrade keeps configuration and restarts the running service on the new version.
-sudo sed -i 's/"reportPort": 2576/"reportPort": 32576/' /etc/telrad-relay/relay.json
-install_relay "$work/second"
+# Upgrade keeps configuration, even when a receiver is passed again, and
+# restarts the running service on the new version.
+sudo sed -i 's/"reportPort": 12576/"reportPort": 32576/' /etc/telrad-relay/relay.json
+install_relay "$work/second" TELRAD_RELAY_REPORT_HOST=192.0.2.99
 wait_for_status 'Telrad Relay 0.0.0-ci.2'
+wait_for_status 'report receiver: 127.0.0.1:32576'
+grep -Fq '"reportHost": "127.0.0.1"' /etc/telrad-relay/relay.json
 grep -Fq '"reportPort": 32576' /etc/telrad-relay/relay.json
 
 # A deliberately stopped service stays stopped.
 sudo systemctl stop telrad-relay.service
 install_relay "$work/second"
 refute systemctl is-active --quiet telrad-relay.service
+
+# Without a terminal or TELRAD_RELAY_REPORT_HOST the installer writes the
+# placeholder, warns, and status shows the receiver as not configured.
+uninstall
+install_relay "$work/first" >"$work/install.log"
+grep -Fq 'WARNING: no report receiver is configured' "$work/install.log"
+grep -Fq '"reportHost": "report-receiver.invalid"' /etc/telrad-relay/relay.json
+grep -Fq '"reportPort": 2576' /etc/telrad-relay/relay.json
+wait_for_status 'report receiver: NOT CONFIGURED - edit reportHost in /etc/telrad-relay/relay.json and run telrad restart'
 
 # The documented removal leaves nothing behind.
 uninstall

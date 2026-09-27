@@ -16,16 +16,18 @@
 # stopped stays stopped.
 #
 # /etc/telrad-relay/relay.json is written only when absent and is never
-# changed afterwards. Its reportHost is the clinic report receiver; set it with
-# TELRAD_RELAY_REPORT_HOST on the first install:
+# changed afterwards. Its reportHost and reportPort are the clinic report
+# receiver. On the first install the installer asks for them on the terminal
+# (it reads /dev/tty, so this works through a pipe), or takes them from
+# TELRAD_RELAY_REPORT_HOST and TELRAD_RELAY_REPORT_PORT (default 2576):
 #
 #   curl -fsSL .../install.sh | sudo TELRAD_RELAY_REPORT_HOST=192.0.2.20 sh
 #
-# The installer does not prompt, so it works unattended and through a pipe.
-# Without TELRAD_RELAY_REPORT_HOST it writes report-receiver.invalid, a name that
-# can never resolve (RFC 6761): pairing and order forwarding work, and every
-# report is answered AE so Telrad keeps it and retries until the operator sets
-# the real receiver and runs telrad restart.
+# With no terminal and no TELRAD_RELAY_REPORT_HOST, or when the question is
+# left empty, it writes report-receiver.invalid, a name that can never resolve
+# (RFC 6761): pairing and order forwarding work, and every report is answered
+# AE so Telrad keeps it and retries until the operator sets the real receiver
+# and runs telrad restart. telrad status shows the receiver as NOT CONFIGURED.
 #
 # TELRAD_RELAY_RELEASE_URL replaces the GitHub release directory; it exists for
 # installer tests against a locally built release (file:// URLs need curl).
@@ -58,6 +60,51 @@ fetch() {
     fi
 }
 
+valid_host() {
+    case "$1" in
+        '' | [.-]* | *[!A-Za-z0-9.:_-]*) return 1 ;;
+    esac
+    [ "${#1}" -le 253 ]
+}
+
+valid_port() {
+    case "$1" in
+        '' | 0* | *[!0-9]*) return 1 ;;
+    esac
+    [ "${#1}" -le 5 ] && [ "$1" -le 65535 ]
+}
+
+# A terminal is available when /dev/tty opens; it does not under CI or a
+# service manager, and stdin is the script itself under curl | sh.
+have_terminal() {
+    (: </dev/tty >/dev/tty) 2>/dev/null
+}
+
+# Asks for the clinic report receiver, re-asking until the answer is valid. An
+# empty host (or end of input) leaves report_host empty so the placeholder is
+# written.
+ask_report_receiver() {
+    echo "Relay delivers reports to the clinic RIS report receiver (MLLP)." >/dev/tty
+    while :; do
+        printf 'Report receiver host or IP address (leave empty to set it later): ' >/dev/tty
+        IFS= read -r answer </dev/tty || { echo >/dev/tty; return 0; }
+        [ -n "$answer" ] || return 0
+        valid_host "$answer" && break
+        echo "Enter a hostname or IP address, for example ris.clinic.local or 192.0.2.20." >/dev/tty
+    done
+    report_host=$answer
+    while :; do
+        printf 'Report receiver port [%s]: ' "$report_port" >/dev/tty
+        IFS= read -r answer </dev/tty || answer=
+        [ -n "$answer" ] || break
+        if valid_port "$answer"; then
+            report_port=$answer
+            break
+        fi
+        echo "Enter a port from 1 to 65535." >/dev/tty
+    done
+}
+
 # Everything runs from main so a truncated download through a pipe does nothing.
 main() {
     [ "$(id -u)" -eq 0 ] || fail "run this installer as root"
@@ -81,10 +128,12 @@ main() {
     fi
     release_url=${TELRAD_RELAY_RELEASE_URL:-$release_url}
 
-    report_host=${TELRAD_RELAY_REPORT_HOST:-$placeholder}
-    case "$report_host" in
-        *[!A-Za-z0-9.:_-]*) fail "TELRAD_RELAY_REPORT_HOST must be a hostname or IP address" ;;
-    esac
+    report_host=${TELRAD_RELAY_REPORT_HOST:-}
+    report_port=${TELRAD_RELAY_REPORT_PORT:-2576}
+    if [ -n "$report_host" ] && ! valid_host "$report_host"; then
+        fail "TELRAD_RELAY_REPORT_HOST must be a hostname or IP address"
+    fi
+    valid_port "$report_port" || fail "TELRAD_RELAY_REPORT_PORT must be a port from 1 to 65535"
 
     work=$(mktemp -d)
     trap 'rm -rf "$work"' EXIT
@@ -100,6 +149,16 @@ main() {
     grep -E "$pattern" "$work/SHA256SUMS" >"$work/selected"
     (cd "$work" && sha256sum -c selected >/dev/null) ||
         fail "checksum verification failed; nothing was installed"
+
+    # Ask only when relay.json will be written; it is never changed afterwards.
+    if [ -e "$config" ]; then
+        if [ -n "${TELRAD_RELAY_REPORT_HOST:-}${TELRAD_RELAY_REPORT_PORT:-}" ]; then
+            echo "$config already exists; TELRAD_RELAY_REPORT_HOST and TELRAD_RELAY_REPORT_PORT were ignored."
+        fi
+    elif [ -z "$report_host" ] && have_terminal; then
+        ask_report_receiver
+    fi
+    report_host=${report_host:-$placeholder}
 
     fresh=true
     [ -e "$unit" ] && fresh=false
@@ -122,17 +181,15 @@ main() {
     mv -f "$target.new" "$target"
     ln -sfn "$target" /usr/local/bin/telrad
 
-    wrote_config=false
     if [ ! -e "$config" ]; then
         # Only reportHost is required; every other field takes its built-in
         # default. relay.json holds no secrets, so any local user can run
         # telrad status. The service's key and certificate live in its
         # private state directory, /var/lib/telrad-relay.
-        printf '{\n  "schemaVersion": 6,\n  "reportHost": "%s",\n  "reportPort": 2576\n}\n' \
-            "$report_host" >"$config.new"
+        printf '{\n  "schemaVersion": 6,\n  "reportHost": "%s",\n  "reportPort": %s\n}\n' \
+            "$report_host" "$report_port" >"$config.new"
         chmod 0644 "$config.new"
         mv -f "$config.new" "$config"
-        wrote_config=true
     fi
 
     install -m 0644 "$work/telrad-relay.service" "$unit"
@@ -147,8 +204,9 @@ main() {
     fi
 
     echo "Telrad Relay $installed_version installed."
-    if $wrote_config && [ "$report_host" = "$placeholder" ]; then
-        echo "Set reportHost in $config to the clinic report receiver, then run: telrad restart"
+    if grep -Fq "\"$placeholder\"" "$config"; then
+        echo "WARNING: no report receiver is configured, so reports cannot be delivered."
+        echo "Set reportHost (and reportPort) in $config to the clinic report receiver, then run: telrad restart"
     fi
     echo "Run telrad to see the pairing link."
 }

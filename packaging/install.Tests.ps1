@@ -54,7 +54,7 @@ try {
     $tampered = Join-Path $work 'tampered'
     Copy-Item -Recurse $first $tampered
     [IO.File]::AppendAllText((Join-Path $tampered $asset), 'x')
-    Assert-Fails { & $installer -ReleaseUrl $tampered } 'Installer accepted a tampered binary.'
+    Assert-Fails { & $installer -ReleaseUrl $tampered -ReportHost 127.0.0.1 } 'Installer accepted a tampered binary.'
     if (Get-Service TelradRelay -ErrorAction SilentlyContinue) { throw 'Rejected installation created the service.' }
     if (Test-Path $exe) { throw 'Rejected installation left an executable.' }
 
