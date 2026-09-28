@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Disposable Linux CI hosts only: installs, upgrades and removes the real
 # telrad-relay systemd service with packaging/install.sh against locally built
-# releases. It changes /etc, /usr/local and system users.
+# releases, and exercises the telrad operator commands against it. It changes
+# /etc, /usr/local and system users.
 set -euo pipefail
 [[ "${TELRAD_NATIVE_INSTALL_TEST:-}" == 1 ]] || {
     echo 'Set TELRAD_NATIVE_INSTALL_TEST=1 on a disposable native test host.' >&2
@@ -12,14 +13,16 @@ cd "$ROOT_DIR"
 work="$(mktemp -d)"
 chmod 0755 "$work"
 
-uninstall() {
+# Removes everything by hand, so a failed run cleans up even without telrad.
+cleanup() {
     sudo systemctl disable --now telrad-relay.service >/dev/null 2>&1 || true
     sudo rm -rf /etc/systemd/system/telrad-relay.service /usr/local/lib/telrad-relay \
         /usr/local/bin/telrad /etc/telrad-relay /var/lib/telrad-relay
     sudo systemctl daemon-reload
     if getent passwd telrad-relay >/dev/null; then sudo userdel telrad-relay; fi
+    sudo rm -rf /srv/telrad-relay-custom
 }
-trap 'uninstall; rm -rf "$work"' EXIT
+trap 'cleanup; rm -rf "$work"' EXIT
 
 # Bash ignores errexit for commands negated with !, so assert failures explicitly.
 refute() {
@@ -174,17 +177,105 @@ done
 [[ "$(telrad version)" == 0.0.0-ci.2 ]]
 refute systemctl is-active --quiet telrad-relay.service
 
+# Operator commands that change the installation refuse without root, and
+# ask for confirmation unless --yes; setsid leaves them without a terminal.
+refute telrad uninstall --yes 2>"$work/refused.log"
+grep -Fq 'telrad uninstall changes the installation; run it as root' "$work/refused.log"
+refute sudo setsid -w telrad uninstall </dev/null >/dev/null 2>"$work/refused.log"
+grep -Fq 'rerun with --yes' "$work/refused.log"
+[[ -e /usr/local/lib/telrad-relay/telrad ]]
+
+# uninstall --purge removes the stopped installation and everything it kept.
+sudo telrad uninstall --purge --yes >"$work/uninstall.log"
+grep -Fqx 'Telrad Relay was removed.' "$work/uninstall.log"
+[[ ! -e /etc/systemd/system/telrad-relay.service && ! -e /usr/local/lib/telrad-relay && ! -e /usr/local/bin/telrad ]]
+[[ ! -e /etc/telrad-relay && ! -e /var/lib/telrad-relay ]]
+refute getent passwd telrad-relay >/dev/null
+
 # Without a terminal or TELRAD_RELAY_REPORT_HOST the installer writes the
 # placeholder, warns, and status shows the receiver as not configured.
-uninstall
 install_relay "$work/first" >"$work/install.log"
 grep -Fq 'WARNING: no report receiver is configured' "$work/install.log"
+grep -Fqx 'Set the clinic report receiver with: sudo telrad report-receiver HOST[:PORT]' "$work/install.log"
 grep -Fq '"reportHost": "report-receiver.invalid"' /etc/telrad-relay/relay.json
 grep -Fq '"reportPort": 2576' /etc/telrad-relay/relay.json
-wait_for_status 'report receiver: NOT CONFIGURED - edit reportHost in /etc/telrad-relay/relay.json and run telrad restart'
+wait_for_status 'report receiver: NOT CONFIGURED - set it with: sudo telrad report-receiver HOST[:PORT]'
 
-# The documented removal leaves nothing behind.
-uninstall
-[[ ! -e /usr/local/lib/telrad-relay && ! -e /usr/local/bin/telrad && ! -e /etc/telrad-relay && ! -e /var/lib/telrad-relay ]]
+# report-receiver shows the receiver to anyone, and as root sets it, changing
+# only reportHost and reportPort, keeping the file's owner and mode, and
+# restarting the running service.
+[[ "$(telrad report-receiver)" == $'report receiver: NOT CONFIGURED\nSet it with: sudo telrad report-receiver HOST[:PORT]' ]]
+refute telrad report-receiver 127.0.0.1 2>/dev/null
+for receiver in 'bad host' 127.0.0.1:0 127.0.0.1:65536 '[127.0.0.1]:2576' 2001:db8::1:2576x; do
+    refute sudo telrad report-receiver "$receiver" 2>/dev/null
+done
+grep -Fq '"reportHost": "report-receiver.invalid"' /etc/telrad-relay/relay.json
+sudo telrad report-receiver 127.0.0.1:12577 >"$work/receiver.log"
+grep -Fqx 'Restarted telrad-relay.service; it now delivers reports to 127.0.0.1:12577.' "$work/receiver.log"
+[[ "$(cat /etc/telrad-relay/relay.json)" == $'{\n  "schemaVersion": 6,\n  "reportHost": "127.0.0.1",\n  "reportPort": 12577\n}' ]]
+[[ "$(stat -c '%U:%G %a' /etc/telrad-relay/relay.json)" == 'root:root 644' ]]
+[[ "$(telrad report-receiver)" == 'report receiver: 127.0.0.1:12577' ]]
+wait_for_status 'report receiver: 127.0.0.1:12577'
+# Without a port the current one is kept; IPv6 takes brackets with a port.
+sudo telrad report-receiver ::1 >/dev/null
+wait_for_status 'report receiver: [::1]:12577'
+sudo telrad report-receiver '[::1]:12578' >/dev/null
+wait_for_status 'report receiver: [::1]:12578'
+grep -Fq '"reportHost": "::1"' /etc/telrad-relay/relay.json
+grep -Fq '"reportPort": 12578' /etc/telrad-relay/relay.json
+
+# pair removes only identity.json. The enrolment URL never resolves, so the
+# restarted service publishes no link: pair reports the pairing problem and
+# fails after its bounded wait. A synthetic ledger entry, an open backlog
+# window and an unreadable identity stand in for a paired Relay's data.
+sudo systemctl stop telrad-relay.service
+printf 'ACC-SYNTHETIC-1\n' | sudo tee -a /var/lib/telrad-relay/accessions.ledger >/dev/null
+printf 'not an identity\n' | sudo install -o telrad-relay -g telrad-relay -m 0600 /dev/stdin /var/lib/telrad-relay/identity.json
+refute telrad accept-backlog --hours 1 2>/dev/null
+refute sudo test -e /var/lib/telrad-relay/accept-backlog.json
+sudo telrad accept-backlog --hours 1 >/dev/null
+refute sudo setsid -w telrad pair </dev/null >"$work/pair.log" 2>&1
+grep -Fq 'rerun with --yes' "$work/pair.log"
+sudo test -e /var/lib/telrad-relay/identity.json
+if sudo telrad pair --yes >"$work/pair.log" 2>&1; then
+    cat "$work/pair.log" >&2
+    echo 'pair --yes succeeded without a reachable enrolment endpoint' >&2
+    exit 1
+fi
+grep -Fq 'Removed the previous pairing (identity.json); the accession ledger is kept.' "$work/pair.log"
+grep -Fq 'pairing problem: enrolment request failed' "$work/pair.log"
+grep -Fq 'run telrad later to see the link' "$work/pair.log"
+refute sudo test -e /var/lib/telrad-relay/identity.json
+sudo grep -Fqx ACC-SYNTHETIC-1 /var/lib/telrad-relay/accessions.ledger
+sudo test -e /var/lib/telrad-relay/accept-backlog.json
+systemctl is-active --quiet telrad-relay.service
+
+# uninstall keeps the configuration, data and service account, and a
+# reinstall resumes with them.
+sudo telrad uninstall --yes >"$work/uninstall.log"
+grep -Fq 'Reinstall to resume with the kept files.' "$work/uninstall.log"
+[[ ! -e /etc/systemd/system/telrad-relay.service && ! -e /usr/local/lib/telrad-relay && ! -e /usr/local/bin/telrad ]]
+refute systemctl is-active --quiet telrad-relay.service
+grep -Fq '"reportHost": "::1"' /etc/telrad-relay/relay.json
+sudo grep -Fqx ACC-SYNTHETIC-1 /var/lib/telrad-relay/accessions.ledger
+getent passwd telrad-relay >/dev/null
+install_relay "$work/second" >"$work/install.log"
+wait_for_status 'report receiver: [::1]:12578'
+refute grep -Fq 'WARNING' "$work/install.log"
+sudo grep -Fqx ACC-SYNTHETIC-1 /var/lib/telrad-relay/accessions.ledger
+
+# uninstall --purge leaves nothing behind, except a dataDir moved away from
+# the default, which it names and never deletes.
+custom_data=/srv/telrad-relay-custom
+sudo install -d -m 0700 "$custom_data"
+sudo sed -i "s|\"schemaVersion\": 6,|\"schemaVersion\": 6,\n  \"dataDir\": \"$custom_data\",|" /etc/telrad-relay/relay.json
+[[ "$(telrad report-receiver)" == 'report receiver: [::1]:12578' ]]
+sudo telrad uninstall --purge --yes >"$work/uninstall.log"
+grep -Fq "$custom_data, the dataDir set in relay.json, holds the pairing and ledger and is left in place." "$work/uninstall.log"
+grep -Fq "sudo rm -rf '$custom_data'" "$work/uninstall.log"
+[[ -d "$custom_data" ]]
+sudo rmdir "$custom_data"
+[[ ! -e /etc/systemd/system/telrad-relay.service && ! -e /usr/local/lib/telrad-relay && ! -e /usr/local/bin/telrad ]]
+[[ ! -e /etc/telrad-relay && ! -e /var/lib/telrad-relay ]]
 refute getent passwd telrad-relay >/dev/null
 echo 'Native Linux installation checks passed.'

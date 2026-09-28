@@ -62,17 +62,30 @@ is checked in; all are generated at run time.
   environment variable names, validation, unknown-field rejection, `version`,
   `help`, `status` against a stopped service, the status and readiness
   endpoints, `accept-backlog` opening, bounding and cancelling its window and
-  the window in status, container pairing with `enroll`, and a container that is unpaired
-  without a token.
+  the window in status, and a container that is unpaired without a token.
+- **Operator commands.** With a fake service manager, status endpoint and
+  terminal: confirmation answers, `--yes`, refusal without a terminal and
+  without elevation. `pair` deleting only `identity.json` and keeping the
+  ledger and backlog window, printing the new link or the pairing problem
+  after its bounded wait, and restarting an unpaired service only for a
+  pairing problem; container `pair` refusing a paired volume without `--yes`
+  and replacing the identity only after a token succeeds.
+  `report-receiver` host and port validation including IPv6, edits that change
+  only `reportHost` and `reportPort` while keeping order, spacing, mode and
+  other keys, the restart and its confirmation, and the container refusal.
+  `uninstall` keeping or purging the Linux layout under a temporary root,
+  naming a custom `dataDir` it leaves in place, and the container refusal.
+  `accept-backlog` refusing to open or close a window without elevation, except
+  in a container.
 - **End to end.** `runRelay` against fake Telrad listeners: it reaches `ready`,
   forwards an order and records its accession, delivers the matching report,
   forwards DICOM bytes and shuts down cleanly.
 
 ## CI only
 
-The Windows service, the Linux and Windows installers and the container image
-are exercised in CI on disposable runners, not by `go test` on a development
-machine. Cross-compiling for Windows does not exercise the Service Control
+The Windows service, the Linux and Windows installers, the operator commands
+against a real service and the container image are exercised in CI on
+disposable runners, not by `go test` on a development machine. Cross-compiling for Windows does not exercise the Service Control
 Manager, and the Linux suite does not exercise systemd. Do not run installer
 tests on a clinic host.
 

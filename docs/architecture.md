@@ -198,9 +198,21 @@ identifier. Listeners open and report pickup begins.
 
 ### Token pairing (containers)
 
-`docker compose run --rm relay enroll` posts the CSR together with a single-use
+`docker compose run --rm relay pair` posts the CSR together with a single-use
 pairing token from `TELRAD_RELAY_PAIRING_TOKEN`. Telrad answers with the
-certificate immediately because the token already names the company.
+certificate immediately because the token already names the company. On a
+paired volume `pair` needs `--yes`, and replaces the stored identity only once
+the new one has been issued.
+
+### Pairing again (native services)
+
+`telrad pair` asks before replacing a current pairing (`--yes` answers for
+scripts), then stops the service, deletes only `identity.json`, starts the
+service and prints the new link from the status endpoint, waiting up to 30
+seconds. The ledger and any backlog window are kept. On an unpaired Relay it
+deletes nothing and prints the current link, restarting the service only if it
+shows a pairing problem. Telrad keeps the old Relay until a company
+administrator revokes or replaces it.
 
 ### Renewal
 
@@ -306,6 +318,25 @@ and exits non-zero when the relay is not ready; it is the container health
 check. No other local management channel exists. Nothing on the status
 endpoint is clinical or secret.
 
+### Operator commands
+
+Three native commands change the installation and therefore run as root on
+Linux or elevated on Windows; they refuse otherwise. Each works on files and
+the service manager directly, not through the running service.
+
+- `telrad pair [--yes]`: pairing again, above.
+- `telrad report-receiver [HOST[:PORT]]`: shows the receiver, or sets
+  `reportHost` and `reportPort` in `relay.json`, leaving every other byte of
+  the file as it was, replaces the file atomically with its owner and mode,
+  and restarts a running service. Containers refuse to set it; their receiver
+  comes from the environment.
+- `telrad uninstall [--purge] [--yes]`: removes the service, program and
+  command, keeping the configuration and data directory unless `--purge`.
+  Containers refuse it.
+
+`pair` and `uninstall` confirm on the terminal; without one they need
+`--yes`.
+
 ## Configuration
 
 `relay.json`, schema version 6. Environment variables named
@@ -319,7 +350,7 @@ path from earlier schemas: Relay has not been released.
 | `listenAddress` | `0.0.0.0` | clinic-facing bind address |
 | `dicomPort` | `11112` | clinic DICOM listener |
 | `hl7Port` | `2575` | clinic HL7 listener |
-| `reportHost` | required | clinic report receiver; the installer prompts for it on a terminal, accepts `TELRAD_RELAY_REPORT_HOST`, and otherwise writes the placeholder `report-receiver.invalid`, which `status` flags |
+| `reportHost` | required | clinic report receiver; the installer prompts for it on a terminal, accepts `TELRAD_RELAY_REPORT_HOST`, and otherwise writes the placeholder `report-receiver.invalid`, which `status` flags; `telrad report-receiver` sets it |
 | `reportPort` | `2576` | clinic report receiver port |
 | `statusAddress` | `127.0.0.1:8425` | local status endpoint |
 | `maxDicomConnections` | `128` | concurrent associations |
@@ -347,8 +378,10 @@ version; Relay does not update itself.
 - **Container.** `packaging/compose.yml` with a persistent data volume; pairing
   by token as above.
 
-The service process runs unprivileged. `telrad` never requests elevation; the
-installer is the only privileged step.
+The service process runs unprivileged. `telrad` never requests elevation. The
+installer and the operator commands `pair`, `report-receiver HOST` and
+`uninstall` are the only privileged steps, and the operator runs them
+elevated.
 
 ## Recovery after losing the Relay host
 
@@ -434,4 +467,6 @@ configuration schema upgrades, or the performance tooling under
   renewal swap, signed renewal and refusal of a tampered request, CA
   certificate validation, pinning and rotation, expired certificate returning
   to pairing, redirect rejection, file permissions.
-- Installers: the existing bundle contract tests, reduced to the three targets.
+- Installers: the existing bundle contract tests, reduced to the three targets,
+  plus `report-receiver`, `pair --yes` on an unpaired install and `uninstall`
+  with and without `--purge` against the installed service.

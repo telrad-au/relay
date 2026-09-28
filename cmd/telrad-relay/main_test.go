@@ -30,6 +30,20 @@ func TestExecuteVersionHelpAndUnknown(t *testing.T) {
 	if err := execute([]string{"status", "extra"}, &out); err == nil {
 		t.Fatal("extra argument accepted")
 	}
+	out.Reset()
+	printHelp(&out)
+	for _, want := range []string{"telrad pair [--yes]", "telrad report-receiver [HOST[:PORT]]", "telrad uninstall [--purge] [--yes]"} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("help missing %q", want)
+		}
+	}
+	if strings.Contains(out.String(), "enroll") {
+		t.Fatal("help still lists enroll")
+	}
+	path := writeTestConfig(t, t.TempDir())
+	if err := execute([]string{"--config", path, "enroll"}, &out); err == nil || !strings.Contains(err.Error(), `unknown command "enroll"`) {
+		t.Fatalf("enroll: %v", err)
+	}
 }
 
 func TestStatusCommandReportsStoppedService(t *testing.T) {
@@ -91,7 +105,7 @@ func TestStatusEndpointAndReadiness(t *testing.T) {
 		t.Fatalf("report=%+v", report)
 	}
 	var out bytes.Buffer
-	printStatus(&out, report, "relay.json")
+	printStatus(&out, report)
 	for _, want := range []string{"state: ready", "report receiver: 127.0.0.1:", "relay: relay-test", "report pickup: connected=true", "ledger entries: 0"} {
 		if !strings.Contains(out.String(), want) {
 			t.Fatalf("status output missing %q:\n%s", want, out.String())
@@ -107,7 +121,7 @@ func TestStatusEndpointAndReadiness(t *testing.T) {
 	// The CLI status output for an unpaired relay shows the link.
 	unpaired := &statusReport{State: "pairing", PairingLink: "https://app.example.invalid/approve/x"}
 	out.Reset()
-	printStatus(&out, unpaired, "relay.json")
+	printStatus(&out, unpaired)
 	if !strings.Contains(out.String(), "https://app.example.invalid/approve/x") {
 		t.Fatal("pairing link not printed")
 	}
@@ -202,31 +216,6 @@ func TestRunRelayInContainerRequiresTokenWhenUnpaired(t *testing.T) {
 	}
 }
 
-func TestEnrollCommandPairsContainer(t *testing.T) {
-	previous := distribution
-	distribution = "docker"
-	t.Cleanup(func() { distribution = previous })
-	pki := newTestPKI(t)
-	fake := newFakeEnrolment(t, pki)
-	cfg := testConfig(t, pki)
-	cfg.EnrolmentURL = fake.url()
-	t.Setenv(pairingTokenVariable, fake.token)
-	var out bytes.Buffer
-	if err := enrollCommand(cfg, "", &out); err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(out.String(), "Paired relay relay-token") {
-		t.Fatalf("out=%q", out.String())
-	}
-	if _, present := os.LookupEnv(pairingTokenVariable); present {
-		t.Fatal("pairing token left in the environment")
-	}
-	out.Reset()
-	if err := enrollCommand(cfg, "", &out); err != nil || !strings.Contains(out.String(), "already paired") {
-		t.Fatalf("second enroll: %v %q", err, out.String())
-	}
-}
-
 func writeTestConfig(t *testing.T, dataDir string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "relay.json")
@@ -241,9 +230,19 @@ func TestAcceptBacklogCommandOpensAndCancelsWindow(t *testing.T) {
 	dataDir := t.TempDir()
 	path := writeTestConfig(t, dataDir)
 	backlog := filepath.Join(dataDir, acceptBacklogFileName)
+	cfg, err := loadConfig(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// acceptBacklog runs the command as an elevated operator writing to out.
+	acceptBacklog := func(out *bytes.Buffer, args ...string) error {
+		operator := newTestOperator(t)
+		operator.out = out
+		return acceptBacklogCommand(operator.operatorEnv, cfg, args)
+	}
 	var out bytes.Buffer
 	before := time.Now()
-	if err := execute([]string{"--config", path, "accept-backlog"}, &out); err != nil {
+	if err := acceptBacklog(&out); err != nil {
 		t.Fatal(err)
 	}
 	until, open := acceptBacklogUntil(backlog, time.Now())
@@ -261,26 +260,54 @@ func TestAcceptBacklogCommandOpensAndCancelsWindow(t *testing.T) {
 	}
 
 	out.Reset()
-	if err := execute([]string{"--config", path, "accept-backlog", "--hours", "5"}, &out); err != nil {
+	if err := acceptBacklog(&out, "--hours", "5"); err != nil {
 		t.Fatal(err)
 	}
 	if until, _ := acceptBacklogUntil(backlog, time.Now()); time.Until(until) > 5*time.Hour {
 		t.Fatalf("--hours 5 window ends %v", until)
 	}
 	for _, args := range [][]string{{"--hours", "0"}, {"--hours", "169"}, {"--hours", "5", "--cancel"}, {"extra"}, {"--hours", "x"}} {
-		if err := execute(append([]string{"--config", path, "accept-backlog"}, args...), &bytes.Buffer{}); err == nil {
+		if err := acceptBacklog(&bytes.Buffer{}, args...); err == nil {
 			t.Fatalf("accept-backlog %v accepted", args)
 		}
 	}
 	out.Reset()
-	if err := execute([]string{"--config", path, "accept-backlog", "--cancel"}, &out); err != nil || !strings.Contains(out.String(), "closed") {
+	if err := acceptBacklog(&out, "--cancel"); err != nil || !strings.Contains(out.String(), "closed") {
 		t.Fatalf("cancel: %v %q", err, out.String())
 	}
 	if _, err := os.Stat(backlog); !os.IsNotExist(err) {
 		t.Fatal("cancel left the window file")
 	}
-	if err := execute([]string{"--config", path, "accept-backlog", "--cancel"}, &bytes.Buffer{}); err != nil {
+	if err := acceptBacklog(&bytes.Buffer{}, "--cancel"); err != nil {
 		t.Fatalf("cancel without a window: %v", err)
+	}
+}
+
+func TestAcceptBacklogRequiresElevation(t *testing.T) {
+	dataDir := t.TempDir()
+	cfg, err := loadConfig(writeTestConfig(t, dataDir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	backlog := filepath.Join(dataDir, acceptBacklogFileName)
+	operator := newTestOperator(t)
+	operator.elevated = func() bool { return false }
+	for _, args := range [][]string{nil, {"--cancel"}} {
+		err := acceptBacklogCommand(operator.operatorEnv, cfg, args)
+		if err == nil || !strings.Contains(err.Error(), "telrad accept-backlog changes the installation; "+elevationHint) {
+			t.Fatalf("accept-backlog %v: %v", args, err)
+		}
+	}
+	if _, err := os.Stat(backlog); !os.IsNotExist(err) {
+		t.Fatal("unelevated accept-backlog opened a window")
+	}
+	// A container runs it as the volume's owner, not root.
+	useContainer(t)
+	if err := acceptBacklogCommand(operator.operatorEnv, cfg, []string{"--hours", "1"}); err != nil {
+		t.Fatalf("container: %v", err)
+	}
+	if _, open := acceptBacklogUntil(backlog, time.Now()); !open {
+		t.Fatal("container window not opened")
 	}
 }
 
@@ -300,12 +327,12 @@ func TestStatusShowsAcceptBacklogWindow(t *testing.T) {
 		t.Fatalf("acceptBacklogUntil=%v", report.AcceptBacklogUntil)
 	}
 	var out bytes.Buffer
-	printStatus(&out, &report, "relay.json")
+	printStatus(&out, &report)
 	if !strings.Contains(out.String(), "backlog acceptance: open until "+until.Format(time.RFC3339)) {
 		t.Fatalf("status output:\n%s", out.String())
 	}
 	out.Reset()
-	printStatus(&out, &statusReport{State: "ready", Paired: true}, "relay.json")
+	printStatus(&out, &statusReport{State: "ready", Paired: true})
 	if strings.Contains(out.String(), "backlog") {
 		t.Fatal("closed window printed")
 	}

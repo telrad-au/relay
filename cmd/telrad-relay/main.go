@@ -40,7 +40,12 @@ Usage:
   telrad status           Show status
   telrad ready            Exit 0 when the relay is ready, otherwise print why and exit 1
   telrad run              Run the relay in the foreground (the service entry point)
-  telrad enroll           Pair using TELRAD_RELAY_PAIRING_TOKEN (containers)
+  telrad pair [--yes]     Pair this Relay again and print the new pairing link,
+                          asking before replacing a current pairing; a container
+                          pairs with TELRAD_RELAY_PAIRING_TOKEN
+  telrad report-receiver [HOST[:PORT]]
+                          Show the clinic report receiver, or set it and restart
+                          the service (an IPv6 address with a port is [ADDRESS]:PORT)
   telrad accept-backlog [--hours N]
                           For N hours (1 to 168, default 72), accept reports for
                           accessions not in the ledger and record them
@@ -49,7 +54,16 @@ Usage:
   telrad start            Start the background service
   telrad stop             Stop the background service
   telrad restart          Restart the background service
+  telrad uninstall [--purge] [--yes]
+                          Remove the service and program, keeping the
+                          configuration, pairing and ledger; --purge deletes
+                          them too
   telrad version          Print the installed version
+
+pair, report-receiver HOST, accept-backlog and uninstall change the
+installation: run them as root (sudo) on Linux or from an Administrator
+PowerShell on Windows. --yes answers the confirmation question of pair and
+uninstall; without a terminal it is required.
 
 Options:
   --config PATH           Use a different relay configuration file
@@ -71,8 +85,16 @@ func execute(args []string, out io.Writer) error {
 	if flags.NArg() > 0 {
 		command = flags.Arg(0)
 	}
-	if flags.NArg() > 1 && command != "accept-backlog" {
-		return fmt.Errorf("%s accepts no arguments", command)
+	args = flags.Args()
+	if len(args) > 0 {
+		args = args[1:]
+	}
+	switch command {
+	case "accept-backlog", "pair", "report-receiver", "uninstall":
+	default:
+		if len(args) > 0 {
+			return fmt.Errorf("%s accepts no arguments", command)
+		}
 	}
 	switch command {
 	case "help":
@@ -86,10 +108,17 @@ func execute(args []string, out io.Writer) error {
 			return errors.New("manage the Relay container through its container runtime")
 		}
 		return serviceAction(command)
+	case "uninstall":
+		return uninstallCommand(*configPath, args, out)
 	}
 	cfg, err := loadConfig(*configPath)
 	if err != nil {
 		return err
+	}
+	if command == "report-receiver" {
+		// Setting the receiver may repair a configuration that is invalid
+		// only because of it, so it validates the edited result itself.
+		return reportReceiverCommand(cfg, *configPath, args, out)
 	}
 	if err := validateConfig(cfg); err != nil {
 		return fmt.Errorf("invalid relay configuration: %w", err)
@@ -102,50 +131,17 @@ func execute(args []string, out io.Writer) error {
 		if err != nil {
 			return err
 		}
-		printStatus(out, report, *configPath)
+		printStatus(out, report)
 		return nil
-	case "enroll":
-		return enrollCommand(cfg, *configPath, out)
+	case "pair":
+		return pairCommand(cfg, args, out)
 	case "accept-backlog":
-		return acceptBacklogCommand(cfg, flags.Args()[1:], out)
+		return acceptBacklogCommand(newOperatorEnv(cfg.StatusAddress, out), cfg, args)
 	case "run":
 		return runPlatformService(cfg)
 	default:
 		return fmt.Errorf("unknown command %q", command)
 	}
-}
-
-// enrollCommand pairs a container with a token. On a native install pairing is
-// interactive through the running service, so the command shows the link.
-func enrollCommand(cfg *config, configPath string, out io.Writer) error {
-	if distribution != "docker" {
-		report, err := fetchStatus(cfg.StatusAddress)
-		if err != nil {
-			return err
-		}
-		printStatus(out, report, configPath)
-		return nil
-	}
-	if err := os.MkdirAll(cfg.DataDir, 0700); err != nil {
-		return err
-	}
-	store, err := openIdentity(cfg)
-	if err != nil {
-		return err
-	}
-	if store.paired() {
-		fmt.Fprintln(out, "Relay is already paired.")
-		return nil
-	}
-	token, err := consumePairingToken()
-	if err != nil {
-		return err
-	}
-	if err := pairWithToken(context.Background(), cfg, store, token); err != nil {
-		return err
-	}
-	fmt.Fprintf(out, "Paired relay %s\n", store.relayID())
-	return nil
 }
 
 func consumePairingToken() (string, error) {

@@ -1,5 +1,6 @@
 # Disposable Windows CI hosts only: installs, upgrades and removes the real
-# TelradRelay service with packaging/install.ps1 against locally built releases.
+# TelradRelay service with packaging/install.ps1 against locally built
+# releases, and exercises the telrad operator commands against it.
 $ErrorActionPreference = 'Stop'
 if ($env:TELRAD_NATIVE_INSTALL_TEST -ne '1') { throw 'Installer tests require a disposable host (TELRAD_NATIVE_INSTALL_TEST=1).' }
 
@@ -38,6 +39,18 @@ function Wait-Status([string]$expected) {
         Start-Sleep -Seconds 1
     }
     throw "telrad status did not report '${expected}': $text"
+}
+
+# Runs telrad and returns its combined output and exit code. Piping $null
+# makes standard input a pipe rather than a console, so nothing can confirm.
+function Invoke-Telrad([string[]]$arguments) {
+    $output = ($null | & $exe @arguments 2>&1) -join "`n"
+    [pscustomobject]@{ Output = $output; ExitCode = $LASTEXITCODE }
+}
+
+function Wait-Removed([string]$path) {
+    for ($attempt = 0; $attempt -lt 30 -and (Test-Path -LiteralPath $path); $attempt++) { Start-Sleep -Seconds 1 }
+    if (Test-Path -LiteralPath $path) { throw "$path was not removed." }
 }
 
 function Assert-Fails([scriptblock]$action, [string]$message) {
@@ -126,6 +139,58 @@ try {
     Assert-Fails { & $installer -ReleaseUrl $second } 'Installer accepted a link in the data directory.'
     if ((Get-Acl $outside).Sddl -ne $outsideAcl) { throw 'Installer changed permissions through a junction.' }
     [IO.Directory]::Delete($junction)
+
+    # report-receiver shows the receiver and sets it, changing only reportHost
+    # and reportPort and restarting the running service.
+    Start-Service TelradRelay
+    $shown = Invoke-Telrad @('report-receiver')
+    if ($shown.ExitCode -ne 0 -or $shown.Output -ne 'report receiver: 127.0.0.1:32576') { throw "report-receiver showed: $($shown.Output)" }
+    foreach ($receiver in 'bad host', '127.0.0.1:0', '[127.0.0.1]:2576') {
+        if ((Invoke-Telrad @('report-receiver', $receiver)).ExitCode -eq 0) { throw "report-receiver accepted $receiver." }
+    }
+    $set = Invoke-Telrad @('report-receiver', '127.0.0.1:12577')
+    if ($set.ExitCode -ne 0 -or -not $set.Output.Contains('now delivers reports to 127.0.0.1:12577')) { throw "report-receiver failed: $($set.Output)" }
+    Wait-Status 'report receiver: 127.0.0.1:12577'
+    $settings = Get-Content -Raw $config | ConvertFrom-Json
+    if ($settings.schemaVersion -ne 6 -or $settings.reportHost -ne '127.0.0.1' -or $settings.reportPort -ne 12577) { throw 'report-receiver wrote the wrong configuration.' }
+    if ((Invoke-Telrad @('report-receiver', '[::1]')).ExitCode -ne 0) { throw 'report-receiver refused an IPv6 address.' }
+    Wait-Status 'report receiver: [::1]:12577'
+
+    # pair --yes removes only identity.json. The enrolment URL never resolves,
+    # so no link appears and pair fails after its bounded wait.
+    Stop-Service TelradRelay
+    $ledger = Join-Path $dataDir 'accessions.ledger'
+    [IO.File]::AppendAllText($ledger, "ACC-SYNTHETIC-1`n")
+    [IO.File]::WriteAllText((Join-Path $dataDir 'identity.json'), 'not an identity')
+    if ((Invoke-Telrad @('accept-backlog', '--hours', '1')).ExitCode -ne 0) { throw 'accept-backlog failed.' }
+    $refused = Invoke-Telrad @('pair')
+    if ($refused.ExitCode -eq 0 -or -not $refused.Output.Contains('rerun with --yes')) { throw "pair without a console: $($refused.Output)" }
+    if (-not (Test-Path (Join-Path $dataDir 'identity.json'))) { throw 'Refused pair removed identity.json.' }
+    $paired = Invoke-Telrad @('pair', '--yes')
+    if ($paired.ExitCode -eq 0 -or -not $paired.Output.Contains('pairing problem: enrolment request failed')) { throw "pair --yes: $($paired.Output)" }
+    if (Test-Path (Join-Path $dataDir 'identity.json')) { throw 'pair --yes kept identity.json.' }
+    if (-not (Get-Content $ledger).Contains('ACC-SYNTHETIC-1')) { throw 'pair --yes changed the ledger.' }
+    if (-not (Test-Path (Join-Path $dataDir 'accept-backlog.json'))) { throw 'pair --yes removed the backlog window.' }
+    if ((Get-Service TelradRelay).Status -ne 'Running') { throw 'pair --yes left the service stopped.' }
+
+    # uninstall refuses without a console, then removes the service, firewall
+    # rules, PATH entry and program directory but keeps the data directory.
+    if ((Invoke-Telrad @('uninstall')).ExitCode -eq 0 -or -not (Test-Path $exe)) { throw 'uninstall ran without confirmation.' }
+    $removed = Invoke-Telrad @('uninstall', '--yes')
+    if ($removed.ExitCode -ne 0 -or -not $removed.Output.Contains('Telrad Relay was removed.')) { throw "uninstall failed: $($removed.Output)" }
+    if (Get-Service TelradRelay -ErrorAction SilentlyContinue) { throw 'uninstall kept the service.' }
+    if (Get-NetFirewallRule -Name TelradRelay-DICOM, TelradRelay-HL7 -ErrorAction SilentlyContinue) { throw 'uninstall kept the firewall rules.' }
+    if (([Environment]::GetEnvironmentVariable('Path', 'Machine') -split ';') -contains $installDir) { throw 'uninstall kept the PATH entry.' }
+    Wait-Removed $installDir
+    if (-not (Get-Content $ledger).Contains('ACC-SYNTHETIC-1') -or -not (Test-Path $config)) { throw 'uninstall removed the data directory.' }
+
+    # A reinstall resumes with the kept configuration; --purge removes it too.
+    & $installer -ReleaseUrl $second
+    Wait-Status 'report receiver: [::1]:12577'
+    $purged = Invoke-Telrad @('uninstall', '--purge', '--yes')
+    if ($purged.ExitCode -ne 0) { throw "uninstall --purge failed: $($purged.Output)" }
+    Wait-Removed $installDir
+    if (Test-Path $dataDir) { throw 'uninstall --purge kept the data directory.' }
 
     Write-Host 'Windows installer checks passed.'
 } finally {

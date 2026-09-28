@@ -18,23 +18,48 @@ Containers pair with a single-use pairing token from Telrad. Use the
 ```bash
 read -rsp 'Pairing token: ' TELRAD_RELAY_PAIRING_TOKEN && printf '\n'
 export TELRAD_RELAY_PAIRING_TOKEN
-docker compose run --rm --env TELRAD_RELAY_PAIRING_TOKEN relay enroll
+docker compose run --rm --env TELRAD_RELAY_PAIRING_TOKEN relay pair
 unset TELRAD_RELAY_PAIRING_TOKEN
 docker compose up --detach
 ```
 
-`enroll` generates the key, sends the certificate request with the token and
+`pair` generates the key, sends the certificate request with the token and
 stores the issued identity in the volume. Telrad issues the certificate
 immediately because the token already names the company. Relay removes the
 token from its environment as soon as it reads it and never writes or logs it.
-Running `enroll` on a paired volume does nothing. Do not put the token in a
-Compose or environment file.
+On a paired volume `pair` refuses and changes nothing unless given `--yes`; see
+[pairing again](#pairing-again). Do not put the token in a Compose or
+environment file.
 
 An unpaired container started without a token exits with an error saying that
 `TELRAD_RELAY_PAIRING_TOKEN` is required.
 
 Official images contain the production enrolment endpoint. Set
 `TELRAD_RELAY_ENROLMENT_URL` only for development.
+
+## Pairing again
+
+To pair a paired volume again, for example to move the Relay to another
+company, stop the container and pair with a new token and `--yes`:
+
+```bash
+docker compose stop relay
+read -rsp 'Pairing token: ' TELRAD_RELAY_PAIRING_TOKEN && printf '\n'
+export TELRAD_RELAY_PAIRING_TOKEN
+docker compose run --rm --env TELRAD_RELAY_PAIRING_TOKEN relay pair --yes
+unset TELRAD_RELAY_PAIRING_TOKEN
+docker compose up --detach
+```
+
+The stored identity is replaced only after Telrad has issued the new one, so a
+refused or mistyped token leaves the current pairing in place. The ledger is
+kept. Telrad keeps the old Relay until a company administrator revokes or
+replaces it in settings.
+
+The native `telrad report-receiver HOST` and `telrad uninstall` commands do
+not apply to containers: change `TELRAD_RELAY_REPORT_HOST` and
+`TELRAD_RELAY_REPORT_PORT` and recreate the container, and remove the
+container as described under [removal](#removal).
 
 ## Networking
 
@@ -115,10 +140,9 @@ Renewal is automatic from 30 days before the 90-day certificate expires and is
 retried daily after a failure. Renewal requests are signed with the current key
 and may also replace the Telrad Relay CA certificate. A volume whose
 `identity.json` predates the pinned CA is treated as unpaired; pair it with a
-new token. If the certificate expires, the Relay must be
-paired again: stop the container, remove `identity.json` from the volume (keep
-`accessions.ledger`), and repeat [first pairing](#first-pairing) with a new
-token.
+new token. If the certificate expires, the Relay must be paired again: stop
+the container and repeat [first pairing](#first-pairing) with a new token. An
+expired pairing is replaced without `--yes`, and the ledger is kept.
 
 ## Upgrade and rollback
 

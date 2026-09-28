@@ -43,8 +43,9 @@ terminal to see the pairing link.
 
 Without an answer or a variable, either installer writes the placeholder
 `report-receiver.invalid`: Relay pairs and forwards orders, but every report is
-answered `AE` and retried by Telrad until you set `reportHost` in `relay.json`
-and run `telrad restart`.
+answered `AE` and retried by Telrad until you set the receiver with
+`sudo telrad report-receiver HOST[:PORT]` (on Windows, `telrad report-receiver`
+from an Administrator PowerShell).
 
 ### Docker Compose
 
@@ -89,7 +90,7 @@ A container pairs with a one-time pairing token from Telrad.
 ```bash
 read -rsp 'Pairing token: ' TELRAD_RELAY_PAIRING_TOKEN && \
   export TELRAD_RELAY_PAIRING_TOKEN && printf '\n'
-docker compose run --rm --env TELRAD_RELAY_PAIRING_TOKEN relay enroll
+docker compose run --rm --env TELRAD_RELAY_PAIRING_TOKEN relay pair
 unset TELRAD_RELAY_PAIRING_TOKEN
 docker compose up --detach
 ```
@@ -101,7 +102,7 @@ Run in PowerShell:
 ```powershell
 $SecureToken = Read-Host "Pairing token" -AsSecureString
 $env:TELRAD_RELAY_PAIRING_TOKEN = [Net.NetworkCredential]::new("", $SecureToken).Password
-docker compose run --rm --env TELRAD_RELAY_PAIRING_TOKEN relay enroll
+docker compose run --rm --env TELRAD_RELAY_PAIRING_TOKEN relay pair
 Remove-Item Env:TELRAD_RELAY_PAIRING_TOKEN
 docker compose up --detach
 ```
@@ -118,9 +119,16 @@ names the Relay; Telrad records which company the Relay belongs to.
   request and `telrad` prints the verification link. An authorised person opens
   it, signs in to Telrad, chooses the company and approves. The service then
   receives its certificate and Telrad's addresses and opens its listeners.
-- **Containers** pair by token. `enroll` sends the token with the certificate
+- **Containers** pair by token. `pair` sends the token with the certificate
   request and Telrad issues the certificate immediately, because the token
   already names the company. The token is used once and never stored.
+
+To pair a Relay again, for example to move it to another company, run
+`sudo telrad pair` (an Administrator PowerShell on Windows). It shows the
+current pairing and asks before removing it, then prints the new link; the
+ledger is kept. In a container, run `pair --yes` with a new token; the current
+pairing is replaced only once Telrad has issued the new one. Telrad keeps the
+old Relay until a company administrator revokes or replaces it in settings.
 
 The DICOM and HL7 listeners stay closed until pairing succeeds. Relay renews its
 certificate automatically; see [Security and privacy](#security-and-privacy).
@@ -143,8 +151,11 @@ Point the RIS's HL7 order sender at the Relay host's LAN address on port
 `2575`. Relay forwards each message and returns Telrad's acknowledgement
 unchanged.
 
-Configure `reportHost` and `reportPort` to the RIS's MLLP report receiver. The
-receiver opens that listener; Relay connects to it for each report.
+Set the report receiver to the RIS's MLLP report receiver with
+`sudo telrad report-receiver HOST[:PORT]` (an IPv6 address with a port is
+`[ADDRESS]:PORT`). It updates `reportHost` and `reportPort` in `relay.json` and
+restarts the service. The receiver opens that listener; Relay connects to it
+for each report.
 
 Restrict each local port to the clinic systems that need it.
 
@@ -170,23 +181,36 @@ a duplicate message with the same control ID without duplicate clinical effect.
 ## Check and manage Relay
 
 ```text
-telrad                  Show status, including the pairing link while unpaired
-telrad status           Show status
-telrad accept-backlog   Accept reports missing from the ledger for 72 hours
-telrad start            Start the service
-telrad stop             Stop the service
-telrad restart          Restart the service
-telrad version          Print the installed version
+telrad                          Show status, including the pairing link while unpaired
+telrad status                   Show status
+telrad pair [--yes]             Pair this Relay again and print the new link
+telrad report-receiver [HOST[:PORT]]
+                                Show or set the report receiver
+telrad accept-backlog           Accept reports missing from the ledger for 72 hours
+telrad start                    Start the service
+telrad stop                     Stop the service
+telrad restart                  Restart the service
+telrad uninstall [--purge] [--yes]
+                                Remove Relay, keeping its configuration and data
+                                unless --purge
+telrad version                  Print the installed version
 ```
 
 `status` shows the state (`pairing`, `ready` or `degraded`), the report
 receiver (`NOT CONFIGURED` while `reportHost` is the placeholder), certificate
 expiry, listener state, Telrad connectivity, report pickup, report counts and
-the number of ledger entries. `telrad` never requests elevation; `start`,
-`stop` and `restart` need the same rights as managing the service directly.
+the number of ledger entries. `telrad` never requests elevation. `pair`,
+`report-receiver HOST`, `accept-backlog` and `uninstall` change the
+installation, so run them with `sudo` on Linux or from an Administrator
+PowerShell on Windows; `pair` and `uninstall` ask before removing a pairing or
+Relay itself, and `--yes` answers for scripts.
+`start`, `stop` and `restart` need the same rights as managing the service
+directly.
 
 To update, rerun the installer for the version you want. Containers update by
-pulling a new image. Relay does not update itself.
+pulling a new image. Relay does not update itself. To remove a native install,
+run `telrad uninstall`; it keeps the configuration and data directory so a
+reinstall resumes paired, and `--purge` deletes them too.
 
 ## Firewall
 

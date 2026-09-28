@@ -13,7 +13,10 @@ import (
 	"strings"
 )
 
-const currentConfigSchemaVersion = 6
+const (
+	currentConfigSchemaVersion = 6
+	maxConfigBytes             = 64 * 1024
+)
 
 // defaultEnrolmentURL is the production enrolment endpoint. Development builds
 // override it with -ldflags "-X main.defaultEnrolmentURL=...".
@@ -61,16 +64,8 @@ func loadConfig(path string) (*config, error) {
 		return nil, err
 	}
 	if err == nil {
-		if int64(len(data)) > 64*1024 {
-			return nil, errors.New("relay configuration exceeds 64 KiB")
-		}
-		decoder := json.NewDecoder(bytes.NewReader(data))
-		decoder.DisallowUnknownFields()
-		if err := decoder.Decode(cfg); err != nil {
-			return nil, fmt.Errorf("decode relay configuration: %w", err)
-		}
-		if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-			return nil, errors.New("decode relay configuration: multiple JSON values are not allowed")
+		if err := decodeConfig(data, cfg); err != nil {
+			return nil, err
 		}
 		cfg.configDir = filepath.Dir(path)
 	}
@@ -81,6 +76,22 @@ func loadConfig(path string) (*config, error) {
 		cfg.DataDir = filepath.Join(cfg.configDir, cfg.DataDir)
 	}
 	return cfg, nil
+}
+
+// decodeConfig reads a relay.json document over cfg, rejecting unknown fields.
+func decodeConfig(data []byte, cfg *config) error {
+	if int64(len(data)) > maxConfigBytes {
+		return errors.New("relay configuration exceeds 64 KiB")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(cfg); err != nil {
+		return fmt.Errorf("decode relay configuration: %w", err)
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return errors.New("decode relay configuration: multiple JSON values are not allowed")
+	}
+	return nil
 }
 
 // applyEnvironment maps TELRAD_RELAY_<FIELD> to each configuration field, with

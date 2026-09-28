@@ -26,9 +26,9 @@
 # first install or restarts it if it was running. A service that an operator
 # stopped stays stopped.
 #
-# /etc/telrad-relay/relay.json is written only when absent and is never
-# changed afterwards. Its reportHost and reportPort are the clinic report
-# receiver. On the first install the installer asks for them on the terminal
+# The installer writes /etc/telrad-relay/relay.json only when absent and never
+# changes it afterwards; telrad report-receiver does. Its reportHost and
+# reportPort are the clinic report receiver. On the first install the installer asks for them on the terminal
 # (it reads /dev/tty, so this works through a pipe), or takes them from
 # TELRAD_RELAY_REPORT_HOST and TELRAD_RELAY_REPORT_PORT (default 2576):
 #
@@ -38,17 +38,15 @@
 # left empty, it writes report-receiver.invalid, a name that can never resolve
 # (RFC 6761): pairing and order forwarding work, and every report is answered
 # AE so Telrad keeps it and retries until the operator sets the real receiver
-# and runs telrad restart. telrad status shows the receiver as NOT CONFIGURED.
+# with sudo telrad report-receiver HOST[:PORT]. telrad status shows the
+# receiver as NOT CONFIGURED.
 #
 # TELRAD_RELAY_RELEASE_URL replaces the GitHub release directory, even after a
 # main build was found; it exists for installer tests against a locally built
 # release (file:// URLs need curl).
 #
-# Remove Relay with:
-#   systemctl disable --now telrad-relay.service
-#   rm -rf /etc/systemd/system/telrad-relay.service /usr/local/lib/telrad-relay \
-#       /usr/local/bin/telrad /etc/telrad-relay /var/lib/telrad-relay
-#   systemctl daemon-reload && userdel telrad-relay
+# Remove Relay with sudo telrad uninstall, which keeps the configuration and
+# data directory for a reinstall; sudo telrad uninstall --purge deletes them.
 set -eu
 
 repository=https://github.com/telrad-au/relay
@@ -248,7 +246,7 @@ main() {
     echo "Telrad Relay $installed_version installed."
     if grep -Fq "\"$placeholder\"" "$config"; then
         echo "WARNING: no report receiver is configured, so reports cannot be delivered."
-        echo "Set reportHost (and reportPort) in $config to the clinic report receiver, then run: telrad restart"
+        echo "Set the clinic report receiver with: sudo telrad report-receiver HOST[:PORT]"
     fi
     echo "Run telrad to see the pairing link."
 }

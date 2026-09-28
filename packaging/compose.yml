@@ -20,7 +20,7 @@ services:
       # Optional enrolment endpoint override for development.
       TELRAD_RELAY_ENROLMENT_URL: ${TELRAD_RELAY_ENROLMENT_URL:-}
       # Single-use pairing token, read on the first run or by
-      # `docker compose run --rm relay enroll`. Export it only in the shell
+      # `docker compose run --rm relay pair`. Export it only in the shell
       # that pairs; never save it in the env file.
       TELRAD_RELAY_PAIRING_TOKEN: ${TELRAD_RELAY_PAIRING_TOKEN:-}
     ports:

@@ -40,7 +40,9 @@ requires TLS 1.2 or later and ships no trust material of its own.
 
 `relay.json` uses schema version `6`. Unknown fields are rejected, and a file
 with any other `schemaVersion` is refused; there is no migration from earlier
-schemas. Change the file and run `telrad restart` to apply it.
+schemas. Set the report receiver with
+[`telrad report-receiver`](#report-receiver); for other fields, change the
+file and run `telrad restart` to apply it.
 
 The installer writes `relay.json` only when it is absent and never changes it
 on a reinstall. On that first install it asks on the terminal for the report
@@ -49,8 +51,8 @@ or takes them from `TELRAD_RELAY_REPORT_HOST` and `TELRAD_RELAY_REPORT_PORT`
 (`-ReportHost` and `-ReportPort` on Windows). With no terminal and no host
 given, or when the question is left empty, it writes the placeholder
 `report-receiver.invalid` and prints a warning: Relay still pairs and forwards
-orders, but every report is answered `AE` and retried by Telrad until
-`reportHost` is set and the service restarted.
+orders, but every report is answered `AE` and retried by Telrad until the
+receiver is set with [`telrad report-receiver`](#report-receiver).
 
 | Field | Default | Meaning |
 | --- | --- | --- |
@@ -90,6 +92,26 @@ The data directory holds these files, all readable only by the service account:
 Never copy `identity.json` to another host or restore it from a backup. See
 [replacing the Relay host](#replacing-the-relay-host).
 
+## Report receiver
+
+```bash
+telrad report-receiver
+sudo telrad report-receiver ris.clinic.local
+sudo telrad report-receiver 192.0.2.20:2576
+sudo telrad report-receiver '[2001:db8::20]:2576'
+```
+
+Without an argument the command shows the configured receiver, or
+`NOT CONFIGURED` while `reportHost` is the installer placeholder; anyone can
+run it. With `HOST[:PORT]` it sets the receiver. The host is a hostname or an
+IP address; an IPv6 address with a port is written `[ADDRESS]:PORT`. The port
+is 1 to 65535 and stays as it is when omitted. The command changes only
+`reportHost` and `reportPort` in `relay.json`, keeping the other fields, their
+order and the file's owner and permissions, and replaces the file atomically.
+If the service is running it is restarted, and the command waits until
+`status` shows the new receiver. On Windows, run it from an Administrator
+PowerShell.
+
 ## Pairing
 
 The service starts unpaired, with only the status endpoint open. It generates a
@@ -106,6 +128,33 @@ stores its identity, opens the DICOM and HL7 listeners and starts report
 pickup. An expired or refused link is replaced by a new one; run `telrad` again
 to see it. Pairing requests never follow redirects.
 
+### Pairing again
+
+To pair the Relay again, for example after it was revoked or to move it to
+another company:
+
+```bash
+sudo telrad pair
+```
+
+On Windows, run `telrad pair` from an Administrator PowerShell. If the Relay is
+paired, the command shows its Relay identifier and certificate expiry and asks
+`Pair this Relay again? [y/N]`; `--yes` answers yes, and without a terminal
+`--yes` is required. It then stops the service, deletes only `identity.json`
+from the data directory, keeping `accessions.ledger` and any
+`accept-backlog.json`, starts the service and waits up to 30 seconds for the
+new pairing link, which it prints. An `identity.json` the service cannot read is
+replaced the same way.
+
+If the Relay is not paired, `pair` deletes nothing: it prints the current link,
+starting the service if it is stopped and restarting it if it shows a pairing
+problem instead of a link. If no link appears in time, `pair` prints the
+pairing problem and exits non-zero; the service keeps trying, so run `telrad`
+later to see the link.
+
+Telrad keeps the old Relay until a company administrator revokes it or chooses
+**Replace** on it in Telrad's settings.
+
 ## Status and degraded behaviour
 
 ```bash
@@ -117,8 +166,8 @@ telrad status
 
 - the state: `pairing` until paired, `ready`, or `degraded`;
 - the report receiver as `host:port`, or `report receiver: NOT CONFIGURED`
-  with the file to edit while `reportHost` is the installer placeholder (the
-  JSON field `reportReceiverConfigured` is then `false`);
+  with the command that sets it while `reportHost` is the installer
+  placeholder (the JSON field `reportReceiverConfigured` is then `false`);
 - the end of an open backlog acceptance window;
 - the pairing link and any pairing problem while unpaired;
 - the Relay identifier, certificate expiry and any renewal problem;
@@ -216,7 +265,8 @@ sudo telrad accept-backlog --hours 72
 ```
 
 On Windows, run `telrad accept-backlog --hours 72` from an Administrator
-PowerShell. `--hours` is 1 to 168 and defaults to 72. The command writes
+PowerShell; without root or Administrator rights the command refuses.
+`--hours` is 1 to 168 and defaults to 72. The command writes
 `accept-backlog.json` to the data directory and prints when the window ends;
 the running service picks it up with the next report, without a restart. Until
 then a report whose accession numbers are not all in the ledger is delivered,
@@ -266,11 +316,10 @@ reachable so renewal can succeed.
 An expired certificate cannot be renewed; the Relay must be paired again. An
 `identity.json` written by an earlier version without the Telrad Relay CA
 certificate is also treated as unpaired: the service logs why and shows a new
-pairing link. Stop
-the service, delete `identity.json` from the data directory (keep
-`accessions.ledger`), start the service and run `telrad` for a new link.
-Telrad revokes a Relay by refusing its certificate; pairing again is also the
-recovery from revocation.
+pairing link. Run `sudo telrad pair` to get the link; it restarts a service
+whose certificate expired while running. Telrad revokes a Relay by refusing its
+certificate; [pairing again](#pairing-again) is also the recovery from
+revocation.
 
 ## Upgrades
 
@@ -294,10 +343,52 @@ exits. It never acknowledges a report it has not delivered.
 
 ## Removal
 
-Stop and disable the service, then remove the installed files. The data
-directory holds the private key and the ledger; delete it only when the Relay
-is being retired. Ask Telrad to revoke the Relay so its certificate is no
-longer accepted.
+```bash
+sudo telrad uninstall
+sudo telrad uninstall --purge
+```
+
+On Windows, run `telrad uninstall` from an Administrator PowerShell. The
+command lists what it removes and keeps and asks before removing; `--yes`
+answers yes, and without a terminal `--yes` is required.
+
+By default it removes the service, the program and the `telrad` command and
+keeps the configuration and data directory, so reinstalling resumes with the
+same pairing, report receiver and ledger:
+
+- Linux: it stops and disables `telrad-relay.service`, removes the unit,
+  `/usr/local/lib/telrad-relay` and the `/usr/local/bin/telrad` link, and
+  reloads systemd. `/etc/telrad-relay`, `/var/lib/telrad-relay` and the
+  `telrad-relay` user stay.
+- Windows: it stops and deletes the `TelradRelay` service and its event log
+  source, removes the `TelradRelay-DICOM` and `TelradRelay-HL7` firewall rules
+  and the machine `PATH` entry, and removes `%ProgramFiles%\Telrad Relay`.
+  Windows cannot delete a running program, so a hidden PowerShell removes that
+  directory once the command exits; if it cannot start, the directory is
+  removed at the next restart. `%ProgramData%\Telrad\Relay` stays.
+
+`--purge` also deletes the configuration and data directory, including the
+Relay's private key and the ledger, and on Linux the `telrad-relay` user. If
+`relay.json` sets `dataDir` to another directory, `uninstall` never deletes
+it, with or without `--purge`; it names that directory and the command that
+deletes it. Purge
+only when the Relay is being retired, and ask a company administrator to revoke
+it in Telrad so its certificate is no longer accepted.
+
+If `telrad` is already gone, remove Relay by hand on Linux with:
+
+```bash
+sudo systemctl disable --now telrad-relay.service
+sudo rm -rf /etc/systemd/system/telrad-relay.service /usr/local/lib/telrad-relay /usr/local/bin/telrad
+sudo systemctl daemon-reload
+# Only when retiring the Relay:
+sudo rm -rf /etc/telrad-relay /var/lib/telrad-relay && sudo userdel telrad-relay
+```
+
+On Windows, stop and delete the `TelradRelay` service (`sc.exe delete
+TelradRelay`), remove the two firewall rules and
+`%ProgramFiles%\Telrad Relay` and its machine `PATH` entry, and, only when
+retiring the Relay, `%ProgramData%\Telrad\Relay`.
 
 ## Logs
 

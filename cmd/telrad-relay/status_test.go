@@ -43,7 +43,7 @@ func TestStatusReportsReportReceiver(t *testing.T) {
 }
 
 func TestPrintStatusShowsReportReceiver(t *testing.T) {
-	const notConfigured = "report receiver: NOT CONFIGURED - edit reportHost in /etc/telrad-relay/relay.json and run telrad restart\n"
+	notConfigured := "report receiver: NOT CONFIGURED - set it with: " + reportReceiverUsage + "\n"
 	for _, test := range []struct {
 		name   string
 		report statusReport
@@ -54,7 +54,7 @@ func TestPrintStatusShowsReportReceiver(t *testing.T) {
 		{"placeholder while pairing", statusReport{State: "pairing", PairingLink: "https://app.example.invalid/approve/x"}, notConfigured},
 	} {
 		var out bytes.Buffer
-		printStatus(&out, &test.report, "/etc/telrad-relay/relay.json")
+		printStatus(&out, &test.report)
 		if !strings.Contains(out.String(), test.want) {
 			t.Fatalf("%s: status output missing %q:\n%s", test.name, test.want, out.String())
 		}
@@ -64,7 +64,7 @@ func TestPrintStatusShowsReportReceiver(t *testing.T) {
 	distribution = "docker"
 	t.Cleanup(func() { distribution = previous })
 	var out bytes.Buffer
-	printStatus(&out, &statusReport{State: "pairing"}, "/etc/telrad-relay/relay.json")
+	printStatus(&out, &statusReport{State: "pairing"})
 	if !strings.Contains(out.String(), "report receiver: NOT CONFIGURED - set TELRAD_RELAY_REPORT_HOST and recreate the container\n") {
 		t.Fatalf("container status output:\n%s", out.String())
 	}
