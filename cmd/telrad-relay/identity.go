@@ -74,8 +74,13 @@ type identityStore struct {
 	changedCh chan struct{}
 }
 
+// newIdentityStore is an unpaired store that writes cfg's identity file.
+func newIdentityStore(cfg *config) *identityStore {
+	return &identityStore{path: cfg.dataPath(identityFileName), changedCh: make(chan struct{}, 1)}
+}
+
 func openIdentity(cfg *config) (*identityStore, error) {
-	store := &identityStore{path: cfg.dataPath(identityFileName), changedCh: make(chan struct{}, 1)}
+	store := newIdentityStore(cfg)
 	data, err := os.ReadFile(store.path)
 	if errors.Is(err, os.ErrNotExist) {
 		return store, nil

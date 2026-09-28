@@ -379,9 +379,8 @@ func fetchStatus(address string) (*statusReport, error) {
 	return &report, nil
 }
 
-// printStatus renders a status report. configPath names the configuration
-// file the operator edits when the report receiver is not configured.
-func printStatus(out io.Writer, report *statusReport, configPath string) {
+// printStatus renders a status report.
+func printStatus(out io.Writer, report *statusReport) {
 	fmt.Fprintf(out, "Telrad Relay %s\n", report.Version)
 	fmt.Fprintf(out, "state: %s\n", report.State)
 	switch {
@@ -390,7 +389,7 @@ func printStatus(out io.Writer, report *statusReport, configPath string) {
 	case distribution == "docker":
 		fmt.Fprintln(out, "report receiver: NOT CONFIGURED - set TELRAD_RELAY_REPORT_HOST and recreate the container")
 	default:
-		fmt.Fprintf(out, "report receiver: NOT CONFIGURED - edit reportHost in %s and run telrad restart\n", configPath)
+		fmt.Fprintf(out, "report receiver: NOT CONFIGURED - set it with: %s\n", reportReceiverUsage)
 	}
 	if report.AcceptBacklogUntil != nil {
 		fmt.Fprintf(out, "backlog acceptance: open until %s (reports for accessions not in the ledger are accepted)\n", report.AcceptBacklogUntil.Format(time.RFC3339))

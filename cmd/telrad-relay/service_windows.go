@@ -7,12 +7,9 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"os/exec"
 	"os/signal"
-	"path/filepath"
 	"strings"
 
-	"golang.org/x/sys/windows"
 	"golang.org/x/sys/windows/svc"
 	"golang.org/x/sys/windows/svc/eventlog"
 )
@@ -79,22 +76,16 @@ func (service *relayWindowsService) Execute(_ []string, requests <-chan svc.Chan
 	}
 }
 
+// serviceAction starts, stops or restarts TelradRelay and waits for each
+// change to finish, so a restart cannot start a service that is still stopping.
 func serviceAction(action string) error {
-	system, err := windows.GetSystemDirectory()
-	if err != nil {
-		return err
-	}
-	sc := filepath.Join(system, "sc.exe")
-	run := func(args ...string) error {
-		command := exec.Command(sc, args...)
-		command.Stdout, command.Stderr = os.Stdout, os.Stderr
-		return command.Run()
-	}
+	service := windowsService{name: windowsServiceName}
 	switch action {
-	case "restart":
-		_ = run("stop", windowsServiceName)
-		return run("start", windowsServiceName)
+	case "start":
+		return service.start()
+	case "stop":
+		return service.stop()
 	default:
-		return run(action, windowsServiceName)
+		return service.restart()
 	}
 }

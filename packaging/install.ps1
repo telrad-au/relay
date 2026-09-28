@@ -32,25 +32,24 @@
 # any New-NetFirewallRule -RemoteAddress value). Existing rules are left as the
 # operator configured them unless -ClinicRemoteAddress is passed again.
 #
-# relay.json is written only when absent and never changed afterwards. On the
-# first install an interactive session is asked for the clinic report
+# The installer writes relay.json only when absent and never changes it
+# afterwards; telrad report-receiver does. On the first install an interactive session is asked for the clinic report
 # receiver; -ReportHost and -ReportPort (or $env:TELRAD_RELAY_REPORT_HOST and
 # $env:TELRAD_RELAY_REPORT_PORT, default 2576) set it without asking. With no
 # interactive session and no -ReportHost, or when the question is left empty,
 # the installer writes report-receiver.invalid, a name that never resolves:
 # pairing and order forwarding work and every report is answered AE, so Telrad
-# keeps it and retries until the operator sets reportHost and runs telrad
-# restart. telrad status shows the receiver as NOT CONFIGURED.
+# keeps it and retries until the operator runs telrad report-receiver
+# HOST[:PORT] as Administrator. telrad status shows the receiver as NOT
+# CONFIGURED.
 #
 # -ReleaseUrl (or $env:TELRAD_RELAY_RELEASE_URL) replaces the GitHub release
 # directory with another https URL or a local directory, for installer tests,
 # even after a main build was found.
 #
-# Remove Relay with:
-#   Stop-Service TelradRelay; sc.exe delete TelradRelay
-#   Remove-NetFirewallRule -Name TelradRelay-DICOM, TelradRelay-HL7
-#   Remove-Item -Recurse "$env:ProgramFiles\Telrad Relay", "$env:ProgramData\Telrad\Relay"
-#   and remove "$env:ProgramFiles\Telrad Relay" from the machine PATH.
+# Remove Relay with telrad uninstall as Administrator, which keeps
+# %ProgramData%\Telrad\Relay for a reinstall; telrad uninstall --purge
+# deletes it too.
 param(
     [string]$Version = $env:TELRAD_RELAY_VERSION,
     [string]$ReportHost = $env:TELRAD_RELAY_REPORT_HOST,
@@ -308,7 +307,7 @@ try {
     Write-Host "Telrad Relay $installedVersion installed."
     if ([IO.File]::ReadAllText($config).Contains("`"$placeholder`"")) {
         Write-Host 'WARNING: no report receiver is configured, so reports cannot be delivered.'
-        Write-Host "Set reportHost (and reportPort) in $config to the clinic report receiver, then run: telrad restart"
+        Write-Host 'Set the clinic report receiver as Administrator with: telrad report-receiver HOST[:PORT]'
     }
     Write-Host 'Run telrad in an elevated prompt to see the pairing link.'
 } finally {

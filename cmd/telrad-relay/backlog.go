@@ -5,7 +5,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"io"
 	"log/slog"
 	"os"
 	"time"
@@ -67,7 +66,11 @@ func openAcceptBacklog(path string, hours int, now time.Time) (time.Time, error)
 //
 //	accept-backlog [--hours N]
 //	accept-backlog --cancel
-func acceptBacklogCommand(cfg *config, args []string, out io.Writer) error {
+//
+// On a native install it changes the data directory, so it needs root or an
+// elevated prompt. A container runs it as the volume's owner instead.
+func acceptBacklogCommand(env *operatorEnv, cfg *config, args []string) error {
+	out := env.out
 	flags := flag.NewFlagSet("accept-backlog", flag.ContinueOnError)
 	flags.SetOutput(out)
 	hours := flags.Int("hours", acceptBacklogDefaultHours, "hours to accept reports for accessions not in the ledger (1 to 168)")
@@ -77,6 +80,11 @@ func acceptBacklogCommand(cfg *config, args []string, out io.Writer) error {
 	}
 	if flags.NArg() > 0 {
 		return errors.New("accept-backlog accepts only --hours or --cancel")
+	}
+	if distribution != "docker" {
+		if err := env.requireElevation("accept-backlog"); err != nil {
+			return err
+		}
 	}
 	hoursGiven := false
 	flags.Visit(func(f *flag.Flag) { hoursGiven = hoursGiven || f.Name == "hours" })
