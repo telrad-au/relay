@@ -76,5 +76,9 @@ machine. Cross-compiling for Windows does not exercise the Service Control
 Manager, and the Linux suite does not exercise systemd. Do not run installer
 tests on a clinic host.
 
+To try the current `main` on a disposable test host, install its newest main
+build by passing `main` to the installer (see `docs/releases.md`). The installer
+contract tests check main build selection against synthetic release listings.
+
 Building and testing release artifacts does not authorise publishing, tagging
 or promoting them.

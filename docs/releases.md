@@ -9,7 +9,8 @@ authorisation boundaries.
 
 Routine development happens on `dev`, where pushes run CI. Reviewed work
 reaches `main` through a squash-merged pull request that passes CI and CodeQL.
-Merging to `main` publishes nothing.
+Merging to `main` publishes only an unsigned development [main
+build](#main-builds).
 
 Releases are cut from `main` with annotated SemVer tags:
 
@@ -48,6 +49,9 @@ Stable installers are also available through GitHub's
 `releases/latest/download/ASSET` redirect, which selects the latest published
 non-prerelease release. No other host is part of the distribution contract.
 
+Unsigned `main-*` development prereleases also exist, one per `main` commit;
+see [Main builds](#main-builds). They are not releases in the sense above.
+
 The production enrolment endpoint is source-controlled in
 `cmd/telrad-relay/config.go` and embedded in official binaries and images.
 
@@ -71,6 +75,44 @@ verify, it publishes the GitHub Release, and only then advances `latest`.
 Release notes record the promoted prerelease, source revision, container
 version tag and digest. Container consumers should pin the digest in
 production.
+
+## Main builds
+
+After CI succeeds for a push to `main`, `publish-main.yml` publishes that
+commit as a GitHub prerelease, for installing the current `main` on
+a test host. No tag or approval is needed.
+
+- The tag is `main-<build>-g<sha7>` and the version `0.0.0-main.<build>.g<sha7>`,
+  where `<build>` is `git rev-list --count` of the commit on linear `main` and
+  `<sha7>` its short SHA, for example `main-842-gb39dfa0`.
+- It holds the native binaries, installers, licences and `SHA256SUMS` only: no
+  container image, Authenticode signature, SBOM or attestation. It is unsigned
+  and not for clinical use.
+- The binaries enrol with the development Telrad,
+  `https://dev.app.telrad.com.au/api/relay/enrolments`.
+- It is never marked latest and is not pruned. It can never be promoted,
+  because the prerelease, stable and promotion workflows read only `v*` tags.
+- Rerunning the workflow for a published build changes nothing.
+
+The regular installers install main builds. Pass `main` for the newest main
+build or `main-<build>` for a given one (`-Version` on Windows, or
+`TELRAD_RELAY_VERSION` on either):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/telrad-au/relay/main/packaging/install.sh | sudo sh -s -- main
+curl -fsSL https://raw.githubusercontent.com/telrad-au/relay/main/packaging/install.sh | sudo sh -s -- main-842
+```
+
+```powershell
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/telrad-au/relay/main/packaging/install.ps1))) -Version main
+```
+
+Once a stable release exists, the `releases/latest/download` installers accept
+`main` too. The installer finds main builds through the anonymous GitHub API,
+which is rate limited and searches only the newest 100 releases, prints the
+chosen tag, and installs from that release. Each main build's installers also
+install that build directly from its exact tag URL, for example
+`curl -fsSL https://github.com/telrad-au/relay/releases/download/main-842-gb39dfa0/install.sh | sudo sh`.
 
 ## Protected GitHub configuration
 

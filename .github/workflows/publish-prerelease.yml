@@ -311,7 +311,7 @@ jobs:
                       --prerelease \
                       --verify-tag \
                       --title "Telrad Relay $VERSION (prerelease)" \
-                      --notes "${visibility^} prerelease for integration testing. Install it with install.sh or install.ps1 and version $VERSION; native binaries default to the development enrolment endpoint and are verified by SHA256SUMS only (the Windows binary is not Authenticode-signed). Container: $IMAGE:$VERSION@$DIGEST. Its default enrolment endpoint is $CONTAINER_ENROLMENT_URL and can be overridden with TELRAD_RELAY_ENROLMENT_URL. Promotion metadata: container-promotion.json."
+                      --notes "${visibility^} prerelease for integration testing. Install it with this release's install.sh or install.ps1, which default to $VERSION without a version argument; native binaries default to the development enrolment endpoint and are verified by SHA256SUMS only (the Windows binary is not Authenticode-signed). Container: $IMAGE:$VERSION@$DIGEST. Its default enrolment endpoint is $CONTAINER_ENROLMENT_URL and can be overridden with TELRAD_RELAY_ENROLMENT_URL. Promotion metadata: container-promotion.json."
                   release_state="$(gh release view "$TAG" --json isPrerelease,tagName --jq '[.tagName, .isPrerelease] | @tsv')"
                   [[ "$release_state" == "$TAG"$'\ttrue' ]] || {
                       echo "GitHub did not report $TAG as a prerelease." >&2

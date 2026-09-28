@@ -3,10 +3,21 @@
 #
 #   curl -fsSL https://github.com/telrad-au/relay/releases/latest/download/install.sh | sudo sh
 #
-# Install or upgrade to a specific version by passing it as the argument (or
-# TELRAD_RELAY_VERSION). Rerunning the installer is the only upgrade path:
+# Without a version it installs the release it was downloaded from, so an
+# exact-tag installer installs that tag. Install or upgrade to another version
+# by passing it as the argument (or TELRAD_RELAY_VERSION). Rerunning the
+# installer is the only upgrade path:
 #
 #   curl -fsSL https://github.com/telrad-au/relay/releases/latest/download/install.sh | sudo sh -s -- 1.2.3
+#
+# On a test host, main installs the newest main build and main-842 main build
+# 842. Main builds are unsigned development prereleases that enrol with the
+# development Telrad and are not for clinical use. They are found through the
+# anonymous, rate-limited GitHub API, which TELRAD_RELAY_RELEASES_API replaces
+# for installer tests (file:// URLs need curl):
+#
+#   curl -fsSL https://raw.githubusercontent.com/telrad-au/relay/main/packaging/install.sh | sudo sh -s -- main
+#   curl -fsSL https://raw.githubusercontent.com/telrad-au/relay/main/packaging/install.sh | sudo sh -s -- main-842
 #
 # The installer downloads the release binary for this architecture and the
 # systemd unit, verifies both against the release's SHA256SUMS, creates the
@@ -29,8 +40,9 @@
 # AE so Telrad keeps it and retries until the operator sets the real receiver
 # and runs telrad restart. telrad status shows the receiver as NOT CONFIGURED.
 #
-# TELRAD_RELAY_RELEASE_URL replaces the GitHub release directory; it exists for
-# installer tests against a locally built release (file:// URLs need curl).
+# TELRAD_RELAY_RELEASE_URL replaces the GitHub release directory, even after a
+# main build was found; it exists for installer tests against a locally built
+# release (file:// URLs need curl).
 #
 # Remove Relay with:
 #   systemctl disable --now telrad-relay.service
@@ -40,6 +52,9 @@
 set -eu
 
 repository=https://github.com/telrad-au/relay
+# scripts/build-release.sh sets the release's tag here in the shipped copy; the
+# empty source copy installs the latest release.
+release_tag=
 unit=/etc/systemd/system/telrad-relay.service
 config=/etc/telrad-relay/relay.json
 target=/usr/local/lib/telrad-relay/telrad
@@ -105,6 +120,27 @@ ask_report_receiver() {
     done
 }
 
+# Sets tag to the newest main build, or to main build N for main-N, from the
+# anonymous GitHub API (the newest 100 releases). One JSON member per line
+# works for compact and pretty-printed responses without jq.
+find_main_build() {
+    api=${TELRAD_RELAY_RELEASES_API:-https://api.github.com/repos/telrad-au/relay/releases?per_page=100}
+    fetch "$api" "$work/releases.json" ||
+        fail "could not list releases from $api (anonymous GitHub API requests are rate limited; retry later if so)"
+    # shellcheck disable=SC2020 # each of {, } and , becomes a newline
+    tags=$(tr '{},' '\n\n\n' <"$work/releases.json" |
+        sed -n 's/^[[:space:]]*"tag_name"[[:space:]]*:[[:space:]]*"\(main-[0-9][0-9]*-g[0-9a-f]\{7,40\}\)"[[:space:]]*$/\1/p' |
+        sort -t - -k 2,2n)
+    [ -n "$tags" ] || fail "no main builds were found"
+    build=${1#main}
+    build=${build#-}
+    if [ -n "$build" ]; then
+        tags=$(printf '%s\n' "$tags" | grep "^main-$build-g") || fail "main build $build was not found"
+    fi
+    tag=$(printf '%s\n' "$tags" | tail -n 1)
+    echo "Telrad Relay main build: $tag"
+}
+
 # Everything runs from main so a truncated download through a pipe does nothing.
 main() {
     [ "$(id -u)" -eq 0 ] || fail "run this installer as root"
@@ -117,12 +153,21 @@ main() {
         *) fail "unsupported architecture $(uname -m)" ;;
     esac
 
+    work=$(mktemp -d)
+    trap 'rm -rf "$work"' EXIT
+    trap 'exit 130' INT TERM
+
     version=${1:-${TELRAD_RELAY_VERSION:-}}
-    version=${version#v}
-    if [ -n "$version" ]; then
+    if printf '%s\n' "$version" | grep -Eqx 'main(-[1-9][0-9]*)?'; then
+        find_main_build "$version"
+        release_url="$repository/releases/download/$tag"
+    elif [ -n "$version" ]; then
+        version=${version#v}
         printf '%s\n' "$version" | grep -Eqx '[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?' ||
-            fail "version must look like 1.2.3 or 1.2.3-rc.1"
+            fail "version must look like 1.2.3, 1.2.3-rc.1, main or main-842"
         release_url="$repository/releases/download/v$version"
+    elif [ -n "$release_tag" ]; then
+        release_url="$repository/releases/download/$release_tag"
     else
         release_url="$repository/releases/latest/download"
     fi
@@ -135,9 +180,6 @@ main() {
     fi
     valid_port "$report_port" || fail "TELRAD_RELAY_REPORT_PORT must be a port from 1 to 65535"
 
-    work=$(mktemp -d)
-    trap 'rm -rf "$work"' EXIT
-    trap 'exit 130' INT TERM
     binary=telrad-relay-linux-$arch
     echo "Downloading Telrad Relay from $release_url"
     for file in SHA256SUMS "$binary" telrad-relay.service; do
