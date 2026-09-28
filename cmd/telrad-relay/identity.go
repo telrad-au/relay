@@ -720,13 +720,12 @@ func sleepContext(ctx context.Context, delay time.Duration) bool {
 	}
 }
 
-// relayPlatform is the enrolment platform Telrad records: docker for the
-// container, otherwise the operating system, linux or windows.
 func relayPlatform() string {
-	if distribution == "docker" {
-		return "docker"
+	platform := runtime.GOOS + "/" + runtime.GOARCH
+	if distribution != "" && distribution != "native" {
+		return distribution + "/" + platform
 	}
-	return runtime.GOOS
+	return platform
 }
 
 // safeNetworkError strips addresses and other detail that could identify the

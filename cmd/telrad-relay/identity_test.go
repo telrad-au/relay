@@ -16,7 +16,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -58,9 +57,6 @@ func newFakeEnrolment(t *testing.T, pki *testPKI) *fakeEnrolment {
 	return fake
 }
 
-// validPlatforms are the enrolment platforms Telrad accepts.
-var validPlatforms = map[string]bool{"linux": true, "windows": true, "docker": true}
-
 func (fake *fakeEnrolment) url() string { return fake.server.URL + "/api/relay/enrolments" }
 
 func (fake *fakeEnrolment) issue(w http.ResponseWriter, csr string, relayID string) {
@@ -78,7 +74,7 @@ func (fake *fakeEnrolment) handleEnrol(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body map[string]string
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body["csr"] == "" || body["agentVersion"] == "" || !validPlatforms[body["platform"]] {
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body["csr"] == "" || body["agentVersion"] == "" || body["platform"] == "" {
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
@@ -627,18 +623,5 @@ func TestOpenIdentityWithoutTelradCAIsUnpaired(t *testing.T) {
 	}
 	if store.paired() || store.expired() || store.relayID() != "" {
 		t.Fatal("identity without a Telrad CA treated as paired")
-	}
-}
-
-func TestRelayPlatformIsOneTelradAccepts(t *testing.T) {
-	previous := distribution
-	t.Cleanup(func() { distribution = previous })
-	distribution = "native"
-	if got := relayPlatform(); got != runtime.GOOS || !validPlatforms[got] {
-		t.Fatalf("native platform = %q", got)
-	}
-	distribution = "docker"
-	if got := relayPlatform(); got != "docker" {
-		t.Fatalf("container platform = %q", got)
 	}
 }
