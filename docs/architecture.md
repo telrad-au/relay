@@ -236,6 +236,9 @@ no-store`.
 | `GET {enrolmentUrl}/{enrolmentId}` | `202` pending, `200` issued, `410` expired or denied |
 | `POST {enrolmentUrl}/renew` `{ csr, agentVersion, certificate, signedAt, signature }` | `200` issued, or `403` |
 
+`platform` is `linux` or `windows` for a native service and `docker` for the
+container. `hostname` is 1 to 253 characters and `agentVersion` 1 to 64.
+
 Renewal is a plain HTTPS request without a client certificate:
 
 ```json
