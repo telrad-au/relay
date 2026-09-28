@@ -2,10 +2,21 @@
 #
 #   irm https://github.com/telrad-au/relay/releases/latest/download/install.ps1 | iex
 #
-# Install or upgrade to a specific version with -Version (or
-# $env:TELRAD_RELAY_VERSION). Rerunning the installer is the only upgrade path:
+# Without -Version it installs the release it was downloaded from, so an
+# exact-tag installer installs that tag. Install or upgrade to another version
+# with -Version (or $env:TELRAD_RELAY_VERSION). Rerunning the installer is the
+# only upgrade path:
 #
 #   & ([scriptblock]::Create((irm https://github.com/telrad-au/relay/releases/latest/download/install.ps1))) -Version 1.2.3
+#
+# On a test host, -Version main installs the newest main build and main-842
+# main build 842. Main builds are unsigned development prereleases that enrol
+# with the development Telrad and are not for clinical use. They are found
+# through the anonymous, rate-limited GitHub API, which
+# $env:TELRAD_RELAY_RELEASES_API replaces with another https URL or a local
+# file for installer tests:
+#
+#   & ([scriptblock]::Create((irm https://raw.githubusercontent.com/telrad-au/relay/main/packaging/install.ps1))) -Version main
 #
 # The installer downloads telrad-relay-windows-amd64.exe, verifies it against
 # the release's SHA256SUMS, installs it as %ProgramFiles%\Telrad Relay\telrad.exe
@@ -32,7 +43,8 @@
 # restart. telrad status shows the receiver as NOT CONFIGURED.
 #
 # -ReleaseUrl (or $env:TELRAD_RELAY_RELEASE_URL) replaces the GitHub release
-# directory with another https URL or a local directory, for installer tests.
+# directory with another https URL or a local directory, for installer tests,
+# even after a main build was found.
 #
 # Remove Relay with:
 #   Stop-Service TelradRelay; sc.exe delete TelradRelay
@@ -67,17 +79,51 @@ $companyDir = Join-Path $env:ProgramData 'Telrad'
 $dataDir = Join-Path $companyDir 'Relay'
 $config = Join-Path $dataDir 'relay.json'
 $asset = 'telrad-relay-windows-amd64.exe'
+$repository = 'https://github.com/telrad-au/relay'
+# scripts/build-release.sh sets the release's tag here in the shipped copy; the
+# empty source copy installs the latest release.
+$releaseTag = ''
 $placeholder = 'report-receiver.invalid'
 $system = New-Object Security.Principal.SecurityIdentifier('S-1-5-18')
 $administrators = New-Object Security.Principal.SecurityIdentifier('S-1-5-32-544')
 $users = New-Object Security.Principal.SecurityIdentifier('S-1-5-32-545')
 
-$Version = "$Version".Trim().TrimStart('v')
-if ($Version) {
-    if ($Version -notmatch '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$') { Fail 'version must look like 1.2.3 or 1.2.3-rc.1' }
-    $defaultUrl = "https://github.com/telrad-au/relay/releases/download/v$Version"
+# Returns the tag of the newest main build, or of main build N for main-N, from
+# the anonymous GitHub API (the newest 100 releases) or a local test file.
+function Find-MainBuild([string]$requested) {
+    $api = if ($env:TELRAD_RELAY_RELEASES_API) { $env:TELRAD_RELAY_RELEASES_API } else { 'https://api.github.com/repos/telrad-au/relay/releases?per_page=100' }
+    $local = $api -notmatch '^https://'
+    if ($local -and -not (Test-Path -LiteralPath $api -PathType Leaf)) { Fail 'the releases API must use https or name a local file' }
+    try {
+        $releases = if ($local) { Get-Content -Raw -LiteralPath $api | ConvertFrom-Json } else { Invoke-RestMethod -UseBasicParsing -Uri $api }
+    } catch {
+        Fail "could not list releases from $api (anonymous GitHub API requests are rate limited; retry later if so)"
+    }
+    $builds = @(foreach ($release in $releases) {
+        if ("$($release.tag_name)" -cmatch '^main-([0-9]+)-g[0-9a-f]{7,40}\z') { [pscustomobject]@{ Tag = $release.tag_name; Build = [decimal]$Matches[1] } }
+    })
+    if ($builds.Count -eq 0) { Fail 'no main builds were found' }
+    if ($requested -ne 'main') {
+        $build = $requested.Substring(5)
+        $builds = @($builds | Where-Object { $_.Build -eq [decimal]$build })
+        if ($builds.Count -eq 0) { Fail "main build $build was not found" }
+    }
+    $tag = ($builds | Sort-Object Build | Select-Object -Last 1).Tag
+    Write-Host "Telrad Relay main build: $tag"
+    $tag
+}
+
+$Version = "$Version".Trim()
+if ($Version -cmatch '^main(-[1-9][0-9]*)?\z') {
+    $defaultUrl = "$repository/releases/download/$(Find-MainBuild $Version)"
+} elseif ($Version) {
+    $Version = $Version.TrimStart('v')
+    if ($Version -notmatch '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$') { Fail 'version must look like 1.2.3, 1.2.3-rc.1, main or main-842' }
+    $defaultUrl = "$repository/releases/download/v$Version"
+} elseif ($releaseTag) {
+    $defaultUrl = "$repository/releases/download/$releaseTag"
 } else {
-    $defaultUrl = 'https://github.com/telrad-au/relay/releases/latest/download'
+    $defaultUrl = "$repository/releases/latest/download"
 }
 if (-not $ReleaseUrl) { $ReleaseUrl = $defaultUrl }
 function Test-ReportHost([string]$value) { $value.Length -le 253 -and $value -match '^[A-Za-z0-9:_][A-Za-z0-9.:_-]*\z' }

@@ -10,8 +10,7 @@ required_lines=(
     'SECURITY.md:reporting](https://github.com/telrad-au/relay/security/advisories/new).'
     'README.md:irm https://github.com/telrad-au/relay/releases/latest/download/install.ps1 | iex'
     'packaging/install.sh:repository=https://github.com/telrad-au/relay'
-    'packaging/install.ps1:    $defaultUrl = "https://github.com/telrad-au/relay/releases/download/v$Version"'
-    'packaging/install.ps1:    $defaultUrl = '"'"'https://github.com/telrad-au/relay/releases/latest/download'"'"
+    'packaging/install.ps1:$repository = '"'"'https://github.com/telrad-au/relay'"'"
     'cmd/telrad-relay/config.go:var defaultEnrolmentURL = "https://app.telrad.com.au/api/relay/enrolments"'
     'packaging/docker-relay.json:  "enrolmentUrl": "https://app.telrad.com.au/api/relay/enrolments"'
     '.github/workflows/publish-prerelease.yml:    IMAGE: ghcr.io/telrad-au/relay'

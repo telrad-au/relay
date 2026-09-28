@@ -50,6 +50,14 @@ try {
     $first = New-Release '0.0.0-ci.1'
     $second = New-Release '0.0.0-ci.2'
 
+    # A shipped installer carries its release tag in place of the empty
+    # placeholder, as scripts/build-release.sh writes it; -ReleaseUrl still wins.
+    $placeholder = "`$releaseTag = ''"
+    $source = Get-Content -LiteralPath $installer
+    if (@($source | Where-Object { $_ -ceq $placeholder }).Count -ne 1) { throw 'install.ps1 must contain the empty release tag placeholder once.' }
+    $tagged = Join-Path $work 'install.ps1'
+    Set-Content -LiteralPath $tagged -Value ($source | ForEach-Object { if ($_ -ceq $placeholder) { "`$releaseTag = 'main-7-gabcdef0'" } else { $_ } })
+
     # A checksum mismatch installs nothing.
     $tampered = Join-Path $work 'tampered'
     Copy-Item -Recurse $first $tampered
@@ -58,7 +66,7 @@ try {
     if (Get-Service TelradRelay -ErrorAction SilentlyContinue) { throw 'Rejected installation created the service.' }
     if (Test-Path $exe) { throw 'Rejected installation left an executable.' }
 
-    & $installer -ReleaseUrl $first -ReportHost 127.0.0.1
+    & $tagged -ReleaseUrl $first -ReportHost 127.0.0.1
     Wait-Status 'state: pairing'
     if ((& $exe version) -ne '0.0.0-ci.1') { throw 'Installed version is wrong.' }
     $service = Get-CimInstance Win32_Service -Filter "Name='TelradRelay'"
@@ -86,10 +94,23 @@ try {
     $settings.reportPort = 32576
     [IO.File]::WriteAllText($config, ($settings | ConvertTo-Json), (New-Object Text.UTF8Encoding($false)))
     Set-NetFirewallRule -Name TelradRelay-DICOM -Enabled False
-    & $installer -ReleaseUrl $second
+    # -Version main picks the numerically newest main build from the release
+    # listing; -ReleaseUrl still supplies the files.
+    $releases = Join-Path $work 'releases.json'
+    [IO.File]::WriteAllText($releases, '[{"tag_name":"main-9-g1111111"},{"tag_name":"v2.1.0"},{"tag_name":"main-100-gaaaaaaa"},{"tag_name":"v2.1.0-rc.1"},{"tag_name":"main-10-gbbbbbbb"}]')
+    $env:TELRAD_RELAY_RELEASES_API = $releases
+    $output = & $installer -Version main -ReleaseUrl $second 6>&1 | Out-String
+    if (-not $output.Contains('Telrad Relay main build: main-100-gaaaaaaa')) { throw "Installer chose the wrong main build: $output" }
     Wait-Status 'Telrad Relay 0.0.0-ci.2'
     if ((Get-Content -Raw $config | ConvertFrom-Json).reportPort -ne 32576) { throw 'Upgrade lost configuration.' }
     if ((Get-NetFirewallRule -Name TelradRelay-DICOM).Enabled -ne 'False') { throw 'Upgrade changed an operator firewall rule.' }
+
+    # A main build that is not listed fails before anything changes.
+    $refusal = ''
+    try { & $installer -Version main-11 -ReleaseUrl $first *> $null } catch { $refusal = "$_" }
+    if (-not $refusal.Contains('main build 11 was not found')) { throw "Installer did not refuse a missing main build: $refusal" }
+    if ((& $exe version) -ne '0.0.0-ci.2') { throw 'A refused main build changed the installed version.' }
+    Remove-Item Env:TELRAD_RELAY_RELEASES_API
 
     # A deliberately stopped service stays stopped.
     Stop-Service TelradRelay
@@ -108,6 +129,7 @@ try {
 
     Write-Host 'Windows installer checks passed.'
 } finally {
+    Remove-Item Env:TELRAD_RELAY_RELEASES_API -ErrorAction SilentlyContinue
     Stop-Service TelradRelay -ErrorAction SilentlyContinue
     & sc.exe delete TelradRelay | Out-Null
     Remove-NetFirewallRule -Name TelradRelay-DICOM, TelradRelay-HL7 -ErrorAction SilentlyContinue
