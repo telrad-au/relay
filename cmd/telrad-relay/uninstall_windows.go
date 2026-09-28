@@ -145,11 +145,13 @@ func broadcastEnvironmentChange() {
 	_, _, _ = sendMessageTimeout.Call(hwndBroadcast, wmSettingChange, 0, uintptr(unsafe.Pointer(environment)), smtoAbortIfHung, 5000, uintptr(unsafe.Pointer(&result)))
 }
 
-// removeProgramDirectory deletes the program directory. Windows cannot delete
-// a running executable, so when this telrad.exe lives there everything else
-// goes now and a detached PowerShell removes the rest once this process has
-// exited. If that helper cannot start, the files are removed at the next
-// restart instead.
+// removeProgramDirectory deletes the program directory before returning.
+// Windows cannot delete a running executable but can rename it within its
+// volume, so when this telrad.exe lives in the directory it is first moved to
+// the temporary directory; that copy is deleted once this process exits, and
+// at the latest when Windows restarts. Only if the move is impossible (the
+// temporary directory is on another volume) is the directory itself left for
+// removal after exit.
 func removeProgramDirectory(directory string, out io.Writer) error {
 	executable, err := os.Executable()
 	if err != nil {
@@ -157,12 +159,33 @@ func removeProgramDirectory(directory string, out io.Writer) error {
 	}
 	relative, relErr := filepath.Rel(directory, executable)
 	inside := executable != "" && relErr == nil && !strings.HasPrefix(relative, "..") && !filepath.IsAbs(relative)
-	if !inside {
-		if err := os.RemoveAll(directory); err != nil {
-			return fmt.Errorf("remove %s: %w", directory, err)
+	if inside {
+		parked := filepath.Join(os.TempDir(), fmt.Sprintf("telrad-uninstalled-%d.exe", os.Getpid()))
+		if err := os.Rename(executable, parked); err != nil {
+			return removeDirectoryAfterExit(directory, executable, out)
 		}
-		return nil
+		removeAfterExit(parked)
 	}
+	if err := os.RemoveAll(directory); err != nil {
+		return fmt.Errorf("remove %s: %w", directory, err)
+	}
+	return nil
+}
+
+// removeAfterExit deletes a file this process no longer needs but cannot
+// delete while it runs: a detached PowerShell removes it after exit, and the
+// file is also marked for deletion at the next restart in case that fails.
+// Both are best effort; the file is a stray copy in the temporary directory.
+func removeAfterExit(path string) {
+	_ = startRemover(path)
+	if name, err := windows.UTF16PtrFromString(path); err == nil {
+		_ = windows.MoveFileEx(name, nil, windows.MOVEFILE_DELAY_UNTIL_REBOOT)
+	}
+}
+
+// removeDirectoryAfterExit is the fallback when telrad.exe cannot leave the
+// directory: everything else goes now and the rest after exit or at restart.
+func removeDirectoryAfterExit(directory, executable string, out io.Writer) error {
 	entries, err := os.ReadDir(directory)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
@@ -176,8 +199,8 @@ func removeProgramDirectory(directory string, out io.Writer) error {
 			return fmt.Errorf("remove %s: %w", path, err)
 		}
 	}
-	if err := startDirectoryRemover(directory); err == nil {
-		fmt.Fprintf(out, "%s is removed once this command exits.\n", directory)
+	if err := startRemover(directory); err == nil {
+		fmt.Fprintf(out, "%s is removed shortly after this command exits.\n", directory)
 		return nil
 	}
 	for _, path := range []string{executable, directory} {
@@ -193,15 +216,17 @@ func removeProgramDirectory(directory string, out io.Writer) error {
 	return nil
 }
 
-func startDirectoryRemover(directory string) error {
-	literal := "'" + strings.ReplaceAll(directory, "'", "''") + "'"
+// startRemover starts a detached PowerShell that waits for this process to
+// exit and then deletes path, retrying while it is still locked.
+func startRemover(path string) error {
+	literal := "'" + strings.ReplaceAll(path, "'", "''") + "'"
 	script := "Wait-Process -Id " + strconv.Itoa(os.Getpid()) + " -Timeout 300 -ErrorAction SilentlyContinue\n" +
 		"for ($attempt = 0; $attempt -lt 30 -and (Test-Path -LiteralPath " + literal + "); $attempt++) {\n" +
 		"  Remove-Item -LiteralPath " + literal + " -Recurse -Force -ErrorAction SilentlyContinue\n" +
 		"  if (Test-Path -LiteralPath " + literal + ") { Start-Sleep -Seconds 1 }\n" +
 		"}\n"
 	command := exec.Command(powershellPath(), append([]string{"-WindowStyle", "Hidden"}, encodedPowerShell(script)...)...)
-	// Run from outside the directory so the helper does not hold it open.
+	// Run from outside the program directory so the helper never holds it open.
 	command.Dir = systemTool()
 	command.SysProcAttr = &syscall.SysProcAttr{
 		HideWindow:    true,

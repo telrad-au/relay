@@ -48,11 +48,6 @@ function Invoke-Telrad([string[]]$arguments) {
     [pscustomobject]@{ Output = $output; ExitCode = $LASTEXITCODE }
 }
 
-function Wait-Removed([string]$path) {
-    for ($attempt = 0; $attempt -lt 30 -and (Test-Path -LiteralPath $path); $attempt++) { Start-Sleep -Seconds 1 }
-    if (Test-Path -LiteralPath $path) { throw "$path was not removed." }
-}
-
 function Assert-Fails([scriptblock]$action, [string]$message) {
     $failed = $false
     try { & $action *> $null } catch { $failed = $true }
@@ -181,7 +176,7 @@ try {
     if (Get-Service TelradRelay -ErrorAction SilentlyContinue) { throw 'uninstall kept the service.' }
     if (Get-NetFirewallRule -Name TelradRelay-DICOM, TelradRelay-HL7 -ErrorAction SilentlyContinue) { throw 'uninstall kept the firewall rules.' }
     if (([Environment]::GetEnvironmentVariable('Path', 'Machine') -split ';') -contains $installDir) { throw 'uninstall kept the PATH entry.' }
-    Wait-Removed $installDir
+    if (Test-Path -LiteralPath $installDir) { throw "uninstall left ${installDir}: $($removed.Output)" }
     if (-not (Get-Content $ledger).Contains('ACC-SYNTHETIC-1') -or -not (Test-Path $config)) { throw 'uninstall removed the data directory.' }
 
     # A reinstall resumes with the kept configuration; --purge removes it too.
@@ -189,7 +184,7 @@ try {
     Wait-Status 'report receiver: [::1]:12577'
     $purged = Invoke-Telrad @('uninstall', '--purge', '--yes')
     if ($purged.ExitCode -ne 0) { throw "uninstall --purge failed: $($purged.Output)" }
-    Wait-Removed $installDir
+    if (Test-Path -LiteralPath $installDir) { throw "uninstall --purge left ${installDir}: $($purged.Output)" }
     if (Test-Path $dataDir) { throw 'uninstall --purge kept the data directory.' }
 
     Write-Host 'Windows installer checks passed.'

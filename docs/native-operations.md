@@ -363,9 +363,9 @@ same pairing, report receiver and ledger:
 - Windows: it stops and deletes the `TelradRelay` service and its event log
   source, removes the `TelradRelay-DICOM` and `TelradRelay-HL7` firewall rules
   and the machine `PATH` entry, and removes `%ProgramFiles%\Telrad Relay`.
-  Windows cannot delete a running program, so a hidden PowerShell removes that
-  directory once the command exits; if it cannot start, the directory is
-  removed at the next restart. `%ProgramData%\Telrad\Relay` stays.
+  Windows cannot delete a running program, so the command first moves its own
+  `telrad.exe` to the temporary directory, where that copy is deleted once the
+  command exits or at the next restart. `%ProgramData%\Telrad\Relay` stays.
 
 `--purge` also deletes the configuration and data directory, including the
 Relay's private key and the ledger, and on Linux the `telrad-relay` user. If
