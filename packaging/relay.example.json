@@ -1,6 +1,6 @@
 {
   "schemaVersion": 6,
-  "enrolmentUrl": "https://ingest.dev.app.telrad.com.au/v1/relay/enrolments",
+  "enrolmentUrl": "https://dev.app.telrad.com.au/api/relay/enrolments",
   "dataDir": "/var/lib/telrad-relay",
   "listenAddress": "0.0.0.0",
   "dicomPort": 11112,

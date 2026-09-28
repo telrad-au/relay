@@ -17,7 +17,7 @@ const currentConfigSchemaVersion = 6
 
 // defaultEnrolmentURL is the production enrolment endpoint. Development builds
 // override it with -ldflags "-X main.defaultEnrolmentURL=...".
-var defaultEnrolmentURL = "https://ingest.app.telrad.com.au/v1/relay/enrolments"
+var defaultEnrolmentURL = "https://app.telrad.com.au/api/relay/enrolments"
 
 type config struct {
 	SchemaVersion         int    `json:"schemaVersion"`

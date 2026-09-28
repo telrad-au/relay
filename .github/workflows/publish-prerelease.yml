@@ -90,8 +90,8 @@ jobs:
               run: |
                   set -euo pipefail
                   : "${ENROLMENT_URL:?development-release must define RELAY_DEV_ENROLLMENT_URL}"
-                  [[ "$ENROLMENT_URL" == https://*/v1/relay/enrolments ]] || {
-                      echo "RELAY_DEV_ENROLLMENT_URL must be an HTTPS /v1/relay/enrolments endpoint." >&2
+                  [[ "$ENROLMENT_URL" == https://*/api/relay/enrolments ]] || {
+                      echo "RELAY_DEV_ENROLLMENT_URL must be an HTTPS /api/relay/enrolments endpoint." >&2
                       exit 1
                   }
                   # Prerelease native binaries default to the development
@@ -197,7 +197,7 @@ jobs:
               run: |
                   set -euo pipefail
                   enrolment_url="$(jq --raw-output .enrolmentUrl packaging/docker-relay.json)"
-                  [[ "$enrolment_url" == https://*/v1/relay/enrolments ]] || {
+                  [[ "$enrolment_url" == https://*/api/relay/enrolments ]] || {
                       echo "Container enrolment URL is not a complete HTTPS Relay enrolment endpoint." >&2
                       exit 1
                   }

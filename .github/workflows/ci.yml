@@ -78,7 +78,7 @@ jobs:
             - name: Build container
               run: |
                   set -euo pipefail
-                  production_enrolment_url='https://ingest.app.telrad.com.au/v1/relay/enrolments'
+                  production_enrolment_url='https://app.telrad.com.au/api/relay/enrolments'
                   docker build --build-arg VERSION=0.0.0-ci.1 --tag telrad-relay:ci .
                   [[ "$(docker run --rm --read-only --cap-drop ALL --security-opt no-new-privileges telrad-relay:ci version)" == "0.0.0-ci.1" ]]
                   [[ "$(docker image inspect --format '{{.Config.User}}' telrad-relay:ci)" == "10001:10001" ]]

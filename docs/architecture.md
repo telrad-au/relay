@@ -223,8 +223,10 @@ certificate; short lifetimes bound the exposure of a stolen key.
 ### Enrolment endpoint contract
 
 Relay carries one URL, `enrolmentUrl`. Official builds contain the production
-value; `TELRAD_RELAY_ENROLMENT_URL` overrides it for development. Requests carry
-`X-Telrad-Relay-Protocol: 2` and JSON bodies. Responses are `Cache-Control:
+value, `https://app.telrad.com.au/api/relay/enrolments`, on Telrad's app host;
+`TELRAD_RELAY_ENROLMENT_URL` overrides it for development. The path carries no
+version; the protocol version is the `X-Telrad-Relay-Protocol` header. Requests
+carry `X-Telrad-Relay-Protocol: 2` and JSON bodies. Responses are `Cache-Control:
 no-store`.
 
 | Request | Response |
@@ -262,7 +264,7 @@ Issued:
   "certificate": "-----BEGIN CERTIFICATE-----…",
   "notAfter": "2026-12-26T00:00:00Z",
   "telrad": {
-    "host": "ingest.app.telrad.com.au",
+    "host": "app.telrad.com.au",
     "dicomPort": 2762,
     "hl7Port": 2576,
     "reportPort": 2578,

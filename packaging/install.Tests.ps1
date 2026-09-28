@@ -20,7 +20,7 @@ function New-Release([string]$version) {
     New-Item -ItemType Directory -Path $directory | Out-Null
     Push-Location $root
     try {
-        go build -trimpath -ldflags "-s -w -X main.version=$version -X main.defaultEnrolmentURL=https://enrolment.invalid/v1/relay/enrolments" -o (Join-Path $directory $asset) ./cmd/telrad-relay
+        go build -trimpath -ldflags "-s -w -X main.version=$version -X main.defaultEnrolmentURL=https://enrolment.invalid/api/relay/enrolments" -o (Join-Path $directory $asset) ./cmd/telrad-relay
         if ($LASTEXITCODE -ne 0) { throw "Build of $version failed." }
     } finally {
         Pop-Location
