@@ -20,7 +20,7 @@ concurrency:
 
 env:
     GO_VERSION: 1.27.0
-    ENROLMENT_URL: https://ingest.dev.app.telrad.com.au/v1/relay/enrolments
+    ENROLMENT_URL: https://dev.app.telrad.com.au/api/relay/enrolments
 
 jobs:
     publish:

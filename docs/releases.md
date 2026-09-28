@@ -89,7 +89,7 @@ a test host. No tag or approval is needed.
   container image, Authenticode signature, SBOM or attestation. It is unsigned
   and not for clinical use.
 - The binaries enrol with the development Telrad,
-  `https://ingest.dev.app.telrad.com.au/v1/relay/enrolments`.
+  `https://dev.app.telrad.com.au/api/relay/enrolments`.
 - It is never marked latest and is not pruned. It can never be promoted,
   because the prerelease, stable and promotion workflows read only `v*` tags.
 - Rerunning the workflow for a published build changes nothing.
