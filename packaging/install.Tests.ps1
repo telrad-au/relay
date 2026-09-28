@@ -191,7 +191,10 @@ try {
 } finally {
     Remove-Item Env:TELRAD_RELAY_RELEASES_API -ErrorAction SilentlyContinue
     Stop-Service TelradRelay -ErrorAction SilentlyContinue
-    & sc.exe delete TelradRelay | Out-Null
+    # The checks end by uninstalling, so the service is usually gone already;
+    # a failed sc.exe must not become the script's exit code.
+    if (Get-Service TelradRelay -ErrorAction SilentlyContinue) { & sc.exe delete TelradRelay | Out-Null }
     Remove-NetFirewallRule -Name TelradRelay-DICOM, TelradRelay-HL7 -ErrorAction SilentlyContinue
     Remove-Item -Recurse -Force $installDir, $dataDir, $work -ErrorAction SilentlyContinue
+    $global:LASTEXITCODE = 0
 }
