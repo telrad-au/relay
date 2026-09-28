@@ -46,9 +46,9 @@ func newFakeEnrolment(t *testing.T, pki *testPKI) *fakeEnrolment {
 	fake := &fakeEnrolment{pki: pki, approved: map[string]bool{}, denied: map[string]bool{}, csrs: map[string]string{}, token: "token-0123456789abcdef", lifetime: 90 * 24 * time.Hour,
 		endpoints: telradEndpoints{Host: "ingest.example.invalid", DicomPort: 2762, HL7Port: 2575, ReportPort: 2580, CACertificate: pki.caPEM()}}
 	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/relay/enrolments", fake.handleEnrol)
-	mux.HandleFunc("/v1/relay/enrolments/renew", fake.handleRenew)
-	mux.HandleFunc("/v1/relay/enrolments/", fake.handlePoll)
+	mux.HandleFunc("/api/relay/enrolments", fake.handleEnrol)
+	mux.HandleFunc("/api/relay/enrolments/renew", fake.handleRenew)
+	mux.HandleFunc("/api/relay/enrolments/", fake.handlePoll)
 	mux.HandleFunc("/elsewhere", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 	fake.server = httptest.NewUnstartedServer(mux)
 	fake.server.TLS = &tls.Config{Certificates: []tls.Certificate{pki.serverCertificate(t)}, MinVersion: tls.VersionTLS12}
@@ -57,7 +57,7 @@ func newFakeEnrolment(t *testing.T, pki *testPKI) *fakeEnrolment {
 	return fake
 }
 
-func (fake *fakeEnrolment) url() string { return fake.server.URL + "/v1/relay/enrolments" }
+func (fake *fakeEnrolment) url() string { return fake.server.URL + "/api/relay/enrolments" }
 
 func (fake *fakeEnrolment) issue(w http.ResponseWriter, csr string, relayID string) {
 	fake.issueWith(w, csr, relayID, fake.endpoints)
@@ -99,7 +99,7 @@ func (fake *fakeEnrolment) handleEnrol(w http.ResponseWriter, r *http.Request) {
 }
 
 func (fake *fakeEnrolment) handlePoll(w http.ResponseWriter, r *http.Request) {
-	id := strings.TrimPrefix(r.URL.Path, "/v1/relay/enrolments/")
+	id := strings.TrimPrefix(r.URL.Path, "/api/relay/enrolments/")
 	fake.mu.Lock()
 	csr, known := fake.csrs[id]
 	approved := fake.approved[id]

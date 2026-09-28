@@ -30,7 +30,7 @@ refute() {
 }
 
 # The enrolment endpoint never resolves, so CI never contacts Telrad.
-export RELAY_ENROLMENT_URL=https://enrolment.invalid/v1/relay/enrolments
+export RELAY_ENROLMENT_URL=https://enrolment.invalid/api/relay/enrolments
 RELAY_RELEASE_DIR="$work/first" scripts/build-release.sh 0.0.0-ci.1 >/dev/null
 RELAY_RELEASE_DIR="$work/second" scripts/build-release.sh 0.0.0-ci.2 >/dev/null
 

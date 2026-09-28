@@ -1,4 +1,4 @@
 {
   "schemaVersion": 6,
-  "enrolmentUrl": "https://ingest.app.telrad.com.au/v1/relay/enrolments"
+  "enrolmentUrl": "https://app.telrad.com.au/api/relay/enrolments"
 }
