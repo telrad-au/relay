@@ -1,0 +1,173 @@
+name: Publish main build
+
+# Publishes one unsigned development prerelease per main commit after CI
+# passes. Main builds use main-* tags, which the v*.*.* prerelease, stable and
+# container promotion workflows never read.
+on:
+    workflow_run:
+        workflows:
+            - CI
+        types:
+            - completed
+        branches:
+            - main
+
+permissions: {}
+
+concurrency:
+    group: publish-main
+    cancel-in-progress: false
+
+env:
+    GO_VERSION: 1.27.0
+    ENROLMENT_URL: https://ingest.dev.app.telrad.com.au/v1/relay/enrolments
+
+jobs:
+    publish:
+        name: Publish main build prerelease
+        if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'
+        runs-on: ubuntu-24.04
+        timeout-minutes: 30
+        permissions:
+            contents: write
+        steps:
+            - name: Check out the tested commit without persisted credentials
+              uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+              with:
+                  ref: ${{ github.event.workflow_run.head_sha }}
+                  fetch-depth: 0
+                  persist-credentials: false
+
+            - name: Set up Go
+              uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16
+              with:
+                  go-version: ${{ env.GO_VERSION }}
+                  cache-dependency-path: go.sum
+
+            - name: Name the build
+              id: build
+              env:
+                  SHA: ${{ github.event.workflow_run.head_sha }}
+              run: |
+                  set -euo pipefail
+                  [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || {
+                      echo "Unexpected head SHA $SHA." >&2
+                      exit 1
+                  }
+                  [[ "$(git rev-parse HEAD)" == "$SHA" ]]
+                  git merge-base --is-ancestor "$SHA" origin/main || {
+                      echo "Commit $SHA is not on main." >&2
+                      exit 1
+                  }
+                  count="$(git rev-list --count "$SHA")"
+                  short="$(git rev-parse --short=7 "$SHA")"
+                  {
+                      echo "count=$count"
+                      echo "short=$short"
+                      echo "tag=main-$count-g$short"
+                      echo "version=0.0.0-main.$count.g$short"
+                  } >> "$GITHUB_OUTPUT"
+
+            - name: Check for an existing release
+              id: existing
+              env:
+                  GH_TOKEN: ${{ github.token }}
+                  SHA: ${{ github.event.workflow_run.head_sha }}
+                  TAG: ${{ steps.build.outputs.tag }}
+              run: |
+                  set -euo pipefail
+                  if tagged="$(git rev-parse --quiet --verify "refs/tags/$TAG^{commit}")" && [[ "$tagged" != "$SHA" ]]; then
+                      echo "Tag $TAG already names $tagged, not $SHA." >&2
+                      exit 1
+                  fi
+                  if ! draft="$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft 2>/dev/null)"; then
+                      echo "published=false" >> "$GITHUB_OUTPUT"
+                  elif [[ "$draft" == "true" ]]; then
+                      # An unpublished draft from an interrupted run has no tag
+                      # yet; replace it.
+                      echo "Deleting the unpublished draft $TAG left by an earlier run."
+                      gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --yes
+                      echo "published=false" >> "$GITHUB_OUTPUT"
+                  else
+                      echo "Release $TAG already exists; nothing to publish."
+                      echo "published=true" >> "$GITHUB_OUTPUT"
+                  fi
+
+            - name: Build native artifacts
+              if: steps.existing.outputs.published == 'false'
+              env:
+                  TAG: ${{ steps.build.outputs.tag }}
+                  VERSION: ${{ steps.build.outputs.version }}
+              run: |
+                  set -euo pipefail
+                  RELAY_RELEASE_TAG="$TAG" \
+                  RELAY_ENROLMENT_URL="$ENROLMENT_URL" \
+                  RELAY_RELEASE_DIR="dist/$VERSION" \
+                      scripts/build-release.sh "$VERSION"
+                  (cd "dist/$VERSION" && sha256sum --check --strict SHA256SUMS)
+                  [[ "$("dist/$VERSION/telrad-relay-linux-amd64" version)" == "$VERSION" ]]
+                  # The installers must default to this release without arguments.
+                  grep -Fq "$TAG" "dist/$VERSION/install.sh"
+                  grep -Fq "$TAG" "dist/$VERSION/install.ps1"
+
+            - name: Publish GitHub prerelease
+              if: steps.existing.outputs.published == 'false'
+              env:
+                  COUNT: ${{ steps.build.outputs.count }}
+                  GH_TOKEN: ${{ github.token }}
+                  SHA: ${{ github.event.workflow_run.head_sha }}
+                  SHORT: ${{ steps.build.outputs.short }}
+                  TAG: ${{ steps.build.outputs.tag }}
+                  VERSION: ${{ steps.build.outputs.version }}
+              run: |
+                  set -euo pipefail
+                  release_base_url="https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG"
+                  installer_base_url="https://raw.githubusercontent.com/$GITHUB_REPOSITORY/main/packaging"
+                  notes="$(printf '%s\n\n%s\n\n%s\n\n%s\n' \
+                      "Unsigned development build of main at $SHA (version $VERSION). It enrols with the development Telrad endpoint $ENROLMENT_URL and is not for clinical use." \
+                      "Linux: \`curl -fsSL $release_base_url/install.sh | sudo sh\`" \
+                      "Windows, in an elevated PowerShell: \`irm $release_base_url/install.ps1 | iex\`" \
+                      "The newest main build at any time: \`curl -fsSL $installer_base_url/install.sh | sudo sh -s -- main\` or, on Windows, \`& ([scriptblock]::Create((irm $installer_base_url/install.ps1))) -Version main\`")"
+                  # Assets are uploaded to a draft, then published at once, so a
+                  # published release (immutable once the repository enables
+                  # immutable releases) never lacks any of them.
+                  gh release create "$TAG" "dist/$VERSION/"* \
+                      --repo "$GITHUB_REPOSITORY" \
+                      --draft \
+                      --prerelease \
+                      --latest=false \
+                      --target "$SHA" \
+                      --title "Telrad Relay main build $COUNT ($SHORT)" \
+                      --notes "$notes"
+                  gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest=false
+                  release_state="$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json tagName,isDraft,isPrerelease --jq '[.tagName, .isDraft, .isPrerelease] | @tsv')"
+                  [[ "$release_state" == "$TAG"$'\tfalse\ttrue' ]] || {
+                      echo "GitHub did not report $TAG as a published prerelease: $release_state" >&2
+                      exit 1
+                  }
+                  [[ "$(gh api "repos/$GITHUB_REPOSITORY/commits/$TAG" --jq .sha)" == "$SHA" ]] || {
+                      echo "Tag $TAG does not point to $SHA." >&2
+                      exit 1
+                  }
+
+            - name: Summarize main build
+              env:
+                  PUBLISHED_BEFORE: ${{ steps.existing.outputs.published }}
+                  SHA: ${{ github.event.workflow_run.head_sha }}
+                  TAG: ${{ steps.build.outputs.tag }}
+                  VERSION: ${{ steps.build.outputs.version }}
+              run: |
+                  release_base_url="https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG"
+                  {
+                      echo "## Relay main build"
+                      echo
+                      if [[ "$PUBLISHED_BEFORE" == "true" ]]; then
+                          echo "- Already published by an earlier run; nothing changed."
+                      fi
+                      echo "- GitHub prerelease: \`$TAG\` (never latest)"
+                      echo "- Version: \`$VERSION\`"
+                      echo "- Source revision: \`$SHA\`"
+                      echo "- Enrolment endpoint: \`$ENROLMENT_URL\`"
+                      echo "- Linux installer: \`$release_base_url/install.sh\`"
+                      echo "- Windows installer: \`$release_base_url/install.ps1\`"
+                  } >> "$GITHUB_STEP_SUMMARY"

@@ -33,6 +33,52 @@ refute() {
 export RELAY_ENROLMENT_URL=https://enrolment.invalid/v1/relay/enrolments
 RELAY_RELEASE_DIR="$work/first" scripts/build-release.sh 0.0.0-ci.1 >/dev/null
 RELAY_RELEASE_DIR="$work/second" scripts/build-release.sh 0.0.0-ci.2 >/dev/null
+RELAY_RELEASE_TAG=main-7-gabcdef0 RELAY_RELEASE_DIR="$work/main" \
+    scripts/build-release.sh 0.0.0-main.7.gabcdef0 >/dev/null
+
+# Shipped installers default to their own release tag, the source installers
+# keep the empty placeholder, and SHA256SUMS covers the rewritten copies.
+has_line_once() {
+    [[ "$(grep -cFx -- "$1" "$2")" == 1 ]]
+}
+has_line_once 'release_tag=' packaging/install.sh
+has_line_once "\$releaseTag = ''" packaging/install.ps1
+has_line_once 'release_tag=v0.0.0-ci.1' "$work/first/install.sh"
+has_line_once "\$releaseTag = 'v0.0.0-ci.1'" "$work/first/install.ps1"
+has_line_once 'release_tag=main-7-gabcdef0' "$work/main/install.sh"
+has_line_once "\$releaseTag = 'main-7-gabcdef0'" "$work/main/install.ps1"
+sh -n "$work/main/install.sh"
+(cd "$work/main" && sha256sum --check --quiet SHA256SUMS)
+refute env RELAY_RELEASE_TAG=main-7 RELAY_RELEASE_DIR="$work/invalid" \
+    scripts/build-release.sh 0.0.0-ci.1 2>/dev/null
+
+# Synthetic GitHub release listings for main build selection, compact and
+# pretty-printed, with stable and rc tags; 100 must win numerically over 9 and 10.
+cat >"$work/compact.json" <<'EOF'
+[{"id":1,"tag_name":"main-9-g1111111","name":"Telrad Relay main build 9 (1111111)","prerelease":true,"body":"a, b"},{"id":2,"tag_name":"v2.1.0","prerelease":false},{"id":3,"tag_name":"main-100-gaaaaaaa","prerelease":true},{"id":4,"tag_name":"v2.1.0-rc.1","prerelease":true},{"id":5,"tag_name":"main-10-gbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","prerelease":true}]
+EOF
+cat >"$work/pretty.json" <<'EOF'
+[
+  {
+    "id": 3,
+    "tag_name": "main-10-gbbbbbbb",
+    "prerelease": true
+  },
+  {
+    "id": 2,
+    "tag_name": "v9.0.0",
+    "prerelease": false
+  },
+  {
+    "id": 1,
+    "tag_name": "main-100-gccccccc",
+    "prerelease": true
+  }
+]
+EOF
+cat >"$work/none.json" <<'EOF'
+[{"tag_name":"v2.1.0"},{"tag_name":"v2.1.0-rc.1"},{"tag_name":"main"},{"tag_name":"main-x-g1234567"}]
+EOF
 
 # setsid detaches the installer from any terminal, so it never asks for the
 # report receiver and a run from an interactive shell behaves like CI.
@@ -53,6 +99,21 @@ wait_for_status() {
     cat "$work/status" >&2
     echo "telrad status did not report: $1" >&2
     return 1
+}
+
+# Installs with a version that must be refused with the given message.
+install_refused() {
+    local message="$1"
+    shift
+    if install_relay "$@" >"$work/refused.log" 2>&1; then
+        echo "Installer accepted: $*" >&2
+        exit 1
+    fi
+    grep -Fq "$message" "$work/refused.log" || {
+        cat "$work/refused.log" >&2
+        echo "Installer refusal lacks: $message" >&2
+        exit 1
+    }
 }
 
 # A checksum mismatch installs nothing.
@@ -80,16 +141,37 @@ refute sudo -u telrad-relay test -w /etc/telrad-relay/relay.json
 
 # Upgrade keeps configuration, even when a receiver is passed again, and
 # restarts the running service on the new version.
+# The upgrade selects the newest main build from the listing; the release URL
+# still supplies the files.
 sudo sed -i 's/"reportPort": 12576/"reportPort": 32576/' /etc/telrad-relay/relay.json
-install_relay "$work/second" TELRAD_RELAY_REPORT_HOST=192.0.2.99
+install_relay "$work/second" TELRAD_RELAY_REPORT_HOST=192.0.2.99 TELRAD_RELAY_VERSION=main \
+    TELRAD_RELAY_RELEASES_API="file://$work/compact.json" >"$work/install.log"
+grep -Fqx 'Telrad Relay main build: main-100-gaaaaaaa' "$work/install.log"
 wait_for_status 'Telrad Relay 0.0.0-ci.2'
 wait_for_status 'report receiver: 127.0.0.1:32576'
 grep -Fq '"reportHost": "127.0.0.1"' /etc/telrad-relay/relay.json
 grep -Fq '"reportPort": 32576' /etc/telrad-relay/relay.json
 
-# A deliberately stopped service stays stopped.
+# A deliberately stopped service stays stopped. A requested main build is
+# found in a pretty-printed listing.
 sudo systemctl stop telrad-relay.service
-install_relay "$work/second"
+install_relay "$work/second" TELRAD_RELAY_VERSION=main-10 \
+    TELRAD_RELAY_RELEASES_API="file://$work/pretty.json" >"$work/install.log"
+grep -Fqx 'Telrad Relay main build: main-10-gbbbbbbb' "$work/install.log"
+refute systemctl is-active --quiet telrad-relay.service
+
+# Missing or malformed main builds are refused before anything changes.
+install_refused 'main build 11 was not found' "$work/first" TELRAD_RELAY_VERSION=main-11 \
+    TELRAD_RELAY_RELEASES_API="file://$work/compact.json"
+install_refused 'no main builds were found' "$work/first" TELRAD_RELAY_VERSION=main \
+    TELRAD_RELAY_RELEASES_API="file://$work/none.json"
+install_refused 'could not list releases' "$work/first" TELRAD_RELAY_VERSION=main \
+    TELRAD_RELAY_RELEASES_API="file://$work/missing.json"
+for version in main-010 mainx main-0 vmain; do
+    install_refused 'version must look like 1.2.3, 1.2.3-rc.1, main or main-842' "$work/first" \
+        TELRAD_RELAY_VERSION="$version" TELRAD_RELAY_RELEASES_API="file://$work/compact.json"
+done
+[[ "$(telrad version)" == 0.0.0-ci.2 ]]
 refute systemctl is-active --quiet telrad-relay.service
 
 # Without a terminal or TELRAD_RELAY_REPORT_HOST the installer writes the
