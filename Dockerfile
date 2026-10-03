@@ -7,7 +7,7 @@ COPY . .
 ARG VERSION=dev
 ARG TARGETOS=linux
 ARG TARGETARCH=amd64
-RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -tags relay_container -trimpath \
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -trimpath \
     -ldflags="-s -w -X main.version=${VERSION} -X main.distribution=docker" \
     -o /telrad-relay ./cmd/telrad-relay \
     && install -d -m 0700 /image-root/var/lib/telrad-relay \
@@ -31,6 +31,8 @@ COPY LICENSE NOTICE THIRD_PARTY_NOTICES.md /usr/share/licenses/telrad-relay/
 VOLUME ["/var/lib/telrad-relay"]
 EXPOSE 11112/tcp 2575/tcp
 USER 10001:10001
+# ready exits non-zero unless GET /readyz on the loopback status endpoint
+# reports the relay paired, listening and holding its report pickup connection.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD ["telrad-relay", "--config", "/var/lib/telrad-relay/relay.json", "ready"]
 ENTRYPOINT ["telrad-relay", "--config", "/var/lib/telrad-relay/relay.json"]

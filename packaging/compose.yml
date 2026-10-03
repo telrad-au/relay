@@ -13,12 +13,16 @@ services:
     # Allow active DICOM and HL7 exchanges to finish during shutdown.
     stop_grace_period: 2m
     environment:
-      # Optional override for development or a self-hosted Telrad control plane.
-      TELRAD_RELAY_PAIRING_URL: ${TELRAD_RELAY_PAIRING_URL:-}
-      # Hostname or IP address that receives returned reports.
-      TELRAD_RELAY_REPORT_DESTINATION_HOST: ${TELRAD_RELAY_REPORT_DESTINATION_HOST:?Set the report destination hostname or address}
-      # TCP port used by the report destination.
-      TELRAD_RELAY_REPORT_DESTINATION_PORT: ${TELRAD_RELAY_REPORT_DESTINATION_PORT:-2576}
+      # Hostname or IP address of the clinic report receiver.
+      TELRAD_RELAY_REPORT_HOST: ${TELRAD_RELAY_REPORT_HOST:?Set the clinic report receiver hostname or address}
+      # TCP port of the clinic report receiver.
+      TELRAD_RELAY_REPORT_PORT: ${TELRAD_RELAY_REPORT_PORT:-2576}
+      # Optional enrolment endpoint override for development.
+      TELRAD_RELAY_ENROLMENT_URL: ${TELRAD_RELAY_ENROLMENT_URL:-}
+      # Single-use pairing token, read on the first run or by
+      # `docker compose run --rm relay pair`. Export it only in the shell
+      # that pairs; never save it in the env file.
+      TELRAD_RELAY_PAIRING_TOKEN: ${TELRAD_RELAY_PAIRING_TOKEN:-}
     ports:
       - ${TELRAD_RELAY_BIND_ADDRESS:?Set the clinic-facing host address}:11112:11112/tcp
       - ${TELRAD_RELAY_BIND_ADDRESS:?Set the clinic-facing host address}:2575:2575/tcp

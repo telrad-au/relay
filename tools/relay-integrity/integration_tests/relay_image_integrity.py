@@ -1,31 +1,28 @@
-"""Verify Relay preserves DICOM dataset bytes through C-STORE and HTTPS."""
+"""Verify raw DICOM byte preservation through Relay's mutual-TLS TCP proxy."""
 
 import argparse
-from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager, ExitStack
-from copy import deepcopy
-from datetime import datetime, timezone
 import json
 import os
-from pathlib import Path
 import platform
 import signal
 import socket
+import ssl
 import subprocess
 import tempfile
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack, contextmanager
+from copy import deepcopy
+from datetime import datetime, timezone
+from pathlib import Path
+from urllib.error import URLError
+from urllib.request import ProxyHandler, build_opener
 from uuid import uuid4
 
-from fastapi import FastAPI, Response
 from pynetdicom import AE, evt
-import uvicorn
 
-from .tls_trust import receiver_trust
 from .container_target import packaged_process
-
-from .reference_ingest import build_relay_ingest_router
-
 from .image_integrity import (
     ImageCase,
     IntegrityFailure,
@@ -33,228 +30,132 @@ from .image_integrity import (
     fixtures,
     require,
     verify,
+    verify_streams,
 )
+from .tls_receiver import tls_receiver
 
-
-CREDENTIAL = "trr_v1_" + "A" * 22 + "_" + "B" * 43  # Synthetic, local fixture only.
 LIMITATIONS = [
-    "Authentication, control sessions and receipt metadata use in-memory fixtures.",
-    "The receiver is a test fixture; application storage and downstream processing are not exercised.",
-    "C-STORE push is exercised; PACS C-GET retrieval and installed clinic releases are not.",
-    "Synthetic uncompressed/RLE coverage is not qualification of every modality or codec.",
+    "A generated, pre-paired identity is used; enrolment and renewal are not exercised.",
+    "The upstream is a synthetic mutual-TLS DICOM SCP, not the Telrad platform or a clinic PACS.",
+    "Native foreground binaries and the release Dockerfile are tested, not installed services.",
+    "Synthetic uncompressed/RLE fixtures do not qualify every modality or codec.",
+    "HL7, report pickup, ledger authorization and application storage are outside this DICOM suite.",
 ]
 
 
-class ReceiptAPI:
-    """In-memory upload capture and receipt fixture."""
-
-    def __init__(self):
-        self.expected_case = None
-        self.reject_upload = False
-        self.payloads = {}
-        self.arrivals = {}
-        self.receipts = {}
-        self.completed = set()
-        self.hold_completion = False
-        self.completion_entered = threading.Event()
-        self.release_completion = threading.Event()
-
-    def create_relay_dicom_arrival(self, **kwargs):
-        receipt = str(uuid4())
-        self.arrivals[receipt] = kwargs
-        return {
-            "receiptId": receipt,
-            "receiptCreatedAt": datetime.now(timezone.utc).isoformat(),
-        }
-
-    def record_receipt(self, payload):
-        self.receipts[payload["id"]] = payload
-        return {"ok": True, "receipt": {"id": payload["id"]}}
-
-    def complete_relay_dicom_receipt(self, *, receipt_id, landing_receipt_id):
-        require(
-            receipt_id == landing_receipt_id and receipt_id in self.receipts,
-            "completion without validated upload",
-        )
-        if self.hold_completion:
-            self.completion_entered.set()
-            require(self.release_completion.wait(10), "completion gate timed out")
-        self.completed.add(receipt_id)
-        return {"ok": True}
+def free_ports(count):
+    # Reserve all chosen ports together so the fixture never reuses one locally.
+    with ExitStack() as stack:
+        sockets = [stack.enter_context(socket.socket()) for _ in range(count)]
+        for sock in sockets:
+            sock.bind(("127.0.0.1", 0))
+        return [sock.getsockname()[1] for sock in sockets]
 
 
-def bound_socket():
-    sock = socket.socket()
-    sock.bind(("127.0.0.1", 0))
-    return sock
-
-
-def free_port():
-    with bound_socket() as sock:
-        return sock.getsockname()[1]
+def write_configuration(directory, receiver):
+    dicom, hl7, status, unused = free_ports(4)
+    identity = {
+        "schemaVersion": 1,
+        "relayId": "integrity-relay",
+        "privateKey": receiver.client_key_pem,
+        "certificate": receiver.client_cert_pem,
+        "notAfter": receiver.not_after,
+        "telrad": {
+            "host": "127.0.0.1",
+            "dicomPort": receiver.port,
+            "hl7Port": unused,
+            "reportPort": unused,
+            "caCertificate": receiver.ca_pem,
+        },
+    }
+    config = {
+        "schemaVersion": 6,
+        "dataDir": ".",
+        # Fail locally if a regression unexpectedly attempts pairing or renewal.
+        "enrolmentUrl": f"https://127.0.0.1:{unused}/enrolments",
+        "listenAddress": "127.0.0.1",
+        "dicomPort": dicom,
+        "hl7Port": hl7,
+        "reportHost": "127.0.0.1",
+        "reportPort": unused,
+        "statusAddress": f"127.0.0.1:{status}",
+        "connectTimeoutSeconds": 2,
+    }
+    for name, value in (("identity.json", identity), ("relay.json", config)):
+        path = directory / name
+        path.write_text(json.dumps(value), encoding="utf-8")
+        path.chmod(0o600)
+    return config
 
 
 @contextmanager
-def cloud_server(directory, api):
-    cert, key = directory / "cert.pem", directory / "key.pem"
-    subprocess.run(
-        [
-            "openssl",
-            "req",
-            "-x509",
-            "-newkey",
-            "rsa:2048",
-            "-nodes",
-            "-keyout",
-            str(key),
-            "-out",
-            str(cert),
-            "-days",
-            "1",
-            "-subj",
-            "/CN=localhost",
-            "-addext",
-            "subjectAltName=IP:127.0.0.1",
-        ],
-        check=True,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        timeout=15,
-    )
-    key.chmod(0o600)
-    app = FastAPI()
-    app.include_router(build_relay_ingest_router(api, CREDENTIAL))
-    with bound_socket() as sock:
-        origin = f"https://127.0.0.1:{sock.getsockname()[1]}"
-
-        @app.post("/v1/relay/control/sessions", status_code=201)
-        def session():
-            return {
-                "type": "ready",
-                "sessionId": "integrity-session",
-                "connectorId": "integrity-relay",
-                "ingestMode": "TEST",
-                "transports": {
-                    name: {
-                        "url": f"{origin}/v1/relay/ingest/{name}",
-                        "contentType": content,
-                    }
-                    for name, content in (
-                        ("dicom", "application/dicom"),
-                        ("hl7", "application/hl7-v2"),
-                    )
-                },
-            }
-
-        @app.post("/v1/relay/control/sessions/integrity-session/poll")
-        @app.delete("/v1/relay/control/sessions/integrity-session")
-        def idle():
-            return Response(status_code=204)
-
-        server = uvicorn.Server(
-            uvicorn.Config(
-                app,
-                ssl_keyfile=str(key),
-                ssl_certfile=str(cert),
-                access_log=False,
-                log_level="critical",
-                timeout_graceful_shutdown=5,
+def relay_process(binary, directory, receiver, image=None, report=None):
+    config = write_configuration(directory, receiver)
+    # Developer/CI configuration must never redirect the synthetic fixture.
+    environment = {
+        key: value
+        for key, value in os.environ.items()
+        if not key.upper().startswith("TELRAD_RELAY_")
+    }
+    with ExitStack() as stack:
+        if image:
+            process = stack.enter_context(packaged_process(image, directory, report))
+        else:
+            process = subprocess.Popen(
+                [str(binary), "--config", str(directory / "relay.json"), "run"],
+                env=environment,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
             )
-        )
-        thread = threading.Thread(
-            target=server.run, kwargs={"sockets": [sock]}, daemon=True
-        )
-        thread.start()
         try:
-            deadline = time.monotonic() + 10
-            while not server.started:
-                require(
-                    thread.is_alive() and time.monotonic() < deadline,
-                    "TLS ingest did not start",
-                )
-                time.sleep(0.05)
-            yield origin, cert
-        finally:
-            api.release_completion.set()
-            server.should_exit = True
-            thread.join(10)
-            require(not thread.is_alive(), "TLS ingest did not stop")
-
-
-@contextmanager
-def relay_process(binary, directory, origin, cert, image=None, report=None):
-    dicom_port, hl7_port = free_port(), free_port()
-    while hl7_port == dicom_port:
-        hl7_port = free_port()
-    credential = directory / "relay-credential.json"
-    credential.write_text(json.dumps({"schemaVersion": 1, "credential": CREDENTIAL}))
-    credential.chmod(0o600)
-    config = directory / "relay.json"
-    config.write_text(
-        json.dumps(
-            {
-                "schemaVersion": 5,
-                "pairingUrl": f"{origin}/v1/relay/pairing-enrollments",
-                "controlUrl": f"{origin}/v1/relay/control",
-                "dicomUrl": f"{origin}/v1/relay/ingest/dicom",
-                "hl7Url": f"{origin}/v1/relay/ingest/hl7",
-                "relayId": "integrity-relay",
-                "credentialPath": credential.name,
-                "listenAddress": "127.0.0.1",
-                "dicomPort": dicom_port,
-                "hl7Port": hl7_port,
-                "reportHost": "127.0.0.1",
-                "reportPort": free_port(),
-            }
-        )
-    )
-    config.chmod(0o600)
-    environment = os.environ.copy()
-    environment["SSL_CERT_FILE"] = str(cert)
-    stack = ExitStack()
-    process = (
-        stack.enter_context(packaged_process(image, directory, cert, report))
-        if image
-        else subprocess.Popen(
-            [str(binary), "--config", str(config), "run"],
-            env=environment,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-    )
-    try:
-        deadline = time.monotonic() + 15
-        while True:
-            require(process.poll() is None, "Relay exited before listening")
-            try:
-                with socket.create_connection(("127.0.0.1", dicom_port), timeout=0.2):
-                    break
-            except OSError:
+            deadline = time.monotonic() + 15
+            # /readyz also requires report pickup, intentionally outside this suite.
+            # Poll status rather than opening an extra DICOM association.
+            opener = build_opener(ProxyHandler({}))
+            while True:
+                require(process.poll() is None, "Relay exited before listening")
+                try:
+                    with opener.open(
+                        f"http://{config['statusAddress']}/status", timeout=0.5
+                    ) as response:
+                        status = json.load(response)
+                    if status.get("paired") and status.get("listeners", {}).get(
+                        "dicom"
+                    ):
+                        break
+                except (OSError, URLError):
+                    pass
                 require(time.monotonic() < deadline, "Relay listener timed out")
                 time.sleep(0.05)
-        yield dicom_port
-    finally:
-        process.terminate()
-        try:
-            process.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait(timeout=5)
+            yield config["dicomPort"]
         finally:
-            stack.close()
+            if not image:
+                process.terminate()
+                try:
+                    process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=5)
 
 
-def send(case, port):
-    sent = []
+def send(case, port, response_received=None):
+    datasets = []
+    streams = {"sent": bytearray(), "received": bytearray()}
 
     def capture(event):
         if event.message.command_set.CommandField == 0x0001:
-            sent.append(event.message.data_set.getvalue())
+            datasets.append(event.message.data_set.getvalue())
+
+    def sent(event):
+        streams["sent"].extend(event.data)
+
+    def received(event):
+        streams["received"].extend(event.data)
 
     ae = AE(ae_title="INTEGRITY_SCU")
     ae.acse_timeout = 10
-    ae.dimse_timeout = 45
-    ae.network_timeout = 45
+    ae.dimse_timeout = 30
+    ae.network_timeout = 30
     ae.add_requested_context(
         case.dataset.SOPClassUID, case.dataset.file_meta.TransferSyntaxUID
     )
@@ -262,21 +163,52 @@ def send(case, port):
         "127.0.0.1",
         port,
         ae_title="INTEGRITY_SCP",
-        evt_handlers=[(evt.EVT_DIMSE_SENT, capture)],
+        evt_handlers=[
+            (evt.EVT_DIMSE_SENT, capture),
+            (evt.EVT_DATA_SENT, sent),
+            (evt.EVT_DATA_RECV, received),
+        ],
     )
     require(association.is_established, f"{case.name}: association rejected")
     try:
         status = association.send_c_store(case.dataset)
-        require(len(sent) == 1, f"{case.name}: missing sent dataset capture")
-        return getattr(status, "Status", None), sent[0]
+        if response_received is not None:
+            response_received.set()
+        require(len(datasets) == 1, f"{case.name}: missing sent dataset capture")
+        code = getattr(status, "Status", None)
     finally:
         if association.is_established:
             association.release()
         else:
             association.abort()
+    require(association.is_released, f"{case.name}: association did not release")
+    return code, datasets[0], {key: bytes(value) for key, value in streams.items()}
 
 
-def exercise(port, api, report):
+def record_case(case, result, receiver, before, expected_status, report, name=None):
+    code, sent, streams = result
+    require(code == expected_status, f"{case.name}: C-STORE status changed")
+    arrivals = receiver.arrivals
+    require(len(arrivals) == before + 1, f"{case.name}: expected exactly one arrival")
+    arrival = arrivals[-1]
+    require(receiver.wait_for_closed(arrival), "upstream association did not close")
+    expected_peer = digest(ssl.PEM_cert_to_DER_cert(receiver.client_cert_pem))
+    require(
+        arrival["peer_fingerprint"] == expected_peer, "unexpected TLS client identity"
+    )
+    evidence = verify(
+        case, sent, arrival["dataset"], arrival["transfer_syntax"], arrival["command"]
+    )
+    evidence.update(verify_streams(streams, receiver.streams_for(arrival)))
+    evidence["dicomStatus"] = code
+    evidence["mutualTLS"] = True
+    evidence["clientCertificateSha256"] = expected_peer
+    if name:
+        evidence["case"] = name
+    report["cases"].append(evidence)
+
+
+def exercise(port, receiver, report):
     cases = fixtures()
     cases.append(ImageCase("identical-repeat", cases[0].dataset, cases[0].pixels))
     changed = deepcopy(cases[0].dataset)
@@ -285,64 +217,51 @@ def exercise(port, api, report):
     changed.PixelData = pixels.tobytes()
     cases.append(ImageCase("same-uid-different-pixels", changed, pixels))
     for case in cases:
-        api.expected_case = case
-        before = set(api.completed)
-        code, wire = send(case, port)
-        require(code == 0, f"{case.name}: C-STORE did not succeed")
-        arrivals = api.completed - before
-        require(
-            len(arrivals) == 1, f"{case.name}: expected exactly one completed arrival"
-        )
-        receipt = arrivals.pop()
-        landed = api.payloads[receipt]
-        incoming = api.arrivals[receipt]
-        require(
-            len(landed) == incoming["payload_size_bytes"],
-            f"{case.name}: arrival length mismatch",
-        )
-        report["cases"].append(verify(case, wire, landed, incoming["payload_sha256"]))
+        before = len(receiver.arrivals)
+        record_case(case, send(case, port), receiver, before, 0, report)
 
-    # The receiver validates the upload before issuing its synthetic receipt.
-    api.expected_case = cases[0]
-    api.hold_completion = True
-    before = set(api.completed)
+    # Only the upstream SCP decides C-STORE success. Relay must not acknowledge early.
+    receiver.hold_response = True
+    receiver.response_entered.clear()
+    receiver.release_response.clear()
+    before = len(receiver.arrivals)
     with ThreadPoolExecutor(max_workers=1) as executor:
-        future = executor.submit(send, cases[0], port)
+        response_received = threading.Event()
+        future = executor.submit(send, cases[0], port, response_received)
         try:
-            require(api.completion_entered.wait(10), "completion gate was not reached")
+            require(
+                receiver.response_entered.wait(10), "upstream response gate not reached"
+            )
             time.sleep(0.2)
-            require(not future.done(), "C-STORE succeeded before receipt completion")
+            require(
+                not response_received.is_set() and not future.done(),
+                "C-STORE completed before upstream response",
+            )
         finally:
-            api.release_completion.set()
-        code, wire = future.result(timeout=45)
-    api.hold_completion = False
-    require(
-        code == 0 and len(api.completed - before) == 1,
-        "delayed receipt did not succeed",
+            receiver.release_response.set()
+        result = future.result(timeout=40)
+    receiver.hold_response = False
+    record_case(
+        cases[0], result, receiver, before, 0, report, "waits-for-upstream-status"
     )
-    receipt = (api.completed - before).pop()
-    landed = api.payloads[receipt]
-    evidence = verify(cases[0], wire, landed, api.arrivals[receipt]["payload_sha256"])
-    evidence["case"] = "waits-for-receipt"
-    report["cases"].append(evidence)
 
-    api.reject_upload = True
-    completed = set(api.completed)
-    code, _ = send(cases[0], port)
-    require(
-        code is not None and code != 0, "receiver rejection: expected C-STORE failure"
+    # Preserve a specific failure, rather than merely returning any nonzero status.
+    receiver.status = 0xA700
+    before = len(receiver.arrivals)
+    record_case(
+        cases[0],
+        send(cases[0], port),
+        receiver,
+        before,
+        0xA700,
+        report,
+        "upstream-rejection",
     )
-    require(api.completed == completed, "rejected upload was acknowledged")
-    report["cases"].append(
-        {"case": "receiver-rejection", "status": "passed", "dicomStatus": code}
-    )
-    api.reject_upload = False
-    require(
-        len(api.completed) == len(cases) + 1 and len(api.arrivals) == len(cases) + 2,
-        "arrival inventory mismatch",
-    )
-    report["completedArrivals"] = len(api.completed)
-    report["attemptedArrivals"] = len(api.arrivals)
+    receiver.status = 0
+    require(len(receiver.arrivals) == len(cases) + 2, "arrival inventory mismatch")
+    report["attemptedArrivals"] = len(receiver.arrivals)
+    report["successfulStores"] = len(cases) + 1
+    report["rejectedStores"] = 1
 
 
 def main():
@@ -357,11 +276,11 @@ def main():
         raise KeyboardInterrupt
 
     signal.signal(signal.SIGTERM, interrupted)
-    run = str(uuid4())
     report = {
-        "schemaVersion": 2,
-        "runId": run,
+        "schemaVersion": 3,
+        "runId": str(uuid4()),
         "status": "failed",
+        "transport": "dicom-over-mutual-tls",
         "target": "docker" if args.relay_image else "native",
         "platform": {"system": platform.system(), "machine": platform.machine()},
         "startedAt": datetime.now(timezone.utc).isoformat(),
@@ -386,22 +305,15 @@ def main():
         )
         with tempfile.TemporaryDirectory(prefix="relay-integrity-") as temporary:
             directory = Path(temporary)
-            api = ReceiptAPI()
-            with cloud_server(directory, api) as (origin, cert):
-                with (
-                    receiver_trust(cert),
-                    relay_process(
-                        args.relay_binary,
-                        directory,
-                        origin,
-                        cert,
-                        args.relay_image,
-                        report,
-                    ) as port,
-                ):
-                    exercise(port, api, report)
+            with (
+                tls_receiver(directory) as receiver,
+                relay_process(
+                    args.relay_binary, directory, receiver, args.relay_image, report
+                ) as port,
+            ):
+                exercise(port, receiver, report)
         report["status"] = "passed"
-    except Exception as exc:
+    except Exception as exc:  # noqa: BLE001 - always persist safe failure evidence
         report["error"] = (
             str(exc) if isinstance(exc, IntegrityFailure) else type(exc).__name__
         )
@@ -410,7 +322,7 @@ def main():
     finally:
         report["finishedAt"] = datetime.now(timezone.utc).isoformat()
         args.evidence.parent.mkdir(parents=True, exist_ok=True)
-        args.evidence.write_text(json.dumps(report, indent=2) + "\n")
+        args.evidence.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
     print(f"Relay image integrity: {report['status']}; evidence: {args.evidence}")
     return 0 if report["status"] == "passed" else 1
 

@@ -1,11 +1,11 @@
 """Run the release image on a disposable Linux Docker host."""
 
-from contextlib import contextmanager
 import json
 import os
 import platform
 import shutil
 import subprocess
+from contextlib import contextmanager
 from uuid import uuid4
 
 from .image_integrity import digest, require
@@ -29,7 +29,7 @@ def owner(path, uid, gid):
 
 
 @contextmanager
-def packaged_process(image, directory, cert, report):
+def packaged_process(image, directory, report):
     require(platform.system() == "Linux", "packaged image requires a Linux Docker host")
     details = json.loads(docker("image", "inspect", image))[0]
     require(details["Os"] == "linux", "expected Linux image")
@@ -39,10 +39,9 @@ def packaged_process(image, directory, cert, report):
     name = "relay-integrity-" + uuid4().hex
     state = directory / "container-state"
     state.mkdir(mode=0o700)
-    for filename in ("relay.json", "relay-credential.json"):
+    for filename in ("relay.json", "identity.json"):
         shutil.copyfile(directory / filename, state / filename)
         (state / filename).chmod(0o600)
-    shutil.copyfile(cert, state / "cert.pem")
     created = False
     process = None
     try:
@@ -60,8 +59,6 @@ def packaged_process(image, directory, cert, report):
             "no-new-privileges:true",
             "--mount",
             f"type=bind,src={state},dst=/var/lib/telrad-relay",
-            "--env",
-            "SSL_CERT_FILE=/var/lib/telrad-relay/cert.pem",
             details["Id"],
         )
         created = True
@@ -86,8 +83,10 @@ def packaged_process(image, directory, cert, report):
     finally:
         try:
             if created:
-                docker("stop", "-t", "5", name)
-                docker("rm", name)
+                try:
+                    docker("stop", "-t", "5", name)
+                finally:
+                    docker("rm", name)
                 report.setdefault("container", {})["cleanup"] = "passed"
         finally:
             try:

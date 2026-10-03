@@ -1,61 +1,75 @@
 # Container operations
 
-The Compose deployment runs an immutable image with a read-only root filesystem,
-no additional Linux capabilities, and a named volume for schema-v5 configuration
-and its protected credential lifecycle record. The
-container does not update its own image. Native privilege helpers and management
-IPC are excluded from the image build. `auth`, `enroll`, `rotate-credential`, `doctor`,
-`status`, and `ready` operate directly as UID `10001`, without sudo or systemd.
-Read-only checks do not perform configuration migration or transaction recovery.
-Start and stop the service through the container runtime.
+The container runs the same Relay as the native services, as UID `10001`, with
+a read-only root filesystem, no additional Linux capabilities and one named
+volume mounted at `/var/lib/telrad-relay`. The container does not update its
+own image. Start, stop and restart it through the container runtime.
+
+Settings come from `TELRAD_RELAY_<FIELD>` environment variables, for example
+`TELRAD_RELAY_REPORT_HOST` and `TELRAD_RELAY_REPORT_PORT`. The fields and
+defaults are listed in [native operations](native-operations.md#configuration).
+`TELRAD_RELAY_REPORT_HOST` is required.
 
 ## First pairing
 
-Copy `packaging/compose.env.example` outside the repository and fill in the
-immutable image reference, clinic-facing bind address, and report destination.
-Do not put `TELRAD_RELAY_PAIRING_TOKEN` in that file.
+Containers pair with a single-use pairing token from Telrad. Use the
+`compose.yml` from the [README](../README.md#docker-compose), then:
 
 ```bash
-cp packaging/compose.env.example relay.env
-chmod 600 relay.env
-docker compose --env-file relay.env -f packaging/compose.yml config
-docker compose --env-file relay.env -f packaging/compose.yml pull
 read -rsp 'Pairing token: ' TELRAD_RELAY_PAIRING_TOKEN && printf '\n'
 export TELRAD_RELAY_PAIRING_TOKEN
-docker compose --env-file relay.env -f packaging/compose.yml run --rm \
-  --env TELRAD_RELAY_PAIRING_TOKEN relay enroll
+docker compose run --rm --env TELRAD_RELAY_PAIRING_TOKEN relay pair
 unset TELRAD_RELAY_PAIRING_TOKEN
-docker compose --env-file relay.env -f packaging/compose.yml up --detach
+docker compose up --detach
 ```
 
-Relay consumes the token exactly once, removes it from the process environment,
-validates only its cloud-defined length, and clears the in-memory bytes after
-the pairing request. It never writes or logs the token. The one-off enrollment
-container exits after populating `relay-credential.json`; the long-lived
-service is created without any token value:
+`pair` generates the key, sends the certificate request with the token and
+stores the issued identity in the volume. Telrad issues the certificate
+immediately because the token already names the company. Relay removes the
+token from its environment as soon as it reads it and never writes or logs it.
+On a paired volume `pair` refuses and changes nothing unless given `--yes`; see
+[pairing again](#pairing-again). Do not put the token in a Compose or
+environment file.
+
+An unpaired container started without a token exits with an error saying that
+`TELRAD_RELAY_PAIRING_TOKEN` is required.
+
+Official images contain the production enrolment endpoint. Set
+`TELRAD_RELAY_ENROLMENT_URL` only for development.
+
+## Pairing again
+
+To pair a paired volume again, for example to move the Relay to another
+company, stop the container and pair with a new token and `--yes`:
 
 ```bash
-docker compose --env-file relay.env -f packaging/compose.yml logs --tail 100 relay
-docker compose --env-file relay.env -f packaging/compose.yml ps
+docker compose stop relay
+read -rsp 'Pairing token: ' TELRAD_RELAY_PAIRING_TOKEN && printf '\n'
+export TELRAD_RELAY_PAIRING_TOKEN
+docker compose run --rm --env TELRAD_RELAY_PAIRING_TOKEN relay pair --yes
+unset TELRAD_RELAY_PAIRING_TOKEN
+docker compose up --detach
 ```
 
-Official images contain the source-controlled production pairing endpoint. Set
-`TELRAD_RELAY_PAIRING_URL` only to override that default for development or a
-self-hosted control plane. The override must use an approved HTTPS endpoint
-whose exact path is `/v1/relay/pairing-enrollments`. Relay derives its fixed
-control, DICOM, and HL7 paths locally from that one origin; pairing cannot
-select another destination.
+The stored identity is replaced only after Telrad has issued the new one, so a
+refused or mistyped token leaves the current pairing in place. The ledger is
+kept. Telrad keeps the old Relay until a company administrator revokes or
+replaces it in settings.
 
-Relay automatically migrates a legacy bearer record and renews lifecycle
-credentials before access expiry. Each operation is persisted before its HTTPS
-request and retried with the same operation ID after a timeout or container
-restart. Keep exactly one Relay service instance attached to the volume and do
-not edit or copy the credential record between installations.
+The native `telrad report-receiver HOST` and `telrad uninstall` commands do
+not apply to containers: change `TELRAD_RELAY_REPORT_HOST` and
+`TELRAD_RELAY_REPORT_PORT` and recreate the container, and remove the
+container as described under [removal](#removal).
 
 ## Networking
 
 Publish TCP `11112` only to DICOM sources and TCP `2575` only to HL7 sources.
-The report destination must be reachable from the container:
+Outbound, the container needs TCP to Telrad's DICOM, HL7 and report ports,
+which pairing supplies, and HTTPS on TCP `443` to the enrolment endpoint.
+Enrolment requests honour `HTTPS_PROXY` and `NO_PROXY`; the DICOM, HL7 and
+report connections do not use a proxy.
+
+The report receiver must be reachable from the container:
 
 - use a routable address for another host;
 - use a Compose service name for a receiver on the same Docker network;
@@ -63,69 +77,117 @@ The report destination must be reachable from the container:
 - add `host.docker.internal:host-gateway` on Linux when that topology is
   explicitly chosen.
 
-Outbound HTTPS uses system CA roots and the standard `HTTPS_PROXY` and
-`NO_PROXY` variables. Redirects are rejected for all authenticated protocol
-requests. Do not install a private CA merely to bypass certificate errors;
-review the intended enterprise trust policy first.
+Relay verifies the enrolment endpoint with the CA roots in the image, and
+Telrad's DICOM, HL7 and report ports against the Telrad Relay CA only, which it
+receives when pairing and keeps in the volume. Do not add a private CA to the
+image to bypass certificate errors.
 
-## Health and degraded operation
+## Health
 
-The image health check runs `ready`. It remains healthy during temporary
-control-channel loss while DICOM and HL7 ingest remain available. `status`
-separately reports control and report-return availability. A cloud `401` or
-`403` marks the container unhealthy until re-pairing succeeds. A rejected or
-expired renewable credential has the same effect.
+The status endpoint listens on loopback inside the container and is not
+published. Check it with:
 
-Relay streams DICOM uploads directly and does not maintain an ingest spool.
-Stopping or recreating the container drains active work for up to one minute;
-an interrupted DICOM object is not replayed by Relay.
+```bash
+docker compose exec relay telrad-relay status
+```
+
+The command prints the state (`pairing`, `ready` or `degraded`), the report
+receiver (`NOT CONFIGURED` if `TELRAD_RELAY_REPORT_HOST` is the placeholder
+`report-receiver.invalid`), the end of an open backlog acceptance window,
+certificate expiry, listener and pickup state, report counts and the ledger entry count. It
+exits non-zero when the service's status endpoint cannot be reached; it does
+not exit non-zero for `degraded`.
+
+The container health check uses `/readyz`, which is healthy when the Relay is
+paired, both listeners are open, and the report pickup connection is up or was
+up within the last five minutes. Loss of report pickup does not stop order or
+image forwarding.
+
+On stop, Relay closes its listeners and lets in-flight connections and any
+report delivery already under way finish for up to 90 seconds. Keep
+`stop_grace_period` above that. Relay does not replay an interrupted DICOM
+association; the PACS resends.
+
+## Backlog acceptance
+
+To let Telrad deliver reports for orders the ledger does not know, for example
+after the Relay host is replaced, open a backlog acceptance window against the
+same volume while the service runs:
+
+```bash
+docker compose run --rm relay accept-backlog --hours 72
+```
+
+`--hours` is 1 to 168 and defaults to 72. The command writes
+`accept-backlog.json` to the volume and prints when the window ends; the
+running container picks it up with the next report, without a restart. Until
+then a report whose accession numbers are not all in the ledger is delivered,
+and each missing accession number is appended to `accessions.ledger` and synced
+before the report is sent to the RIS. `status` shows the window while it is
+open. It closes by itself; close it early with:
+
+```bash
+docker compose run --rm relay accept-backlog --cancel
+```
+
+There is no environment variable for this: opening a window is a deliberate
+operator action. While it is open Relay accepts every report Telrad sends for
+the company, so open it only when a backlog is expected.
+
+## Certificate renewal
+
+Renewal is automatic from 30 days before the 90-day certificate expires and is
+retried daily after a failure. Renewal requests are signed with the current key
+and may also replace the Telrad Relay CA certificate. A volume whose
+`identity.json` predates the pinned CA is treated as unpaired; pair it with a
+new token. If the certificate expires, the Relay must be paired again: stop
+the container and repeat [first pairing](#first-pairing) with a new token. An
+expired pairing is replaced without `--yes`, and the ledger is kept.
 
 ## Upgrade and rollback
 
-Record the current immutable image reference. Verify the new release, replace
-`TELRAD_RELAY_IMAGE`, and recreate the service without a pairing token:
+Change the image to the new version tag, then recreate the service without a
+pairing token:
 
 ```bash
-docker compose --env-file relay.env -f packaging/compose.yml pull
-docker compose --env-file relay.env -f packaging/compose.yml up --detach
-docker compose --env-file relay.env -f packaging/compose.yml ps
+docker compose pull
+docker compose up --detach
+docker compose ps
 ```
 
-Schema v2 cannot run in the HTTPS-v1 image. Before upgrading, use the new
-binary's `migrate-config` command against the protected volume. It preserves
-non-credential settings and update trust, deletes obsolete certificate and
-pending request files, and requires re-pairing. There is no certificate
-credential migration or protocol compatibility mode.
+The volume keeps `identity.json` and `accessions.ledger`, so the Relay stays
+paired and keeps its ledger. Pin an immutable version tag or digest in
+production rather than `latest`. To roll back, set the previous version tag and
+recreate the service the same way.
 
-Schema v3 upgrades automatically on startup to schema v4 and HTTPS polling,
-preserving the credential and listener settings. Coordinate this change with
-the Telrad API and edge cutover. Existing ledger files are ignored and can be
-removed once the cutover is complete. There is no local report state to restore.
-See [native operations](native-operations.md#schema-v3-polling-cutover).
+## Backup
 
-To roll back, restore the recorded immutable image reference only if that
-release supports the current configuration schema. The credential volume is
-not a substitute for a DICOM or HL7 delivery queue.
+Back up `accessions.ledger` from the `telrad-relay-data` volume. It is the
+report authorisation record and holds no key material. If it is lost, reports
+for orders placed before the loss are refused until the RIS resends those
+orders or the clinic opens a [backlog acceptance](#backlog-acceptance) window.
+
+Do not back up or restore `identity.json`. It is the Relay's private key: a
+restored copy on another host makes two hosts one Relay, and an old copy may
+hold an expired certificate.
+
+To replace a lost host:
+
+1. Copy any ledger backup into the new volume before starting the container.
+   Never restore `identity.json`.
+2. Pair the new container with a new token.
+3. Have a company administrator choose **Replace** on the old Relay in
+   Telrad's settings. Telrad revokes the old Relay and moves every outstanding
+   and failed report delivery onto the replacement, which it retries.
+4. Run `docker compose run --rm relay accept-backlog --hours 72` so those
+   reports are accepted and their accessions recorded.
+
+Telrad retries a report Relay answers with `AR` or `AE` on its normal backoff,
+about eight attempts over two days.
 
 ## Removal
 
-`docker compose down` keeps the named volume. Removing
-`telrad-relay-data` permanently destroys the Relay configuration and credential
-and requires a new pairing, so handle that as a separate approved destructive
-operation. Never use `docker compose down -v` as an ordinary troubleshooting
-step.
-
-## Retrieval configuration
-
-Schema v4 upgrades to v5 with retrieval absent. Optional retrieval keeps only its
-permit signing key and approved configuration in the existing volume; it adds no
-clinical spool or job state. Generate the key as UID 10001 and follow the
-[PACS retrieval guide](pacs-retrieval.md) for qualification and rollback.
-
-## Order-authorized reports
-
-Report authorization is always enabled in both image modes. Relay automatically
-creates and retains `report-signing-key.json` beside its credential file; no
-additional settings or key-provisioning commands are required. Preserve the
-protected state directory across restarts and upgrades. See
-[report authorization](report-authorization.md) for the order flow and recovery.
+`docker compose down` keeps the named volume. Removing `telrad-relay-data`
+destroys the Relay's identity and ledger, so treat it as a separate, approved
+destructive step. Never use `docker compose down -v` as an ordinary
+troubleshooting step. Ask Telrad to revoke a Relay that is being retired.

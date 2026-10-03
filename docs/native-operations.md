@@ -1,293 +1,406 @@
 # Native Relay operations
 
-This guide covers Linux systemd and the Windows service installation.
+This guide covers the Linux systemd service and the Windows service. See
+[architecture](architecture.md) for the design and the protocols Relay speaks
+to Telrad.
 
 ## Network and listener policy
 
-Relay needs outbound TCP `443` to its configured HTTPS origin and no
-inbound internet rule. Clinic systems connect only to the scoped local firewall
-rules for DICOM TCP `11112` and HL7 TCP `2575`. Report return defaults to
-`127.0.0.1:2576`.
+Relay needs no inbound internet rule. Its outbound connections are:
 
-`listenAddress` must be an explicit IP address. The packaged `0.0.0.0` default
-requires host-firewall restrictions to the modality, PACS, and RIS source
-addresses. Windows installation creates missing Relay firewall rules and preserves
-existing operator rules, including their scope and enabled state. The installer's
-`ClinicRemoteAddress` option applies when creating rules. The default limits are 256 clinic connections globally, 128 per
-protocol, a five-minute DICOM idle timeout, a two-hour DICOM lifetime, and no
-Relay-enforced HL7 idle or lifetime timeout. HL7 messages default to 1 MiB and
-cannot be configured above 8 MiB.
+- TCP to Telrad's DICOM, HL7 and report ports, using TLS with Relay's client
+  certificate. Pairing supplies the host, the ports and the Telrad Relay CA
+  certificate; they are not configuration.
+  These connections are made directly and do not use an HTTP proxy.
+- HTTPS on TCP `443` to the enrolment endpoint, for pairing and renewal. These
+  requests honour the standard `HTTPS_PROXY` and `NO_PROXY` variables. A
+  systemd service does not inherit an interactive shell's environment, so set
+  proxy variables for the service itself. Proxy credentials are secrets.
 
-Outbound requests use system trust, HTTP keepalive, environment proxy
-resolution, a 10-second connect timeout, a 15-second TLS handshake timeout, and
-a 30-second response-header timeout. A systemd service does not inherit an
-interactive shell's environment; configure reviewed `HTTPS_PROXY` and
-`NO_PROXY` values in a protected service environment file. Proxy credentials
-are secrets and must not appear in tickets or logs.
+On the clinic network Relay listens on DICOM TCP `11112` and HL7 TCP `2575`,
+and connects to the report receiver at `reportHost`:`reportPort`. The report
+receiver connection is plain MLLP on the clinic network.
 
-## Configuration and pairing
+`listenAddress` must be an explicit IP address. The default `0.0.0.0` listens
+on every interface, so restrict the two ports in the host firewall to the PACS
+and RIS source addresses. The status endpoint listens on loopback only.
 
-Linux stores configuration and credentials in `/etc/telrad-relay`; Windows uses
-`%ProgramData%\Telrad\Relay`. Configuration schema `5` contains endpoint and
-listener settings but no bearer value. Credential record schema `2` contains a
-short-lived access credential, a rotating renewable credential, expiry metadata,
-and at most one pending operation ID. Existing schema-1 bearer records migrate
-automatically. `relay-credential.json` is protected by Unix mode `0600` under a
-`0700` directory or by the installer-managed Windows service ACL.
+Relay verifies the enrolment endpoint with the operating system's trust store.
+It verifies Telrad's DICOM, HL7 and report ports against the Telrad Relay CA
+only, which it receives when pairing and stores in `identity.json`; a TLS
+inspection proxy or an operating system root cannot stand in for it. Relay
+requires TLS 1.2 or later and ships no trust material of its own.
 
-The managed executable and update trust are administrator-owned. Linux stores
-them under `/usr/local/lib/telrad-relay`; Windows stores them under
-`%ProgramFiles%\Telrad Relay`. The service identity receives read/execute access
-but cannot replace the executable or change the trusted update key.
+## Configuration
 
-Run `telrad` after installation; `telrad auth` is the explicit equivalent. Both
-start the service when needed and authenticate the host through local management. Use `telrad enroll`
-to authenticate the host again; standalone enrollment and rotation require the
-service to be running. Relay displays a Telrad browser-approval
-URL and waits for an authorized clinic administrator. It keeps the device
-secret out of the URL, polls the configured HTTPS origin at the server-provided
-interval, and immediately redeems the short-lived pairing token returned after
-approval. Pairing verifies the returned Relay ID, credential grammar, protocol
-version, and content type, then derives the fixed control, DICOM, and HL7 paths
-locally from the configured pairing origin before a journaled two-file commit. Pairing recovery uses only locally derived
-managed filenames; malformed journals, unexpected credential paths, links, and
-reparse points require administrator repair and are never followed.
-For rollout compatibility, legacy returned endpoint fields are accepted only
-when every value exactly matches the locally derived destinations. The device
-secret and pairing token are never persisted or logged. Do not move a
-credential record between hosts; re-pair a replacement host.
+| Platform | Configuration file | Data directory |
+| --- | --- | --- |
+| Linux | `/etc/telrad-relay/relay.json` | `/var/lib/telrad-relay` |
+| Windows | `%ProgramData%\Telrad\Relay\relay.json` | `%ProgramData%\Telrad\Relay` |
 
-To rotate on demand:
+`relay.json` uses schema version `6`. Unknown fields are rejected, and a file
+with any other `schemaVersion` is refused; there is no migration from earlier
+schemas. Set the report receiver with
+[`telrad report-receiver`](#report-receiver); for other fields, change the
+file and run `telrad restart` to apply it.
+
+The installer writes `relay.json` only when it is absent and never changes it
+on a reinstall. On that first install it asks on the terminal for the report
+receiver host and port (default `2576`), re-asking until the answer is valid,
+or takes them from `TELRAD_RELAY_REPORT_HOST` and `TELRAD_RELAY_REPORT_PORT`
+(`-ReportHost` and `-ReportPort` on Windows). With no terminal and no host
+given, or when the question is left empty, it writes the placeholder
+`report-receiver.invalid` and prints a warning: Relay still pairs and forwards
+orders, but every report is answered `AE` and retried by Telrad until the
+receiver is set with [`telrad report-receiver`](#report-receiver).
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `schemaVersion` | `6` | must be `6` |
+| `enrolmentUrl` | built in | Telrad enrolment endpoint; HTTPS only |
+| `dataDir` | platform default | identity and ledger; absolute path |
+| `listenAddress` | `0.0.0.0` | clinic-facing bind address |
+| `dicomPort` | `11112` | clinic DICOM listener |
+| `hl7Port` | `2575` | clinic HL7 listener |
+| `reportHost` | required | clinic report receiver host |
+| `reportPort` | `2576` | clinic report receiver port |
+| `statusAddress` | `127.0.0.1:8425` | local status endpoint; loopback only |
+| `maxDicomConnections` | `128` | concurrent DICOM connections |
+| `maxHl7Connections` | `128` | concurrent HL7 connections |
+| `hl7MaxBytes` | `1048576` | largest HL7 message; at most 8 MiB |
+| `hl7FrameSeconds` | `30` | time allowed to finish a started MLLP frame |
+| `connectTimeoutSeconds` | `10` | dial timeout for Telrad and the report receiver |
+| `telradAckSeconds` | `60` | wait for Telrad's acknowledgement of a forwarded order |
+| `receiverAckSeconds` | `30` | wait for the report receiver's acknowledgement |
+| `idleTimeoutSeconds` | `900` | close a clinic connection idle this long |
+
+Every field can be overridden by an environment variable named
+`TELRAD_RELAY_` followed by the field name in upper snake case, for example
+`TELRAD_RELAY_REPORT_HOST` or `TELRAD_RELAY_HL7_MAX_BYTES`. Environment
+overrides are intended for containers; on a native install, prefer the file.
+`TELRAD_RELAY_ENROLMENT_URL` is for development only.
+
+The data directory holds these files, all readable only by the service account:
+
+- `identity.json`: the private key, certificate, Relay identifier, Telrad's
+  host and ports, and the Telrad Relay CA certificate;
+- `accessions.ledger`: the accession numbers of accepted orders, one per line;
+- `accept-backlog.json`: present only while a
+  [backlog acceptance](#backlog-acceptance) window is open.
+
+`accessions.ledger` holds no key material; back it up like other clinic data.
+Never copy `identity.json` to another host or restore it from a backup. See
+[replacing the Relay host](#replacing-the-relay-host).
+
+## Report receiver
 
 ```bash
-telrad rotate-credential
+telrad report-receiver
+sudo telrad report-receiver ris.clinic.local
+sudo telrad report-receiver 192.0.2.20:2576
+sudo telrad report-receiver '[2001:db8::20]:2576'
 ```
 
-Administrator authorization applies to this exact operation; the service performs
-the HTTPS request and credential update under its own identity. For lifecycle
-credentials, the command requests an immediate renewal; legacy credentials
-migrate instead.
+Without an argument the command shows the configured receiver, or
+`NOT CONFIGURED` while `reportHost` is the installer placeholder; anyone can
+run it. With `HOST[:PORT]` it sets the receiver. The host is a hostname or an
+IP address; an IPv6 address with a port is written `[ADDRESS]:PORT`. The port
+is 1 to 65535 and stays as it is when omitted. The command changes only
+`reportHost` and `reportPort` in `relay.json`, keeping the other fields, their
+order and the file's owner and permissions, and replaces the file atomically.
+If the service is running it is restarted, and the command waits until
+`status` shows the new receiver. On Windows, run it from an Administrator
+PowerShell.
 
-Routine lifecycle renewal is automatic and jittered before access expiry. Relay
-writes a random operation ID to the credential record before contacting Telrad,
-reuses that ID after timeouts or restarts, and atomically commits the returned
-generation. New requests adopt the committed access credential immediately.
-Already-started DICOM, HL7, report-return, and retrieval work is not canceled or
-rewritten. A rejected or expired renewable credential marks authentication as
-requiring attention and requires enrollment again.
+## Pairing
 
-## Status and degraded behavior
+The service starts unpaired, with only the status endpoint open. It generates a
+key, asks Telrad for a pairing request and publishes the verification link on
+its status endpoint. Run:
+
+```bash
+telrad
+```
+
+`telrad` prints the link. An authorised person opens it, signs in to Telrad,
+chooses the company and approves. The service polls Telrad until approval,
+stores its identity, opens the DICOM and HL7 listeners and starts report
+pickup. An expired or refused link is replaced by a new one; run `telrad` again
+to see it. Pairing requests never follow redirects.
+
+### Pairing again
+
+To pair the Relay again, for example after it was revoked or to move it to
+another company:
+
+```bash
+sudo telrad pair
+```
+
+On Windows, run `telrad pair` from an Administrator PowerShell. If the Relay is
+paired, the command shows its Relay identifier and certificate expiry and asks
+`Pair this Relay again? [y/N]`; `--yes` answers yes, and without a terminal
+`--yes` is required. It then stops the service, deletes only `identity.json`
+from the data directory, keeping `accessions.ledger` and any
+`accept-backlog.json`, starts the service and waits up to 30 seconds for the
+new pairing link, which it prints. An `identity.json` the service cannot read is
+replaced the same way.
+
+If the Relay is not paired, `pair` deletes nothing: it prints the current link,
+starting the service if it is stopped and restarting it if it shows a pairing
+problem instead of a link. If no link appears in time, `pair` prints the
+pairing problem and exits non-zero; the service keeps trying, so run `telrad`
+later to see the link.
+
+Telrad keeps the old Relay until a company administrator revokes it or chooses
+**Replace** on it in Telrad's settings.
+
+## Status and degraded behaviour
 
 ```bash
 telrad status
-telrad doctor
-telrad ready
 ```
 
-`status` prints four separate signals:
+`telrad` with no command does the same. It reads the service's local
+`/status` endpoint and prints:
 
-- ingest ready;
-- control connected;
-- report return available; and
-- authentication attention.
+- the state: `pairing` until paired, `ready`, or `degraded`;
+- the report receiver as `host:port`, or `report receiver: NOT CONFIGURED`
+  with the command that sets it while `reportHost` is the installer
+  placeholder (the JSON field `reportReceiverConfigured` is then `false`);
+- the end of an open backlog acceptance window;
+- the pairing link and any pairing problem while unpaired;
+- the Relay identifier, certificate expiry and any renewal problem;
+- whether the DICOM and HL7 listeners are open;
+- the Telrad host;
+- whether report pickup is connected, and the last pickup problem;
+- reports delivered, refused and failed since the service started;
+- the ledger entry count and any ledger write problem; and
+- active and refused connections per protocol.
 
-`ready` requires a fresh status record, bound ingest listeners, and healthy
-authentication. Temporary control loss does not make ingest unready, although
-report return is unavailable until control reconnects. An observed `401` or
-`403` requires a credential replacement or re-pairing.
+The command fails if the service is not running. Nothing it shows is clinical
+or secret.
 
-Linux logs are available through `journalctl --unit telrad-relay`; Windows uses
-the Application event log. Logs intentionally omit device secrets, pairing
-tokens, bearer credentials, authorization values, HL7 idempotency keys, DICOM
-UIDs, HL7 control IDs, message bodies, and cloud response bodies. Support
-records should contain only versions, bounded opaque IDs, byte counts,
-durations, outcomes, and error codes.
+`GET /readyz` on the status address returns `200` when the Relay is paired,
+both listeners are open, and the report pickup connection is up or was up
+within the last five minutes. Otherwise it returns `503`. `ready` in `status`
+means the same thing; `degraded` means paired but not ready.
 
-## DICOM and HL7 delivery behavior
+Loss of the pickup connection does not stop order or image forwarding. If
+Telrad's DICOM or HL7 port is unreachable, the clinic connection that needed it
+is closed and the others continue.
 
-The DICOM SCP accepts any valid called AE title, negotiates one supported
-transfer syntax per presentation context, and supports C-ECHO plus sequential
-C-STORE. `TELRAD` remains a suggested title; no AE title configuration is needed.
-Leading and trailing whitespace remains tolerated for existing senders.
-It writes a deterministic Part 10 header and streams unchanged dataset PDVs to
-HTTPS with a 1 GiB total cap. There is no spool, transcode, or internal replay.
-Each C-STORE is one distinct HTTPS request without an `Idempotency-Key`; Relay
-does not compare SOP Instance UIDs, checksums, or bytes with prior stores.
-Success is returned only for HTTP `201` with an accepted receipt containing a
-valid receipt ID. Network failures, `408`, `429`, and retryable `5xx` responses
-map to `0xA700`; malformed objects and permanent content rejection map to
-`0xA900`; malformed cloud success responses map to `0xC000`. Authentication
-failure marks attention, returns failure, and aborts the association. Relay
-never retries the consumed stream: a PACS retry is deliberately a new arrival
-whose definitive or non-definitive classification belongs to the cloud.
+## DICOM behaviour
 
-The MLLP listener validates UTF-8 and `MSH-10`, keeps the clinic connection open
-for sequential exchanges, and returns the exact correlated cloud ACK.
-Telrad owns order validation. Relay forwards the original message even when its
-authorization parser cannot issue a safe grant; see the
-[validation boundary](report-authorization.md#validation-boundary). A cloud
-application rejection leaves the MLLP connection available for a corrected order.
-Retry-eligible delivery failures use at most three attempts over 60 seconds with
-the same body and idempotency key. Other failures close the clinic exchange
-without a synthetic ACK.
+For each PACS connection Relay opens one TLS connection to Telrad's DICOM port
+and copies bytes both ways until either side closes. Relay does not parse the
+association: the PACS negotiates AE titles, presentation contexts and transfer
+syntaxes with Telrad directly and receives Telrad's C-STORE status unchanged.
+Relay does not spool, retry or deduplicate; retry belongs to the PACS.
 
-Report return uses authenticated HTTPS polling every three seconds while idle,
-and polls immediately after work. Telrad owns the durable delivery queue and
-issues one 60-second claim at a time. Relay sends the original HL7 message to
-the RIS and requires a correlated application `AA` before reporting success.
-The active result stays in memory and is retried until Telrad confirms its
-commit or the claim deadline expires. Graceful shutdown drains that attempt.
+Connections beyond `maxDicomConnections` are closed at accept. If Telrad cannot
+be reached, the PACS connection is closed without a response, which the PACS
+treats as an association failure. A connection with no traffic in either
+direction for `idleTimeoutSeconds` is closed.
 
-Relay has no report delivery ledger. If a report reaches the RIS but its result
-never reaches Telrad, Telrad can send the identical payload and `MSH-10` again.
-The RIS must tolerate that duplicate without duplicate clinical effects.
-An unexpected process exit loses the in-memory result; cloud lease expiry
-provides recovery without manual reconciliation of local state.
+## HL7 order behaviour
 
-## Schema-v3 polling cutover
+For each RIS connection Relay opens one TLS connection to Telrad's HL7 port and
+forwards MLLP frames both ways, byte for byte. Relay reads each frame
+completely before forwarding it. It closes both connections without an answer
+when:
 
-Upgrade Telrad's API, edge routing and all Relay installations together. The
-old WebSocket control endpoint is removed. Allow report attempts to drain,
-stop old Relays, deploy the API and edge, then start the new Relays. Ingest
-payload protocols and enrolled credentials remain unchanged.
+- bytes arrive outside a frame;
+- a frame exceeds `hl7MaxBytes`;
+- a started frame is not finished within `hl7FrameSeconds`;
+- Telrad does not acknowledge a forwarded message within `telradAckSeconds`;
+  or
+- the RIS sends nothing for `idleTimeoutSeconds`.
 
-Loading a valid schema-v3 configuration automatically writes schema v4,
-changing the derived control URL from WSS to HTTPS while preserving credentials,
-listener settings and update trust. Native installers also perform this upgrade.
-Existing `report-delivery-ledger.json`, `.db`, and recovery copies are ignored;
-they can be removed after the cutover. They are never read or migrated.
-Older binaries reject schema v4. A rollback across this cutover requires restoring
-the matching API and saved configuration together; do not downgrade a running
-installation or reuse stale ledger state.
+Telrad validates orders and composes every acknowledgement. Relay reads only
+`MSH-10`, `ORC-1` and each `OBR-18` from the RIS's messages and `MSA-1` and
+`MSA-2` from Telrad's replies, correlating by `MSA-2` = `MSH-10`.
 
-## Schema-v2 hard cutover
+When Telrad answers `AA` to a message whose `ORC-1` is `NW` or `XO`, Relay
+appends that message's `OBR-18` values to `accessions.ledger` and syncs the file
+before forwarding the `AA`. If the write fails, Relay closes both connections
+instead of forwarding the `AA` and shows the problem in `status`. The RIS
+resends, Telrad returns its stored acknowledgement, and Relay records the
+accession then. Ledger entries are never removed, including on cancellation.
 
-Stop the service and run the installer-provided migration or:
+## Report return
+
+Relay keeps one outbound TLS connection to Telrad's report port. It reconnects
+with backoff from 1 to 60 seconds, and reconnects after a certificate renewal.
+Telrad sends one report at a time and waits for Relay's acknowledgement before
+sending the next. For each report:
+
+- If the report has no `OBR-18`, or any `OBR-18` is not in the ledger, Relay
+  answers `AR` with `MSA-3` `Accession not ordered through this Relay` and
+  does not contact the RIS.
+- Otherwise Relay connects to `reportHost`:`reportPort`, sends the report
+  unchanged and returns the receiver's acknowledgement to Telrad byte for byte,
+  whether `AA`, `AE` or `AR`.
+- If the receiver cannot be reached or does not return a valid acknowledgement
+  for this message within `receiverAckSeconds`, Relay answers `AE`. Telrad
+  retries later.
+
+A report Relay cannot parse, or one without `MSH-10`, is a protocol error: Relay
+closes the pickup connection and reconnects.
+
+Relay keeps no delivery record. If the receiver accepted a report but the
+acknowledgement did not reach Telrad, Telrad sends the report again. The RIS
+must tolerate a duplicate message with the same `MSH-10`.
+
+If the ledger is lost, reports for earlier orders are refused until the RIS
+resends those orders or the clinic opens a backlog acceptance window.
+
+## Backlog acceptance
+
+To let Telrad deliver reports for orders the ledger does not know, for example
+after the Relay host is replaced, open a backlog acceptance window:
 
 ```bash
-telrad --config PATH migrate-config
+sudo telrad accept-backlog --hours 72
 ```
 
-Migration preserves listener settings, connection limits, report routing,
-timeouts, and Ed25519 update trust. It removes the old identity fields, clears
-paired URLs and Relay ID, sets `credentialPath`, and deletes the obsolete
-runtime identity and pending request files only after the new configuration is
-durable. The service remains disabled and must be re-paired. No legacy route,
-certificate migration, or compatibility mode is available.
+On Windows, run `telrad accept-backlog --hours 72` from an Administrator
+PowerShell; without root or Administrator rights the command refuses.
+`--hours` is 1 to 168 and defaults to 72. The command writes
+`accept-backlog.json` to the data directory and prints when the window ends;
+the running service picks it up with the next report, without a restart. Until
+then a report whose accession numbers are not all in the ledger is delivered,
+and each missing accession number is appended to `accessions.ledger` and synced
+before the report is sent to the RIS. The service logs one line per accession
+recorded this way, without the accession number. A report with no `OBR-18` is
+still refused. `telrad status` shows the window while it is open.
 
-## Updates and recovery
-
-Checking is deliberately separate from applying:
+The window closes by itself. To close it early:
 
 ```bash
-telrad update
+sudo telrad accept-backlog --cancel
 ```
 
-For a stable installation this fetches the stable manifest directly. For a
-testing installation it uses the public GitHub Releases feed to locate the
-newest immutable `testing-*` manifest. The feed is discovery only: Relay
-accepts the candidate only after its isolated channel signature verifies. The
-signed metadata binds the channel, version, release tag, source commit,
-platform, artifact URL, and SHA-256.
+Open a window only when the clinic expects Telrad to deliver a backlog: while
+it is open, Relay accepts every report Telrad sends for the company, not only
+those ordered through this Relay.
 
-The check does not download an executable, load credentials, recover transactions,
-migrate configuration, or change the host. Review the
-printed source and release for that exact version. Then approve only that
-version from an ordinary terminal; Relay requests sudo/UAC for the restricted
-installation action:
+## Replacing the Relay host
+
+If the Relay host is lost or rebuilt, replace it; never restore
+`identity.json`:
+
+1. Install Relay on the replacement. If a backup of `accessions.ledger`
+   exists, stop the service, copy it into the data directory owned by the
+   service account with mode `0600`, and start the service again.
+2. Pair the replacement as new.
+3. Have a company administrator choose **Replace** on the old Relay in
+   Telrad's settings. Telrad revokes the old Relay and moves every outstanding
+   and failed report delivery onto the replacement, which it retries.
+4. Run `sudo telrad accept-backlog` on the new host so those reports are
+   accepted and their accessions recorded.
+
+Telrad retries a report Relay answers with `AR` or `AE` on its normal backoff,
+about eight attempts over two days.
+
+## Certificate renewal and re-pairing
+
+The certificate lasts 90 days. From 30 days before expiry the service generates
+a new key and requests a new certificate over HTTPS, signing the request with
+the current key. The response may also replace the Telrad Relay CA
+certificate.
+On success it replaces key and certificate together. A failure is retried daily
+and shown in `status` as a renewal problem. Keep the enrolment endpoint
+reachable so renewal can succeed.
+
+An expired certificate cannot be renewed; the Relay must be paired again. An
+`identity.json` written by an earlier version without the Telrad Relay CA
+certificate is also treated as unpaired: the service logs why and shows a new
+pairing link. Run `sudo telrad pair` to get the link; it restarts a service
+whose certificate expired while running. Telrad revokes a Relay by refusing its
+certificate; [pairing again](#pairing-again) is also the recovery from
+revocation.
+
+## Upgrades
+
+Rerun the installer for the version you want. To install a specific release,
+use its tagged URL, for example:
 
 ```bash
-telrad update VERSION
+curl -fsSL https://github.com/telrad-au/relay/releases/download/vX.Y.Z/install.sh | sudo sh
 ```
 
-Relay refuses the request if `VERSION` no longer matches the signed manifest,
-is already installed, or would be a downgrade. It also requires the running
-Relay to be ready before beginning. The approved artifact is independently
-verified with Ed25519 and SHA-256, then Relay stops accepting new work, drains
-active exchanges, stops the service, transactionally replaces the executable,
-starts the service, verifies the exact new version and service-owned diagnostics,
-and rolls back on failure. The CLI downloads the candidate before requesting
-elevation. The restricted installer independently rechecks its signature, channel,
-platform, digest, and exact version against protected trust. The trusted installer
-owns the transaction; the command waits for readiness or completed rollback on
-both Linux and Windows. There is a brief ingest interruption during replacement; this is not a
-zero-downtime upgrade.
+On Windows, run the release's `install.ps1` the same way from an Administrator
+PowerShell. The installer keeps the configuration and data directory, so the
+Relay stays paired and keeps its ledger. Relay does not check for or apply
+updates itself.
 
-Relay does not poll for or automatically apply releases. The administrator-owned
-trust file and executable are outside the service identity's writable paths.
-Stable and testing installations pin different public keys and expected
-channels. They cannot cross channels through `telrad update`; doing that
-requires a separately reviewed installer.
-HTTPS update downloads may follow redirects because they are unauthenticated
-and independently signature-verified; authenticated Relay requests never do.
+## Shutdown
 
-During shutdown or an approved update restart, Relay stops accepting new work
-and drains existing exchanges for the configured service grace period. An
-interrupted streamed DICOM upload must be resent by the originating system;
-Relay does not retain a recoverable copy.
+On stop, Relay closes its listeners, lets in-flight DICOM and HL7 connections
+and any report delivery already under way finish for up to 90 seconds, then
+exits. It never acknowledges a report it has not delivered.
 
-## Local management and privilege boundaries
+## Removal
 
-Ordinary `version`, `status`, `doctor`, `ready`, and update checks do not elevate.
-Read-only checks never recover pairing state or migrate an old configuration.
-If the service is stopped, `status` still queries the OS, while service-owned
-credential diagnostics report that they are unavailable. `ready` fails until the
-clinical runtime is ready.
+```bash
+sudo telrad uninstall
+sudo telrad uninstall --purge
+```
 
-The native service can run unpaired with only local management available. It
-opens DICOM and HL7 listeners after successful pairing. Re-pairing drains active
-work before replacing the live identity. Disconnecting during that drain resumes
-the previous identity; credential renewal preserves live credential
-adoption without rebinding listeners.
+On Windows, run `telrad uninstall` from an Administrator PowerShell. The
+command lists what it removes and keeps and asks before removing; `--yes`
+answers yes, and without a terminal `--yes` is required.
 
-Linux uses `/run/telrad-relay/management.sock`, authenticating OS peer credentials.
-Windows uses local named pipes with separate diagnostic and administrator access.
-Clients verify the server identity; Windows administrator clients permit
-identification only, preventing the service from borrowing their elevated token.
-No management TCP port is opened. The daemon keeps its existing dedicated
-identity and Linux `NoNewPrivileges=true` setting.
+By default it removes the service, the program and the `telrad` command and
+keeps the configuration and data directory, so reinstalling resumes with the
+same pairing, report receiver and ledger:
 
-The CLI announces the exact administrator action even when sudo/UAC authorization
-is cached. A restricted native entry point handles only fixed service actions,
-local credential-operation authorization, migration, and signed update installation.
-It accepts no configuration paths or service-selected executable targets.
-Custom `--config` commands operate with the caller's existing permissions and
-cannot request managed update application.
+- Linux: it stops and disables `telrad-relay.service`, removes the unit,
+  `/usr/local/lib/telrad-relay` and the `/usr/local/bin/telrad` link, and
+  reloads systemd. `/etc/telrad-relay`, `/var/lib/telrad-relay` and the
+  `telrad-relay` user stay.
+- Windows: it stops and deletes the `TelradRelay` service and its event log
+  source, removes the `TelradRelay-DICOM` and `TelradRelay-HL7` firewall rules
+  and the machine `PATH` entry, and removes `%ProgramFiles%\Telrad Relay`.
+  Windows cannot delete a running program, so the command first moves its own
+  `telrad.exe` to the temporary directory, where that copy is deleted once the
+  command exits or at the next restart. `%ProgramData%\Telrad\Relay` stays.
 
-Installation metadata (`installation.json`), staged updates, update journals, and
-rollback copies live beside the administrator-owned executable. The old
-service-writable `installation.json` is ignored. Managed credentials must remain
-at `relay-credential.json` in the configuration directory; equivalent absolute
-paths are normalized. Other managed layouts require explicit repair before upgrade.
+`--purge` also deletes the configuration and data directory, including the
+Relay's private key and the ledger, and on Linux the `telrad-relay` user. If
+`relay.json` sets `dataDir` to another directory, `uninstall` never deletes
+it, with or without `--purge`; it names that directory and the command that
+deletes it. Purge
+only when the Relay is being retired, and ask a company administrator to revoke
+it in Telrad so its certificate is no longer accepted.
 
-All installer variants use the same native implementation for fixed-target writes,
-permissions, migration, and rollback. Installer repairs touch only named managed
-files and preserve existing enrollment and deliberately stopped services. A failed
-installation restores the previous service configuration and CLI/enablement links,
-and removes any firewall rules, PATH entry, or event source it just created.
-Windows backup files receive private ACLs at creation, before their contents are
-written. Directory access rejects links in any path component. Fresh
-installations start with local management available. Legacy schema-v2 cleanup
-removes only known Relay certificate filenames, never paths supplied by the old
-configuration. Unexpected custom legacy files require separate administrator cleanup.
-An installation with pending pairing state must first let its existing service
-complete recovery. An invalid journal requires administrator repair; the installer
-leaves it untouched.
+If `telrad` is already gone, remove Relay by hand on Linux with:
 
-An interrupted updater leaves its protected transaction evidence in place and
-refuses another application. Repair it with a reviewed native installer; do not
-edit a journal to nominate recovery paths or execute a staged file manually.
+```bash
+sudo systemctl disable --now telrad-relay.service
+sudo rm -rf /etc/systemd/system/telrad-relay.service /usr/local/lib/telrad-relay /usr/local/bin/telrad
+sudo systemctl daemon-reload
+# Only when retiring the Relay:
+sudo rm -rf /etc/telrad-relay /var/lib/telrad-relay && sudo userdel telrad-relay
+```
 
-## Retrieval configuration
+On Windows, stop and delete the `TelradRelay` service (`sc.exe delete
+TelradRelay`), remove the two firewall rules and
+`%ProgramFiles%\Telrad Relay` and its machine `PATH` entry, and, only when
+retiring the Relay, `%ProgramData%\Telrad\Relay`.
 
-Schema v4 upgrades to v5 with push unchanged. For permit-key provisioning, source
-restrictions, recovery and rollback, see [PACS retrieval](pacs-retrieval.md). Native
-permission repair preserves and protects `permit-signing-key.json`.
+## Logs
 
-## Order-authorized reports
+Linux logs go to the journal:
 
-Report authorization is always enabled in both image modes. Relay automatically
-creates and retains `report-signing-key.json` beside its credential file; no
-additional settings or key-provisioning commands are required. Preserve the
-protected state directory across restarts and upgrades. See
-[report authorization](report-authorization.md) for the order flow and recovery.
+```bash
+journalctl --unit telrad-relay
+```
+
+Windows logs go to the Application event log under the source `TelradRelay`.
+
+Logs contain no message bytes, DICOM UIDs, HL7 control IDs, accession numbers,
+patient identifiers, pairing tokens or key material. They may contain
+connection and report counts, error categories, the Relay identifier and
+certificate expiry.

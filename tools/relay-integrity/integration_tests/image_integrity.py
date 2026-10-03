@@ -1,9 +1,9 @@
-"""Synthetic fixtures and comparisons independent of the ingest implementation."""
+"""Synthetic fixtures and comparisons independent of the TLS proxy implementation."""
 
+import struct
 from dataclasses import dataclass
 from hashlib import sha256
 from io import BytesIO
-import struct
 
 import numpy as np
 import pydicom
@@ -172,29 +172,30 @@ def fixtures():
     return result
 
 
-def verify(case: ImageCase, wire: bytes, landed: bytes, expected_file_hash: str):
+def verify(
+    case: ImageCase, sent: bytes, received: bytes, transfer_syntax: str, command
+):
+    """Compare raw DIMSE datasets first; decode only to verify generated pixels."""
     source = dataset_bytes(encode(case.dataset))
-    require(source == wire, f"{case.name}: sender changed dataset")
+    require(source == sent, f"{case.name}: sender changed dataset")
+    require(sent == received, f"{case.name}: dataset bytes changed")
     require(
-        digest(landed) == expected_file_hash,
-        f"{case.name}: received object SHA-256 mismatch",
+        transfer_syntax == str(case.dataset.file_meta.TransferSyntaxUID),
+        f"{case.name}: negotiated transfer syntax changed",
     )
-    received = pydicom.dcmread(BytesIO(landed))
-    meta = received.file_meta
     for key, expected in (
-        ("MediaStorageSOPClassUID", case.dataset.SOPClassUID),
-        ("MediaStorageSOPInstanceUID", case.dataset.SOPInstanceUID),
-        ("TransferSyntaxUID", case.dataset.file_meta.TransferSyntaxUID),
+        ("sop_class_uid", str(case.dataset.SOPClassUID)),
+        ("sop_instance_uid", str(case.dataset.SOPInstanceUID)),
     ):
-        require(
-            getattr(meta, key, None) == expected,
-            f"{case.name}: file meta {key} mismatch",
-        )
-    require(dataset_bytes(landed) == wire, f"{case.name}: dataset bytes changed")
-    # Decode outside Relay and ingest. Compare all frames to the generated source
-    # array, not just to another decoding of the potentially faulty fixture.
-    decoded = received.pixel_array
-    if int(received.NumberOfFrames) == 1:
+        require(command.get(key) == expected, f"{case.name}: command {key} changed")
+    syntax = pydicom.uid.UID(transfer_syntax)
+    decoded_dataset = pydicom.filereader.read_dataset(
+        BytesIO(received), syntax.is_implicit_VR, syntax.is_little_endian
+    )
+    decoded_dataset.file_meta = FileMetaDataset()
+    decoded_dataset.file_meta.TransferSyntaxUID = syntax
+    decoded = decoded_dataset.pixel_array
+    if int(decoded_dataset.NumberOfFrames) == 1:
         decoded = decoded[np.newaxis, ...]
     require(
         decoded.shape == case.pixels.shape and np.array_equal(decoded, case.pixels),
@@ -203,10 +204,22 @@ def verify(case: ImageCase, wire: bytes, landed: bytes, expected_file_hash: str)
     return {
         "case": case.name,
         "status": "passed",
-        "transferSyntax": str(meta.TransferSyntaxUID),
-        "bytes": len(landed),
-        "datasetSha256": digest(wire),
-        "objectSha256": digest(landed),
+        "transferSyntax": transfer_syntax,
+        "datasetBytes": len(received),
+        "datasetSha256": digest(received),
         "frameSha256": [digest(frame.tobytes()) for frame in decoded],
         "frames": len(decoded),
+    }
+
+
+def verify_streams(sent, received):
+    """Concatenate transport reads/writes; TCP/TLS segmentation can differ."""
+    require(bool(sent["sent"]) and bool(sent["received"]), "missing sender stream")
+    require(sent["sent"] == received["received"], "forward stream bytes changed")
+    require(received["sent"] == sent["received"], "reverse stream bytes changed")
+    return {
+        "forwardBytes": len(sent["sent"]),
+        "forwardSha256": digest(sent["sent"]),
+        "reverseBytes": len(sent["received"]),
+        "reverseSha256": digest(sent["received"]),
     }

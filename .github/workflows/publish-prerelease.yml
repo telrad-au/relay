@@ -19,7 +19,7 @@ env:
 
 jobs:
     build_native:
-        name: Build signed development native artifacts
+        name: Build development native artifacts
         runs-on: ubuntu-24.04
         timeout-minutes: 45
         environment: development-release
@@ -82,58 +82,26 @@ jobs:
                       exit 1
                   fi
 
-            - name: Build signed development native artifacts
+            - name: Build development native artifacts
               id: native
               env:
-                  ENROLLMENT_URL: ${{ vars.RELAY_DEV_ENROLLMENT_URL }}
-                  SIGNING_KEY_BASE64: ${{ secrets.RELAY_DEV_UPDATE_SIGNING_KEY_BASE64 }}
-                  TRUSTED_PUBLIC_KEY_BASE64: ${{ secrets.RELAY_DEV_UPDATE_PUBLIC_KEY_BASE64 }}
-                  TAG: ${{ github.ref_name }}
-              run: |
-                  set -euo pipefail
-                  : "${ENROLLMENT_URL:?development-release must define RELAY_DEV_ENROLLMENT_URL}"
-                  : "${SIGNING_KEY_BASE64:?development-release must define RELAY_DEV_UPDATE_SIGNING_KEY_BASE64}"
-                  : "${TRUSTED_PUBLIC_KEY_BASE64:?development-release must define RELAY_DEV_UPDATE_PUBLIC_KEY_BASE64}"
-
-                  signing_dir="$(mktemp -d "$RUNNER_TEMP/relay-development-signing.XXXXXX")"
-                  signing_key="$signing_dir/update-private.pem"
-                  trusted_public_key="$signing_dir/update-public.pem"
-                  cleanup() {
-                      rm -f "$signing_key" "$trusted_public_key"
-                      rmdir "$signing_dir"
-                  }
-                  trap cleanup EXIT
-
-                  printf '%s' "$SIGNING_KEY_BASE64" | base64 --decode > "$signing_key"
-                  printf '%s' "$TRUSTED_PUBLIC_KEY_BASE64" | base64 --decode > "$trusted_public_key"
-                  chmod 0600 "$signing_key" "$trusted_public_key"
-
-                  version="${TAG#v}"
-                  release_base_url="https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG"
-                  RELAY_RELEASE_DIR="dist/$version" \
-                  RELAY_UPDATE_SIGNING_KEY="$signing_key" \
-                  RELAY_UPDATE_TRUSTED_PUBLIC_KEY="$trusted_public_key" \
-                      scripts/build-development-release.sh \
-                      "$version" \
-                      "$release_base_url" \
-                      "$release_base_url/stable.json" \
-                      "$ENROLLMENT_URL"
-                  echo "enrollment_url=$ENROLLMENT_URL" >> "$GITHUB_OUTPUT"
-
-            - name: Generate development release checksums
-              env:
+                  ENROLMENT_URL: ${{ vars.RELAY_DEV_ENROLLMENT_URL }}
                   VERSION: ${{ steps.tag.outputs.version }}
               run: |
                   set -euo pipefail
-                  (
-                      cd "dist/$VERSION"
-                      for artifact in *; do
-                          [[ -f "$artifact" ]] || continue
-                          sha256sum "$artifact"
-                      done | LC_ALL=C sort --key=2 > SHA256SUMS
-                  )
+                  : "${ENROLMENT_URL:?development-release must define RELAY_DEV_ENROLLMENT_URL}"
+                  [[ "$ENROLMENT_URL" == https://*/api/relay/enrolments ]] || {
+                      echo "RELAY_DEV_ENROLLMENT_URL must be an HTTPS /api/relay/enrolments endpoint." >&2
+                      exit 1
+                  }
+                  # Prerelease native binaries default to the development
+                  # enrolment endpoint; the container keeps production.
+                  RELAY_ENROLMENT_URL="$ENROLMENT_URL" \
+                  RELAY_RELEASE_DIR="dist/$VERSION" \
+                      scripts/build-release.sh "$VERSION"
+                  echo "enrollment_url=$ENROLMENT_URL" >> "$GITHUB_OUTPUT"
 
-            - name: Upload signed development native artifacts
+            - name: Upload development native artifacts
               uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
               with:
                   name: development-native-${{ github.ref_name }}
@@ -185,7 +153,7 @@ jobs:
                       exit 1
                   fi
 
-            - name: Download signed development native artifacts
+            - name: Download development native artifacts
               uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
               with:
                   name: development-native-${{ github.ref_name }}
@@ -228,13 +196,13 @@ jobs:
                   VERSION: ${{ github.ref_name }}
               run: |
                   set -euo pipefail
-                  pairing_url="$(jq --raw-output .pairingUrl packaging/docker-relay.json)"
-                  [[ "$pairing_url" == https://*/v1/relay/pairing-enrollments ]] || {
-                      echo "Container pairing URL is not a complete HTTPS Relay pairing endpoint." >&2
+                  enrolment_url="$(jq --raw-output .enrolmentUrl packaging/docker-relay.json)"
+                  [[ "$enrolment_url" == https://*/api/relay/enrolments ]] || {
+                      echo "Container enrolment URL is not a complete HTTPS Relay enrolment endpoint." >&2
                       exit 1
                   }
                   echo "created=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
-                  echo "pairing_url=$pairing_url" >> "$GITHUB_OUTPUT"
+                  echo "enrolment_url=$enrolment_url" >> "$GITHUB_OUTPUT"
                   echo "version=${VERSION#v}" >> "$GITHUB_OUTPUT"
 
             - name: Generate image tags and labels
@@ -328,7 +296,7 @@ jobs:
 
             - name: Create GitHub prerelease
               env:
-                  CONTAINER_PAIRING_URL: ${{ steps.release.outputs.pairing_url }}
+                  CONTAINER_ENROLMENT_URL: ${{ steps.release.outputs.enrolment_url }}
                   DIGEST: ${{ steps.build.outputs.digest }}
                   GH_TOKEN: ${{ github.token }}
                   REPOSITORY_PRIVATE: ${{ github.event.repository.private }}
@@ -343,7 +311,7 @@ jobs:
                       --prerelease \
                       --verify-tag \
                       --title "Telrad Relay $VERSION (prerelease)" \
-                      --notes "${visibility^} prerelease for integration testing. Linux native artifacts and the trust-pinned install.sh are published directly at $release_base_url. This prerelease remains pinned to its exact-tag update manifest and does not automatically advance to a newer prerelease. The Windows prerelease artifact remains checksum-only and is not a production installer. Container: $IMAGE:$VERSION@$DIGEST. Its default pairing endpoint is $CONTAINER_PAIRING_URL and can be overridden at runtime. Promotion metadata: container-promotion.json."
+                      --notes "${visibility^} prerelease for integration testing. Install it with this release's install.sh or install.ps1, which default to $VERSION without a version argument; native binaries default to the development enrolment endpoint and are verified by SHA256SUMS only (the Windows binary is not Authenticode-signed). Container: $IMAGE:$VERSION@$DIGEST. Its default enrolment endpoint is $CONTAINER_ENROLMENT_URL and can be overridden with TELRAD_RELAY_ENROLMENT_URL. Promotion metadata: container-promotion.json."
                   release_state="$(gh release view "$TAG" --json isPrerelease,tagName --jq '[.tagName, .isPrerelease] | @tsv')"
                   [[ "$release_state" == "$TAG"$'\ttrue' ]] || {
                       echo "GitHub did not report $TAG as a prerelease." >&2
@@ -352,7 +320,7 @@ jobs:
 
             - name: Summarize prerelease
               env:
-                  CONTAINER_PAIRING_URL: ${{ steps.release.outputs.pairing_url }}
+                  CONTAINER_ENROLMENT_URL: ${{ steps.release.outputs.enrolment_url }}
                   DIGEST: ${{ steps.build.outputs.digest }}
                   REPOSITORY_PRIVATE: ${{ github.event.repository.private }}
                   REVISION: ${{ steps.promotion.outputs.revision }}
@@ -374,10 +342,10 @@ jobs:
                       echo "- Source revision: \`$REVISION\`"
                       echo "- Eligible stable version: \`$STABLE\`"
                       echo "- Platforms: \`linux/amd64\`, \`linux/arm64\`"
-                      echo "- Development installer: \`$release_base_url/install.sh\`"
-                      echo "- Pinned update manifest: \`$release_base_url/stable.json\`"
-                      echo "- Development pairing endpoint: \`$ENROLLMENT_URL\`"
-                      echo "- Default container pairing endpoint: \`$CONTAINER_PAIRING_URL\`"
+                      echo "- Linux installer: \`$release_base_url/install.sh\` with version \`$VERSION\`"
+                      echo "- Windows installer: \`$release_base_url/install.ps1\` with \`-Version $VERSION\`"
+                      echo "- Native enrolment endpoint: \`$ENROLLMENT_URL\`"
+                      echo "- Default container enrolment endpoint: \`$CONTAINER_ENROLMENT_URL\`"
                       echo "- Promotion metadata: \`container-promotion.json\`"
                       echo "- Visibility: $visibility"
                   } >> "$GITHUB_STEP_SUMMARY"
