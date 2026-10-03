@@ -95,3 +95,22 @@ contract tests check main build selection against synthetic release listings.
 
 Building and testing release artifacts does not authorise publishing, tagging
 or promoting them.
+
+## Dedicated image integrity suite
+
+[Image integrity tests](image-integrity.md) run the actual Relay process as a
+plain-TCP-to-mutual-TLS proxy between a real C-STORE sender and a synthetic DICOM
+SCP. They compare exact source, sent and received dataset bytes and every decoded
+pixel in every frame, cover repeated SOP Instance UIDs and fragmented payloads,
+and verify withheld and failed upstream C-STORE responses. Complete bidirectional
+DICOM PDU stream comparisons also cover association negotiation, commands,
+dataset fragments, status responses and release without parsing inside Relay.
+
+The dedicated workflow runs native Linux and Windows processes and the actual
+release Dockerfile image, retaining separate synthetic JSON evidence. Certificates
+and client identities are generated at runtime and trusted through the temporary
+`identity.json`; the suite does not change operating-system trust. The Docker
+target keeps the packaged entrypoint, non-root identity and hardened filesystem.
+It does not exercise pairing, installed services or production downstream storage.
+Those boundaries remain covered by the separate tests described above and by
+real deployment qualification.

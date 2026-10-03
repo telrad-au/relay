@@ -4,3 +4,8 @@
 *.test
 relay.env
 .DS_Store
+
+# Python integration-test artifacts
+__pycache__/
+.pytest_cache/
+.venv*/
